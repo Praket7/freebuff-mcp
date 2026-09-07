@@ -1,6 +1,9 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { createHash } from 'node:crypto';
 import { Capabilities, ProjectSummary, ThreadDetail, ThreadSummary, Json } from './types.js';
 import { assertSafeId, blocked, redact, safeProjectPath, sanitizeFreebuff } from './security.js';
 import { CliPtyManager, findFreebuffCli, findLatestCliConversationId } from './pty.js';
@@ -24,19 +27,23 @@ export interface Runtime {
 }
 
 async function readJson(file: string): Promise<Json | undefined> { try { return JSON.parse(await fs.readFile(file, 'utf8')) as Json; } catch { return undefined; } }
+const execFileAsync = promisify(execFile);
 function envRoot(): string { return process.env.FREEBUFF_PROJECT_ROOT ?? process.cwd(); }
-function cliProjectKey(root: string): string { return process.env.FREEBUFF_PROJECT_KEY ?? path.basename(root); }
-function cliChatsRoot(root: string): string { return path.join(os.homedir(), '.config', 'manicode', 'projects', cliProjectKey(root), 'chats'); }
+function asRecord(value: unknown): Record<string, unknown> | null { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null; }
+function asString(value: unknown): string | undefined { return typeof value === 'string' && value.length > 0 ? value : undefined; }
+function cliProjectKey(root: string): string { return process.env.FREEBUFF_PROJECT_KEY ?? `${path.basename(root)}--${createHash('sha256').update(path.resolve(root)).digest('hex').slice(0, 12)}`; }
+function cliChatsRoots(root: string): string[] { const base = path.join(os.homedir(), '.config', 'manicode', 'projects'); return [path.join(base, cliProjectKey(root), 'chats'), path.join(base, path.basename(root), 'chats')]; }
 async function readLocalJson(file: string): Promise<any | undefined> { try { return JSON.parse(await fs.readFile(file, 'utf8')); } catch { return undefined; } }
 async function cliHistory(root: string): Promise<Array<{ id: string; meta: any; messages: Json[]; state: any }>> {
-  const chats = cliChatsRoot(root); const out: Array<{ id: string; meta: any; messages: Json[]; state: any }> = [];
-  try {
+  const out: Array<{ id: string; meta: any; messages: Json[]; state: any }> = [];
+  for (const chats of cliChatsRoots(root)) try {
     for (const entry of await fs.readdir(chats, { withFileTypes: true })) {
       if (!entry.isDirectory() || !/^[A-Za-z0-9._:-]{1,200}$/.test(entry.name)) continue;
       const dir = path.join(chats, entry.name); const meta = await readLocalJson(path.join(dir, 'chat-meta.json')); const messages = await readLocalJson(path.join(dir, 'chat-messages.json')); const state = await readLocalJson(path.join(dir, 'run-state.json'));
       if (meta && Array.isArray(messages)) out.push({ id: entry.name, meta, messages: sanitizeFreebuff(messages) as Json[], state: sanitizeFreebuff(state ?? {}) });
     }
   } catch { /* CLI history may not exist yet */ }
+  
   return out.sort((a, b) => a.id < b.id ? 1 : -1);
 }
 function candidates(): string[] { const home = os.homedir(); return [path.join(home, '.config', 'manicode', 'credentials.json'), path.join(home, 'AppData', 'Roaming', 'manicode', 'credentials.json')]; }
@@ -60,6 +67,12 @@ async function discoverDesktopUrls(): Promise<string[]> {
       for (const match of text.matchAll(/(?:https?:\/\/)?127\.0\.0\.1:(\d+)/g)) urls.add(`http://127.0.0.1:${match[1]}`);
     } catch { /* try the next platform-specific location */ }
   }
+  try {
+    const ports = process.platform === 'win32'
+      ? (await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "Get-NetTCPConnection -State Listen -LocalAddress 127.0.0.1 | Select-Object -ExpandProperty LocalPort"], { timeout: 2000 })).stdout
+      : (await execFileAsync('sh', ['-c', "command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP -sTCP:LISTEN -a -4 -F n | sed -n 's/^n.*:\\([0-9][0-9]*\\)$/\\1/p'"], { timeout: 2000 })).stdout;
+    for (const port of ports.match(/\b[0-9]{2,5}\b/g) ?? []) { const n = Number(port); if (n > 0 && n < 65536) urls.add(`http://127.0.0.1:${n}`); }
+  } catch { /* process/IPC fallback is best-effort on systems without the native listener utility */ }
   return [...urls].reverse();
 }
 async function discoverDesktopUrl(): Promise<string | null> {
@@ -76,10 +89,10 @@ export class DesktopOrchestratorRuntime implements Runtime {
     const c = new AbortController(); const timer = setTimeout(() => c.abort(), 5000);
     try { const r = await fetch(new URL(pathname, this.base), { method, signal: c.signal, headers: { 'content-type': 'application/json', accept: 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) }); if (!r.ok) throw new Error(`Freebuff returned HTTP ${r.status}`); return await r.json() as T; } finally { clearTimeout(timer); }
   }
-  async capabilities(): Promise<Capabilities> { if (this.caps) return this.caps; const base = this.explicitBase ?? await discoverDesktopUrl(); if (!base) { this.caps = { product:'unknown', signedIn:'unknown', orchestrator:false, readOnly:true, endpoints:[], notes:['No Freebuff Desktop orchestrator was discovered. Checked platform-specific dynamic-port logs and FREEBUFF_ORCHESTRATOR_URL.'] }; return this.caps; } this.base = new URL(base); try { const projects = await this.request<{projects?: unknown[]}>('GET','/api/projects'); if (!projects || typeof projects !== 'object' || !Array.isArray(projects.projects)) throw new Error('invalid /api/projects response'); this.caps = { product:'desktop', signedIn:'unknown', orchestrator:true, readOnly:true, endpoints:['/api/projects','/api/thread/:id','/api/thread/:id/attachment'], notes:[`Live Desktop API responded at ${base} with ${projects.projects.length} project roots. Desktop writes remain disabled because no verified Freebuff launch authorization contract is available.`] }; } catch (error) { this.caps = { product:'unknown', signedIn:'unknown', orchestrator:false, readOnly:true, endpoints:[], notes:[`Desktop discovery reached ${base}, but its response was invalid or unavailable: ${error instanceof Error ? error.message : 'unknown error'}`] }; } return this.caps; }
-  async listProjects(): Promise<ProjectSummary[]> { const x = await this.request<unknown>('GET','/api/projects'); if (!x || typeof x !== 'object' || Array.isArray(x) || !Array.isArray((x as { projects?: unknown }).projects)) throw new Error('Invalid Freebuff /api/projects response'); return ((x as { projects: unknown[] }).projects).filter((p): p is Record<string, Json> => !!p && typeof p === 'object' && !Array.isArray(p) && typeof (p as Record<string, unknown>).path === 'string').map((p) => ({ id: String(p.path), path: String(p.path), name: path.basename(String(p.path)), metadata: redact(p) as Json })); }
-  async listThreads(projectId?: string): Promise<ThreadSummary[]> { const projects = await this.listProjects(); return projects.filter(p=>!projectId||p.id===projectId||p.path===projectId).flatMap(p=>{const raw=p.metadata&&typeof p.metadata==='object'&&!Array.isArray(p.metadata)?(p.metadata as Record<string,Json>):{}; const threads=Array.isArray(raw.threads)?raw.threads:[]; return threads.filter((t):t is Record<string,Json>=>!!t&&typeof t==='object'&&!Array.isArray(t)).map(t=>({id:String(t.id),projectId:p.id,title:typeof t.title==='string'?t.title:undefined,state:typeof t.turnState==='string'?t.turnState:undefined,model:typeof t.model==='string'?t.model:undefined,metadata:redact(t) as Json}));}); }
-  async getThread(id:string):Promise<ThreadDetail>{return sanitizeFreebuff(await this.request('GET',`/api/thread/${encodeURIComponent(assertSafeId(id))}`)) as ThreadDetail;}
+  async capabilities(): Promise<Capabilities> { if (this.caps) return this.caps; const base = this.explicitBase ?? await discoverDesktopUrl(); if (!base) { this.caps = { product:'unknown', signedIn:'unknown', orchestrator:false, readOnly:true, endpoints:[], notes:['No Freebuff Desktop orchestrator was discovered. Checked process listeners, platform logs, and FREEBUFF_ORCHESTRATOR_URL.'] }; return this.caps; } this.base = new URL(base); try { const projects = await this.request<unknown>('GET','/api/projects'); const record=asRecord(projects); if (!record || !Array.isArray(record.projects)) throw new Error('invalid /api/projects response'); this.caps = { product:'desktop', signedIn:'unknown', orchestrator:true, readOnly:true, endpoints:['/api/projects','/api/thread/:id','/api/thread/:id/attachment'], notes:[`Live Desktop API responded at ${base} with ${record.projects.length} project roots. Desktop writes remain disabled because no verified Freebuff launch authorization contract is available.`] }; } catch (error) { this.caps = { product:'unknown', signedIn:'unknown', orchestrator:false, readOnly:true, endpoints:[], notes:[`Desktop discovery reached ${base}, but its response was invalid or unavailable: ${error instanceof Error ? error.message : 'unknown error'}`] }; } return this.caps; }
+  async listProjects(): Promise<ProjectSummary[]> { const record=asRecord(await this.request<unknown>('GET','/api/projects')); if (!record || !Array.isArray(record.projects)) throw new Error('Invalid Freebuff /api/projects response'); return record.projects.flatMap((value) => { const p=asRecord(value); const projectPath=asString(p?.path); return projectPath ? [{ id:projectPath, path:projectPath, name:path.basename(projectPath), metadata:redact(p as Record<string, Json>) as Json }] : []; }); }
+  async listThreads(projectId?: string): Promise<ThreadSummary[]> { const projects = await this.listProjects(); return projects.filter(p=>!projectId||p.id===projectId||p.path===projectId).flatMap(p=>{const raw=asRecord(p.metadata); const threads=Array.isArray(raw?.threads)?raw.threads:[]; return threads.flatMap((value)=>{const t=asRecord(value); const id=asString(t?.id); if(!id)return []; return [{id,projectId:p.id,title:asString(t?.title),state:asString(t?.turnState),model:asString(t?.model),metadata:redact(t as Record<string, Json>) as Json}];});}); }
+  async getThread(id:string):Promise<ThreadDetail>{const value=asRecord(await this.request('GET',`/api/thread/${encodeURIComponent(assertSafeId(id))}`));if(!value)throw new Error('Invalid Freebuff thread response');const threadId=asString(value.id)??assertSafeId(id);return {id:threadId,projectId:asString(value.projectId),title:asString(value.title),state:asString(value.turnState),model:asString(value.model),messages:Array.isArray(value.messages)?sanitizeFreebuff(value.messages) as Json[]:undefined,activeWork:value.activeWork===undefined?undefined:sanitizeFreebuff(value.activeWork) as Json,metadata:redact(value as Record<string, Json>) as Json};}
   async getMessages(id:string):Promise<Json>{const t=await this.getThread(id); return sanitizeFreebuff(t.messages ?? []) as Json;}
   async activeWork(id?:string):Promise<Json>{const threads=await this.listThreads();return threads.filter(t=>(!id||t.id===id)&&t.state&&t.state!=='idle') as unknown as Json;}
   async listFiles(projectId:string, relative='.') { const p=(await this.listProjects()).find(x=>x.id===projectId||x.path===projectId); if(!p) throw new Error('Project not found'); const root=await fs.realpath(p.path); const dir=relative==='.'?root:await fs.realpath(path.resolve(root,relative)); const rel=path.relative(root,dir); if(rel.startsWith('..')||path.isAbsolute(rel)||rel.split(path.sep).some(part=>blocked.test(part))) throw new Error('Path escapes the Freebuff project'); const entries=await fs.readdir(dir,{withFileTypes:true}); return entries.filter(e=>e.isFile()&&!blocked.test(e.name)).map(e=>path.relative(root,path.join(dir,e.name))); }
