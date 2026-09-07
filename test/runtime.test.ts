@@ -23,6 +23,28 @@ test('Desktop runtime probes /api/projects and never infers write authorization 
   }
 });
 
+test('Desktop runtime enables writes only after /healthz verifies the dynamic launch id', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousLaunch = process.env.FREEBUFF_LAUNCH_ID;
+  process.env.FREEBUFF_LAUNCH_ID = 'dynamic-launch-id';
+  const seen: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith('/healthz')) { seen.push(String((init?.headers as Record<string, string>)?.['x-freebuff-launch-id'])); return new Response(JSON.stringify({ ok:true }), { status:200 }); }
+    if (url.endsWith('/api/projects')) return new Response(JSON.stringify({ projects: [] }), { status:200 });
+    throw new Error(`unexpected ${url}`);
+  };
+  try {
+    const runtime = new DesktopOrchestratorRuntime('http://127.0.0.1:55354');
+    const caps = await runtime.capabilities();
+    assert.equal(caps.readOnly, false);
+    assert.deepEqual(seen, ['dynamic-launch-id']);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousLaunch === undefined) delete process.env.FREEBUFF_LAUNCH_ID; else process.env.FREEBUFF_LAUNCH_ID = previousLaunch;
+  }
+});
+
 test('explicit CLI mode takes precedence over Desktop discovery', async () => {
   const previous = process.env.FREEBUFF_MCP_CLI_MODE;
   process.env.FREEBUFF_MCP_CLI_MODE = 'pty';
