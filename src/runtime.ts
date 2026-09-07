@@ -58,8 +58,30 @@ function desktopLogCandidates(): string[] {
     path.join(home, '.local', 'share', 'Freebuff', 'logs', 'orchestrator-stderr.log'),
   ].filter((value, index, values) => value && values.indexOf(value) === index);
 }
-async function discoverDesktopUrls(): Promise<string[]> {
-  if (process.env.FREEBUFF_ORCHESTRATOR_URL) return [process.env.FREEBUFF_ORCHESTRATOR_URL];
+function desktopReadinessCandidates(): string[] {
+  const home = os.homedir();
+  return [
+    path.join(process.env.APPDATA ?? '', 'Freebuff', 'orchestrator.json'),
+    path.join(process.env.APPDATA ?? '', 'Freebuff', 'readiness.json'),
+    path.join(home, 'Library', 'Application Support', 'Freebuff', 'orchestrator.json'),
+    path.join(home, 'Library', 'Application Support', 'Freebuff', 'readiness.json'),
+    path.join(home, '.config', 'Freebuff', 'orchestrator.json'),
+    path.join(home, '.config', 'Freebuff', 'readiness.json'),
+  ].filter((value, index, values) => value && values.indexOf(value) === index);
+}
+type DesktopCandidate = { url: string; launchId?: string };
+async function discoverDesktopCandidates(): Promise<DesktopCandidate[]> {
+  const candidates: DesktopCandidate[] = [];
+  if (process.env.FREEBUFF_ORCHESTRATOR_URL) candidates.push({ url: process.env.FREEBUFF_ORCHESTRATOR_URL, launchId: process.env.FREEBUFF_LAUNCH_ID });
+  for (const file of desktopReadinessCandidates()) {
+    try {
+      const value = asRecord(JSON.parse(await fs.readFile(file, 'utf8')));
+      const port = typeof value?.port === 'number' || typeof value?.port === 'string' ? Number(value.port) : undefined;
+      const url = asString(value?.url) ?? (port && port > 0 && port < 65536 ? `http://127.0.0.1:${port}` : undefined);
+      const launchId = asString(value?.launchId) ?? asString(value?.['launch-id']) ?? asString(value?.launch_id);
+      if (url) candidates.push({ url, launchId });
+    } catch { /* readiness metadata is optional */ }
+  }
   const urls = new Set<string>();
   for (const log of desktopLogCandidates()) {
     try {
@@ -73,23 +95,26 @@ async function discoverDesktopUrls(): Promise<string[]> {
       : (await execFileAsync('sh', ['-c', "command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP -sTCP:LISTEN -a -4 -F n | sed -n 's/^n.*:\\([0-9][0-9]*\\)$/\\1/p'"], { timeout: 2000 })).stdout;
     for (const port of ports.match(/\b[0-9]{2,5}\b/g) ?? []) { const n = Number(port); if (n > 0 && n < 65536) urls.add(`http://127.0.0.1:${n}`); }
   } catch { /* process/IPC fallback is best-effort on systems without the native listener utility */ }
-  return [...urls].reverse();
+  return [...urls].reverse().map((url) => ({ url }));
 }
-async function discoverDesktopUrl(): Promise<string | null> {
-  for (const url of await discoverDesktopUrls()) {
-    try { const response = await fetch(new URL('/api/projects', url), { signal: AbortSignal.timeout(1500), headers: { accept: 'application/json' } }); if (response.ok) return url; } catch { /* try the next discovered endpoint */ }
+async function discoverDesktopCandidate(): Promise<DesktopCandidate | null> {
+  const seen = new Set<string>();
+  for (const candidate of await discoverDesktopCandidates()) {
+    if (seen.has(candidate.url)) continue;
+    seen.add(candidate.url);
+    try { const response = await fetch(new URL('/api/projects', candidate.url), { signal: AbortSignal.timeout(1500), headers: { accept: 'application/json', ...(candidate.launchId ? { 'x-freebuff-launch-id': candidate.launchId } : {}) } }); if (response.ok) return candidate; } catch { /* try the next discovered endpoint */ }
   }
   return null;
 }
 
 export class DesktopOrchestratorRuntime implements Runtime {
-  private base: URL; private explicitBase?: string; private caps?: Capabilities;
+  private base: URL; private explicitBase?: string; private launchId?: string; private caps?: Capabilities;
   constructor(base?: string) { this.explicitBase = base; this.base = new URL(base ?? 'http://127.0.0.1'); }
   private async request<T>(method: string, pathname: string, body?: unknown): Promise<T> {
     const c = new AbortController(); const timer = setTimeout(() => c.abort(), 5000);
-    try { const r = await fetch(new URL(pathname, this.base), { method, signal: c.signal, headers: { 'content-type': 'application/json', accept: 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) }); if (!r.ok) throw new Error(`Freebuff returned HTTP ${r.status}`); return await r.json() as T; } finally { clearTimeout(timer); }
+    try { const r = await fetch(new URL(pathname, this.base), { method, signal: c.signal, headers: { 'content-type': 'application/json', accept: 'application/json', ...(this.launchId ? { 'x-freebuff-launch-id': this.launchId } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) }); if (!r.ok) throw new Error(`Freebuff returned HTTP ${r.status}`); return await r.json() as T; } finally { clearTimeout(timer); }
   }
-  async capabilities(): Promise<Capabilities> { if (this.caps) return this.caps; const base = this.explicitBase ?? await discoverDesktopUrl(); if (!base) { this.caps = { product:'unknown', signedIn:'unknown', orchestrator:false, readOnly:true, endpoints:[], notes:['No Freebuff Desktop orchestrator was discovered. Checked process listeners, platform logs, and FREEBUFF_ORCHESTRATOR_URL.'] }; return this.caps; } this.base = new URL(base); try { const projects = await this.request<unknown>('GET','/api/projects'); const record=asRecord(projects); if (!record || !Array.isArray(record.projects)) throw new Error('invalid /api/projects response'); this.caps = { product:'desktop', signedIn:'unknown', orchestrator:true, readOnly:true, endpoints:['/api/projects','/api/thread/:id','/api/thread/:id/attachment'], notes:[`Live Desktop API responded at ${base} with ${record.projects.length} project roots. Desktop writes remain disabled because no verified Freebuff launch authorization contract is available.`] }; } catch (error) { this.caps = { product:'unknown', signedIn:'unknown', orchestrator:false, readOnly:true, endpoints:[], notes:[`Desktop discovery reached ${base}, but its response was invalid or unavailable: ${error instanceof Error ? error.message : 'unknown error'}`] }; } return this.caps; }
+  async capabilities(): Promise<Capabilities> { if (this.caps) return this.caps; const candidate = this.explicitBase ? { url:this.explicitBase, launchId:process.env.FREEBUFF_LAUNCH_ID } : await discoverDesktopCandidate(); if (!candidate) { this.caps = { product:'unknown', signedIn:'unknown', orchestrator:false, readOnly:true, endpoints:[], notes:['No Freebuff Desktop orchestrator was discovered. Checked process listeners, readiness metadata, platform logs, and FREEBUFF_ORCHESTRATOR_URL.'] }; return this.caps; } this.base = new URL(candidate.url); this.launchId = candidate.launchId; try { const projects = await this.request<unknown>('GET','/api/projects'); const record=asRecord(projects); if (!record || !Array.isArray(record.projects)) throw new Error('invalid /api/projects response'); let writable = false; if (this.launchId) { try { const health = await this.request<unknown>('GET','/healthz'); writable = Boolean(asRecord(health)?.ok === true); } catch { writable = false; } } this.caps = { product:'desktop', signedIn:'unknown', orchestrator:true, readOnly:!writable, endpoints:['/api/projects','/api/thread/:id','/api/thread/:id/attachment',...(writable ? ['/api/thread/:id/message','/api/thread/:id/stop','/api/thread/:id/resume','/api/thread/:id/agent','/api/thread/:id/effort'] : [])], notes:[`Live Desktop API responded at ${candidate.url} with ${record.projects.length} project roots.`, writable ? 'Desktop launch authorization was verified through /healthz; mutation tools are enabled.' : 'Desktop connected; writes unavailable because launch authorization could not be verified.'] }; } catch (error) { this.caps = { product:'unknown', signedIn:'unknown', orchestrator:false, readOnly:true, endpoints:[], notes:[`Desktop discovery reached ${candidate.url}, but its response was invalid or unavailable: ${error instanceof Error ? error.message : 'unknown error'}`] }; } return this.caps; }
   async listProjects(): Promise<ProjectSummary[]> { const record=asRecord(await this.request<unknown>('GET','/api/projects')); if (!record || !Array.isArray(record.projects)) throw new Error('Invalid Freebuff /api/projects response'); return record.projects.flatMap((value) => { const p=asRecord(value); const projectPath=asString(p?.path); return projectPath ? [{ id:projectPath, path:projectPath, name:path.basename(projectPath), metadata:redact(p as Record<string, Json>) as Json }] : []; }); }
   async listThreads(projectId?: string): Promise<ThreadSummary[]> { const projects = await this.listProjects(); return projects.filter(p=>!projectId||p.id===projectId||p.path===projectId).flatMap(p=>{const raw=asRecord(p.metadata); const threads=Array.isArray(raw?.threads)?raw.threads:[]; return threads.flatMap((value)=>{const t=asRecord(value); const id=asString(t?.id); if(!id)return []; return [{id,projectId:p.id,title:asString(t?.title),state:asString(t?.turnState),model:asString(t?.model),metadata:redact(t as Record<string, Json>) as Json}];});}); }
   async getThread(id:string):Promise<ThreadDetail>{const value=asRecord(await this.request('GET',`/api/thread/${encodeURIComponent(assertSafeId(id))}`));if(!value)throw new Error('Invalid Freebuff thread response');const threadId=asString(value.id)??assertSafeId(id);return {id:threadId,projectId:asString(value.projectId),title:asString(value.title),state:asString(value.turnState),model:asString(value.model),messages:Array.isArray(value.messages)?sanitizeFreebuff(value.messages) as Json[]:undefined,activeWork:value.activeWork===undefined?undefined:sanitizeFreebuff(value.activeWork) as Json,metadata:redact(value as Record<string, Json>) as Json};}
