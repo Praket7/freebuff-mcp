@@ -20,7 +20,20 @@ freebuff-mcp doctor
 
 The package includes its compiled `dist` files and builds them automatically when packed.
 
-## Configure Codex for Freebuff CLI mode
+## Configure Codex for Desktop-first discovery
+
+By default the bridge probes the locally running Freebuff Desktop first, then falls back to the CLI if Desktop is unavailable. This requires no CLI-mode flag:
+
+```toml
+[mcp_servers.freebuff]
+command = 'freebuff-mcp'
+args = ['serve']
+enabled = true
+```
+
+Desktop discovery is read-only until Freebuff documents a verifiable launch-authorization contract. Use the explicit CLI configuration below when you need bridge-owned prompt injection.
+
+## Configure Codex for explicit Freebuff CLI mode
 
 Add this server to `~/.codex/config.toml`. On Windows, this is usually `C:\Users\YOUR_NAME\.codex\config.toml`:
 
@@ -33,6 +46,8 @@ enabled = true
 [mcp_servers.freebuff.env]
 FREEBUFF_MCP_CLI_MODE = 'pty'
 FREEBUFF_PROJECT_ROOT = 'C:\Users\YOUR_NAME\Documents\FreeBuff WORK'
+# Set this when two project roots share the same basename.
+# FREEBUFF_PROJECT_KEY = 'FreeBuff WORK'
 ```
 
 Restart Codex and ask it to call `freebuff_status`, then `list_threads`.
