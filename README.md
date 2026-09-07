@@ -56,6 +56,10 @@ Restart Codex and ask it to call `freebuff_status`, then `list_threads`.
 
 CLI mode can start a managed Freebuff session, inject prompts, monitor live output, discover the local conversation ID, resume persisted CLI chats, read visible history, list safe project files, and read individual project files. Reasoning changes are supported through Freebuff slash commands. Model changes require Freebuff's interactive new-session model picker.
 
+### Live Desktop progress
+
+When Desktop is discovered, the bridge subscribes to its read-only `/api/events` stream. Use `get_thread_progress` with a thread ID to poll bounded, in-memory progress events. Pass `afterSequence` from the previous response for incremental reads. `watch_thread` provides bounded long-polling for up to 30 seconds. These views can show turn state, assistant updates, tools, command summaries, file changes, and completion/failure while a task is running. `get_thread` remains the saved snapshot and may include a `live` summary; event history is intentionally not persisted. CLI mode reports Desktop live events as unavailable and continues to expose PTY output.
+
 ## Run directly with npx
 
 The same server can be configured without a global install:
