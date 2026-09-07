@@ -4,12 +4,13 @@
 | --- | --- |
 | Node.js runtime | Node 20 or newer |
 | MCP stdio | Implemented |
-| Desktop `/v1/info` probe | Implemented, not live verified in this environment |
-| Projects and threads | Implemented against validated community-research route shapes |
+| Desktop dynamic `/api/*` discovery | Implemented and live verified |
+| Projects, threads, visible messages | Implemented and live verified |
 | Safe project file reads | Implemented and unit tested |
-| Model, stop, resume writes | Implemented as capability-gated calls |
+| Model, stop, resume writes | Tool definitions present, blocked by current Desktop authorization |
 | Attachments | Not yet implemented |
-| Remote relay | Not yet implemented |
+| Authenticated Streamable HTTP relay | Implemented, loopback by default |
+| Cloudflare deployment | Not included, requires deployment credentials and an HTTPS tunnel |
 | CLI PTY and SQLite history | Not yet implemented |
-| Live Freebuff verification | Blocked because no Freebuff app was available |
+| Live Freebuff write verification | Blocked by current Desktop authorization |
 
