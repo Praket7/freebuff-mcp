@@ -18,10 +18,11 @@ export async function findFreebuffCli(): Promise<string | null> {
 }
 
 export async function findLatestCliConversationId(cwd: string, minimumMtimeMs = 0): Promise<string | null> {
-  const chats = path.join(os.homedir(), '.config', 'manicode', 'projects', process.env.FREEBUFF_PROJECT_KEY ?? path.basename(cwd), 'chats');
-  try {
+  const key = process.env.FREEBUFF_PROJECT_KEY ?? `${path.basename(cwd)}--${(await import('node:crypto')).createHash('sha256').update(path.resolve(cwd)).digest('hex').slice(0, 12)}`;
+  const roots = [path.join(os.homedir(), '.config', 'manicode', 'projects', key, 'chats'), path.join(os.homedir(), '.config', 'manicode', 'projects', path.basename(cwd), 'chats')];
+  const candidates: Array<{ id: string; mtimeMs: number }> = [];
+  for (const chats of roots) try {
     const entries = await fs.readdir(chats, { withFileTypes: true });
-    const candidates: Array<{ id: string; mtimeMs: number }> = [];
     for (const entry of entries) {
       if (!entry.isDirectory() || !/^[A-Za-z0-9._:-]{1,200}$/.test(entry.name)) continue;
       const dir = path.join(chats, entry.name);
@@ -29,9 +30,9 @@ export async function findLatestCliConversationId(cwd: string, minimumMtimeMs = 
       const mtimeMs = Math.max(meta?.mtimeMs ?? 0, state?.mtimeMs ?? 0, log?.mtimeMs ?? 0);
       if (log && mtimeMs >= minimumMtimeMs) candidates.push({ id: entry.name, mtimeMs });
     }
-    candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
-    return candidates[0]?.id ?? null;
-  } catch { return null; }
+  } catch { /* try the legacy project key */ }
+  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return candidates[0]?.id ?? null;
 }
 
 export class CliPtyManager {
