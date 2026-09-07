@@ -31,8 +31,14 @@ export class CliPtyManager {
     this.sessions.set(safeId, state);
     term.onData((data) => { state.output = (state.output + data).slice(-2_000_000); });
     term.onExit(({ exitCode }) => { state.exited = true; state.exitCode = exitCode; });
-    await new Promise<void>((resolve) => setTimeout(resolve, 1500));
-    if (/Freebuff is already running/i.test(state.output)) { term.kill(); this.sessions.delete(safeId); throw new Error('FREEBUFF_CLI_ALREADY_RUNNING'); }
+    const deadline = Date.now() + 12_000;
+    while (Date.now() < deadline && !/Enter a coding task or \/ for commands/i.test(state.output) && !/Not authenticated|Press ENTER to login/i.test(state.output)) await new Promise<void>((resolve) => setTimeout(resolve, 250));
+    if (/Freebuff is already running/i.test(state.output) && process.env.FREEBUFF_CLI_TAKEOVER === '1') {
+      term.write('\r');
+      const takeoverDeadline = Date.now() + 8_000;
+      while (Date.now() < takeoverDeadline && !/Enter a coding task or \/ for commands/i.test(state.output)) await new Promise<void>((resolve) => setTimeout(resolve, 250));
+    }
+    if (/Freebuff is already running/i.test(state.output) && !/Enter a coding task or \/ for commands/i.test(state.output)) { term.kill(); this.sessions.delete(safeId); throw new Error('FREEBUFF_CLI_ALREADY_RUNNING'); }
     if (/Not authenticated|Press ENTER to login/i.test(state.output)) { term.kill(); this.sessions.delete(safeId); throw new Error('FREEBUFF_CLI_NOT_AUTHENTICATED'); }
     return { id: safeId, pid: term.pid, output: state.output, exited: state.exited, exitCode: state.exitCode };
   }
@@ -41,7 +47,13 @@ export class CliPtyManager {
     const session = await this.start(id, cwd, continueId);
     const state = this.sessions.get(assertSafeId(id));
     if (!state || state.exited) throw new Error('FREEBUFF_CLI_SESSION_EXITED');
-    state.term.write(text.replace(/[\r\n]+/g, ' ') + '\r');
+    await new Promise<void>((resolve) => setTimeout(resolve, 300));
+    const clean = text.replace(/[\r\n]+/g, ' ');
+    state.term.write('\x15');
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    state.term.write(`\x1b[200~${clean}\x1b[201~`);
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    state.term.write('\r');
     return { id: session.id, pid: state.term.pid, output: state.output, exited: state.exited, exitCode: state.exitCode };
   }
   stop(id: string): CliSessionSnapshot {
