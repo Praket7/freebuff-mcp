@@ -13,4 +13,5 @@
 | Cloudflare deployment | Optional only for remote HTTP access; not required for local use |
 | CLI PTY and local chat history | Implemented; CLI writes require the managed PTY |
 | Live Freebuff Desktop write verification | `/healthz` launch-ID handshake; otherwise read-only |
+| Live Desktop progress | `/api/events` SSE with polling via `get_thread_progress` and bounded `watch_thread`; in-memory only |
 
