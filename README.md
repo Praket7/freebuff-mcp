@@ -1,37 +1,97 @@
 # freebuff-mcp
 
-`freebuff-mcp` is a third party, open source MCP bridge for a locally installed Freebuff Desktop orchestrator. It keeps the local app as the source of truth and exposes only semantic, bounded tools.
+An MCP bridge for a locally installed and signed-in Freebuff CLI or Desktop installation. It gives an MCP client bounded access to Freebuff sessions, local CLI history, live CLI output, and safe project-file reads.
 
-## Install
+## Requirements
+
+- Windows, macOS, or Linux
+- Node.js 20 or newer
+- Freebuff CLI or Desktop installed and signed in
+- Codex CLI or another MCP-compatible client
+
+The bridge uses the Freebuff installation on the same computer. It does not share credentials or expose your chats to other users.
+
+## Install from npm
+
+Once the package is available on npm:
 
 ```bash
-npx freebuff-mcp@latest install
+npm install --global freebuff-mcp
+freebuff-mcp doctor
 ```
 
-The initial release also runs directly with `npx -y freebuff-mcp@latest`. Use `freebuff-mcp doctor` to see whether a compatible local orchestrator is available.
+The package includes its compiled `dist` files and builds them automatically when packed.
 
-For a remote MCP client, start the authenticated HTTP transport locally:
+## Configure Codex for Freebuff CLI mode
+
+Add this server to `~/.codex/config.toml`. On Windows, this is usually `C:\Users\YOUR_NAME\.codex\config.toml`:
+
+```toml
+[mcp_servers.freebuff]
+command = 'freebuff-mcp'
+args = ['serve']
+enabled = true
+
+[mcp_servers.freebuff.env]
+FREEBUFF_MCP_CLI_MODE = 'pty'
+FREEBUFF_PROJECT_ROOT = 'C:\Users\YOUR_NAME\Documents\FreeBuff WORK'
+```
+
+Restart Codex and ask it to call `freebuff_status`, then `list_threads`.
+
+CLI mode can start a managed Freebuff session, inject prompts, monitor live output, discover the local conversation ID, resume persisted CLI chats, read visible history, list safe project files, and read individual project files. Reasoning changes are supported through Freebuff slash commands. Model changes require Freebuff's interactive new-session model picker.
+
+## Run directly with npx
+
+After publication, the same server can be configured without a global install:
+
+```toml
+[mcp_servers.freebuff]
+command = 'npx'
+args = ['-y', 'freebuff-mcp@latest', 'serve']
+enabled = true
+
+[mcp_servers.freebuff.env]
+FREEBUFF_MCP_CLI_MODE = 'pty'
+FREEBUFF_PROJECT_ROOT = 'C:\Users\YOUR_NAME\Documents\FreeBuff WORK'
+```
+
+## Build from GitHub
+
+Until the npm package is published, build it locally:
+
+```bash
+git clone https://github.com/Praket7/freebuff-mcp.git
+cd freebuff-mcp
+pnpm install
+pnpm build
+```
+
+Then point Codex at `dist/src/cli.js`:
+
+```toml
+[mcp_servers.freebuff]
+command = 'node'
+args = ['C:\path\to\freebuff-mcp\dist\src\cli.js', 'serve']
+enabled = true
+
+[mcp_servers.freebuff.env]
+FREEBUFF_MCP_CLI_MODE = 'pty'
+FREEBUFF_PROJECT_ROOT = 'C:\Users\YOUR_NAME\Documents\FreeBuff WORK'
+```
+
+## HTTP transport
+
+For a remote MCP client, run the authenticated local HTTP transport:
 
 ```bash
 set FREEBUFF_MCP_TOKEN=<long-random-value>
-npx -y freebuff-mcp@latest serve-http
+freebuff-mcp serve-http
 ```
 
-It binds to `127.0.0.1:8788` by default. Put it behind a trusted HTTPS tunnel before connecting a remote client. Never expose the HTTP port directly to the Internet.
+It listens on `127.0.0.1:8788` by default. Put it behind a trusted HTTPS tunnel before connecting remotely; never expose the port directly to the Internet.
 
-The bridge does not need an API key. It never returns or forwards Freebuff credentials. If Desktop is unavailable, read tools remain safe and write tools report that the runtime is read only.
-
-## What is verified
-
-The public Freebuff source is MIT licensed. The community `freebuff-bridge` repository was used only as a research lead because it has no repository license file. Its documented localhost route names informed independent contract validation and are not copied code.
-
-The installed environment verified live read access to Freebuff Desktop projects, threads, visible messages, and project files. The current Desktop build rejects independent mutation callers with HTTP 403, so this bridge reports read-only mode and does not attempt to bypass that protection. Attachments, model switching, reasoning controls, and remote ChatGPT operation are not claimed as live write capabilities. See [docs/compatibility.md](docs/compatibility.md).
-
-## Security
-
-Project reads are canonicalized, symlink-aware, confined to a discovered project root, and deny common secret files. There is no shell, SQL, arbitrary HTTP, or arbitrary code tool. See [SECURITY.md](SECURITY.md) and [PRIVACY.md](PRIVACY.md).
-
-## Development
+## Development and verification
 
 ```bash
 pnpm install
@@ -41,3 +101,4 @@ pnpm build
 pnpm pack:check
 ```
 
+The bridge rejects unsafe identifiers and paths, redacts credential-like fields, and never returns Freebuff credentials.
