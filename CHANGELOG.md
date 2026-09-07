@@ -4,6 +4,8 @@
 
 - Add normalized, redacted, bounded live Desktop progress via `/api/events`.
 - Add `get_thread_progress` polling and bounded `watch_thread` long-polling.
+- Add phase labels, progress summaries, active-thread watching, fresh readiness metadata discovery, and a safe Codex install helper.
+- Omit detailed reasoning deltas from normalized live progress by default.
 - Keep live event history in memory and stop the event client on runtime disposal.
 
 ## 0.1.4
