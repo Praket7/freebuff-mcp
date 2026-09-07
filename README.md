@@ -13,8 +13,6 @@ The bridge uses the Freebuff installation on the same computer. It does not shar
 
 ## Install from npm
 
-Once the package is available on npm:
-
 ```bash
 npm install --global freebuff-mcp
 freebuff-mcp doctor
@@ -43,7 +41,7 @@ CLI mode can start a managed Freebuff session, inject prompts, monitor live outp
 
 ## Run directly with npx
 
-After publication, the same server can be configured without a global install:
+The same server can be configured without a global install:
 
 ```toml
 [mcp_servers.freebuff]
@@ -58,7 +56,7 @@ FREEBUFF_PROJECT_ROOT = 'C:\Users\YOUR_NAME\Documents\FreeBuff WORK'
 
 ## Build from GitHub
 
-Until the npm package is published, build it locally:
+For development or a local source build, build it from GitHub:
 
 ```bash
 git clone https://github.com/Praket7/freebuff-mcp.git
@@ -102,3 +100,4 @@ pnpm pack:check
 ```
 
 The bridge rejects unsafe identifiers and paths, redacts credential-like fields, and never returns Freebuff credentials.
+
