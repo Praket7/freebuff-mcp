@@ -77,7 +77,7 @@ export class CliPtyRuntime implements Runtime {
   async activeWork(id?:string): Promise<Json> { return id ? redact(this.manager.snapshot(id)) as Json : []; }
   async listFiles(_projectId:string): Promise<string[]> { return []; }
   async readFile(_projectId:string, _relative:string): Promise<{path:string;content:string}> { throw new Error('CLI runtime does not expose project file reads'); }
-  async sendMessage(id:string,text:string): Promise<Json> { return redact(await this.manager.send(id,text,this.root,id)) as Json; }
+  async sendMessage(id:string,text:string): Promise<Json> { return redact(await this.manager.send(id,text,this.root)) as Json; }
   async stop(id:string): Promise<Json> { return redact(this.manager.stop(id)) as Json; }
   async resume(id:string): Promise<Json> { return redact(await this.manager.send(id,'/resume',this.root,id)) as Json; }
   async listModels(): Promise<Json> { return { note:'Use the Freebuff CLI /model picker inside a managed PTY session.' }; }
@@ -86,4 +86,3 @@ export class CliPtyRuntime implements Runtime {
 }
 export async function detectRuntime(): Promise<Runtime> { if(process.env.FREEBUFF_MCP_CLI_MODE==='pty' && await findFreebuffCli())return new CliPtyRuntime(); const url=await discoverDesktopUrl(); const r=new DesktopOrchestratorRuntime(url); if((await r.capabilities()).orchestrator && process.env.FREEBUFF_LAUNCH_ID)return r; return new ReadOnlyRuntime(url); }
 export async function localInstallInfo(): Promise<Json> { const found: Array<{path:string;signedIn:boolean}> = []; for(const c of candidates()){const j=await readJson(c); const o=j&&typeof j==='object'&&!Array.isArray(j)?j as Record<string,Json>:undefined; const d=o?.default&&typeof o.default==='object'&&!Array.isArray(o.default)?o.default as Record<string,Json>:undefined; if(o) found.push({path:c,signedIn:Boolean(d?.authToken||o.authToken)});} return {cli: Boolean(await findFreebuffCli()),credentials:found}; }
-
