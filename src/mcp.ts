@@ -1,5 +1,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { createServer as createHttpServer, IncomingMessage, ServerResponse } from 'node:http';
+import { timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { detectRuntime, Runtime } from './runtime.js';
 
@@ -22,4 +25,38 @@ export function createServer(runtime: Runtime): McpServer { const s=new McpServe
   write('set_reasoning','Set the reasoning effort for an existing thread when supported.',{threadId:z.string(),effort:z.string().nullable()},(a)=>runtime.setReasoning(a.threadId,a.effort));
   return s; }
 export async function runStdio(){const server=createServer(await detectRuntime());await server.connect(new StdioServerTransport());}
+function authorized(req: IncomingMessage): boolean {
+  const expected = process.env.FREEBUFF_MCP_TOKEN;
+  if (!expected) return false;
+  const supplied = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : '';
+  const a = Buffer.from(supplied); const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+async function body(req: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) { chunks.push(Buffer.from(chunk)); if (Buffer.concat(chunks).length > 2_000_000) throw new Error('Request too large'); }
+  const raw = Buffer.concat(chunks).toString('utf8');
+  return raw ? JSON.parse(raw) : undefined;
+}
+export async function runHttp(): Promise<void> {
+  const runtime = await detectRuntime();
+  const host = process.env.FREEBUFF_MCP_HOST ?? '127.0.0.1';
+  const port = Number(process.env.FREEBUFF_MCP_PORT ?? 8788);
+  const server = createHttpServer(async (req, res) => {
+    if (req.url === '/healthz' && req.method === 'GET') { res.writeHead(200, {'content-type':'application/json'}); res.end(JSON.stringify({ok:true,readOnly:(await runtime.capabilities()).readOnly})); return; }
+    if (req.url !== '/mcp' || req.method !== 'POST') { res.writeHead(404, {'content-type':'application/json'}); res.end(JSON.stringify({error:'not_found'})); return; }
+    if (!authorized(req)) { res.writeHead(401, {'www-authenticate':'Bearer'}); res.end(JSON.stringify({error:'unauthorized'})); return; }
+    try {
+      const mcp = createServer(runtime);
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      await mcp.connect(transport);
+      await transport.handleRequest(req, res, await body(req));
+      res.on('close', () => { void transport.close(); void mcp.close(); });
+    } catch (error) {
+      if (!res.headersSent) { res.writeHead(400, {'content-type':'application/json'}); res.end(JSON.stringify({error: error instanceof Error ? error.message : 'invalid_request'})); }
+    }
+  });
+  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, host, () => resolve()); });
+  console.error(`freebuff-mcp HTTP listening on http://${host}:${port}/mcp`);
+}
 
