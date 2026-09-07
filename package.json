@@ -1,6 +1,6 @@
 {
   "name": "freebuff-mcp",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "A secure MCP bridge for locally installed Freebuff Desktop and CLI sessions.",
   "keywords": ["mcp", "freebuff", "codex", "ai", "cli"],
   "repository": { "type": "git", "url": "https://github.com/Praket7/freebuff-mcp.git" },
