@@ -42,7 +42,7 @@ export class CliPtyManager {
     if (/Not authenticated|Press ENTER to login/i.test(state.output)) { term.kill(); this.sessions.delete(safeId); throw new Error('FREEBUFF_CLI_NOT_AUTHENTICATED'); }
     return { id: safeId, pid: term.pid, output: state.output, exited: state.exited, exitCode: state.exitCode };
   }
-  async send(id: string, text: string, cwd = process.cwd(), continueId = id): Promise<CliSessionSnapshot> {
+  async send(id: string, text: string, cwd = process.cwd(), continueId?: string): Promise<CliSessionSnapshot> {
     if (!text || text.length > 100_000) throw new Error('Message must be 1 to 100000 characters');
     const session = await this.start(id, cwd, continueId);
     const state = this.sessions.get(assertSafeId(id));
@@ -65,4 +65,3 @@ export class CliPtyManager {
   snapshot(id: string): CliSessionSnapshot { const state = this.sessions.get(assertSafeId(id)); if (!state) throw new Error('FREEBUFF_CLI_SESSION_NOT_FOUND'); return { id: assertSafeId(id), pid: state.term.pid, output: state.output, exited: state.exited, exitCode: state.exitCode }; }
   dispose(): void { for (const state of this.sessions.values()) { if (!state.exited) state.term.kill(); } this.sessions.clear(); }
 }
-
