@@ -6,6 +6,6 @@ if(command==='install'){console.log('freebuff-mcp is ready. Add this command to 
 else if(command==='doctor'){const r=await detectRuntime();console.log(JSON.stringify({capabilities:await r.capabilities(),installation:await localInstallInfo()},null,2));}
 else if(command==='serve'){await runStdio();}
 else if(command==='serve-http'){await runHttp();}
-else if(command==='version'){console.log('0.1.2');}
+else if(command==='version'){console.log('0.1.3');}
 else {console.error('Usage: freebuff-mcp [serve|serve-http|doctor|version]');process.exitCode=2;}
 
