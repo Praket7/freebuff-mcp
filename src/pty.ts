@@ -31,6 +31,9 @@ export class CliPtyManager {
     this.sessions.set(safeId, state);
     term.onData((data) => { state.output = (state.output + data).slice(-2_000_000); });
     term.onExit(({ exitCode }) => { state.exited = true; state.exitCode = exitCode; });
+    await new Promise<void>((resolve) => setTimeout(resolve, 1500));
+    if (/Freebuff is already running/i.test(state.output)) { term.kill(); this.sessions.delete(safeId); throw new Error('FREEBUFF_CLI_ALREADY_RUNNING'); }
+    if (/Not authenticated|Press ENTER to login/i.test(state.output)) { term.kill(); this.sessions.delete(safeId); throw new Error('FREEBUFF_CLI_NOT_AUTHENTICATED'); }
     return { id: safeId, pid: term.pid, output: state.output, exited: state.exited, exitCode: state.exitCode };
   }
   async send(id: string, text: string, cwd = process.cwd(), continueId = id): Promise<CliSessionSnapshot> {
