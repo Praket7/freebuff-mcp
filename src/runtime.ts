@@ -162,7 +162,7 @@ export class CliPtyRuntime implements Runtime {
   dispose(): void { this.manager.dispose(); }
 }
 export async function detectRuntime(): Promise<Runtime> {
-  if (process.env.FREEBUFF_MCP_CLI_MODE === 'pty') return await findFreebuffCli() ? new CliPtyRuntime() : new ReadOnlyRuntime();
+  if (process.env.FREEBUFF_MCP_CLI_MODE === 'pty') return new CliPtyRuntime();
   const desktop = new DesktopOrchestratorRuntime();
   if ((await desktop.capabilities()).orchestrator) return desktop;
   if (await findFreebuffCli()) return new CliPtyRuntime();
