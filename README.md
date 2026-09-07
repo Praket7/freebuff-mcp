@@ -18,7 +18,7 @@ npm install --global freebuff-mcp
 freebuff-mcp doctor
 ```
 
-The package includes its compiled `dist` files and builds them automatically when packed.
+The package includes its compiled runtime files. No local build is required for npm users.
 
 ## Configure Codex for Desktop-first discovery
 
@@ -35,7 +35,7 @@ Desktop discovery reads dynamic port/launch metadata when Freebuff exposes a rea
 
 ## Configure Codex for explicit Freebuff CLI mode
 
-Add this server to `~/.codex/config.toml`. On Windows, this is usually `C:\Users\YOUR_NAME\.codex\config.toml`:
+Add this server to `~/.codex/config.toml` (`%USERPROFILE%\.codex\config.toml` on Windows):
 
 ```toml
 [mcp_servers.freebuff]
@@ -49,6 +49,8 @@ FREEBUFF_PROJECT_ROOT = 'C:\Users\YOUR_NAME\Documents\FreeBuff WORK'
 # Set this when two project roots share the same basename.
 # FREEBUFF_PROJECT_KEY = 'FreeBuff WORK'
 ```
+
+On macOS or Linux, use the same block and set the root to a Unix path such as `/Users/YOUR_NAME/Desktop/freebuff-work`.
 
 Restart Codex and ask it to call `freebuff_status`, then `list_threads`.
 
@@ -93,16 +95,20 @@ FREEBUFF_MCP_CLI_MODE = 'pty'
 FREEBUFF_PROJECT_ROOT = 'C:\Users\YOUR_NAME\Documents\FreeBuff WORK'
 ```
 
-## HTTP transport
+## Optional HTTP transport
 
-For a remote MCP client, run the authenticated local HTTP transport:
+You do not need HTTP or Cloudflare for local Codex use. Stdio is the safer default. Use HTTP only when another MCP client must reach this bridge.
 
 ```bash
-set FREEBUFF_MCP_TOKEN=<long-random-value>
+$env:FREEBUFF_MCP_TOKEN = '<long-random-value>' # PowerShell
 freebuff-mcp serve-http
 ```
 
-It listens on `127.0.0.1:8788` by default. Put it behind a trusted HTTPS tunnel before connecting remotely; never expose the port directly to the Internet.
+On macOS/Linux, use `export FREEBUFF_MCP_TOKEN='<long-random-value>'` before starting it. It listens on `127.0.0.1:8788` by default, and `/mcp` always requires `Authorization: Bearer <token>`. Non-loopback binding is refused unless `FREEBUFF_MCP_ALLOW_REMOTE=1`; if enabled, use a trusted HTTPS tunnel or private VPN and never expose the port directly to the Internet.
+
+### Cloudflare is optional
+
+Cloudflare is only one possible HTTPS tunnel for remote access. It is not required for local use, npm publication, GitHub, or Desktop discovery. Use it only if you specifically want a Cloudflare-managed hostname for the authenticated HTTP bridge.
 
 ## Development and verification
 
