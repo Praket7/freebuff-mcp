@@ -1,6 +1,6 @@
 {
   "name": "freebuff-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A secure MCP bridge for locally installed Freebuff Desktop and CLI sessions.",
   "keywords": ["mcp", "freebuff", "codex", "ai", "cli"],
   "repository": { "type": "git", "url": "https://github.com/Praket7/freebuff-mcp.git" },
@@ -13,7 +13,7 @@
     "freebuff-mcp": "dist/src/cli.js"
   },
   "files": [
-    "dist",
+    "dist/src",
     "README.md",
     "LICENSE",
     "SECURITY.md",
@@ -24,7 +24,6 @@
     "build": "tsc -p tsconfig.json",
     "prepack": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "lint": "eslint .",
     "test": "node --test --import tsx test/**/*.test.ts",
     "pack:check": "pnpm build && pnpm pack --pack-destination work"
   },
@@ -42,3 +41,4 @@
     "typescript": "^5.9.2"
   }
 }
+
