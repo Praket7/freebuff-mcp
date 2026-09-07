@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add normalized, redacted, bounded live Desktop progress via `/api/events`.
+- Add `get_thread_progress` polling and bounded `watch_thread` long-polling.
+- Keep live event history in memory and stop the event client on runtime disposal.
+
 ## 0.1.4
 
 - Document cross-platform Codex, CLI, and HTTP setup.
