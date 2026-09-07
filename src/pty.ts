@@ -4,7 +4,7 @@ import path from 'node:path';
 import * as pty from 'node-pty';
 import { assertSafeId } from './security.js';
 
-export interface CliSessionSnapshot { id: string; pid: number; output: string; exited: boolean; exitCode?: number; }
+export interface CliSessionSnapshot { id: string; conversationId?: string; pid: number; output: string; exited: boolean; exitCode?: number; }
 
 function cliCandidates(): string[] {
   const home = os.homedir();
@@ -16,8 +16,25 @@ export async function findFreebuffCli(): Promise<string | null> {
   return null;
 }
 
+export async function findLatestCliConversationId(cwd: string, minimumMtimeMs = 0): Promise<string | null> {
+  const chats = path.join(os.homedir(), '.config', 'manicode', 'projects', path.basename(cwd), 'chats');
+  try {
+    const entries = await fs.readdir(chats, { withFileTypes: true });
+    const candidates: Array<{ id: string; mtimeMs: number }> = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !/^[A-Za-z0-9._:-]{1,200}$/.test(entry.name)) continue;
+      const dir = path.join(chats, entry.name);
+      const [meta, state, log] = await Promise.all([fs.stat(path.join(dir, 'chat-meta.json')).catch(() => null), fs.stat(path.join(dir, 'run-state.json')).catch(() => null), fs.stat(path.join(dir, 'log.jsonl')).catch(() => null)]);
+      const mtimeMs = Math.max(meta?.mtimeMs ?? 0, state?.mtimeMs ?? 0, log?.mtimeMs ?? 0);
+      if (log && mtimeMs >= minimumMtimeMs) candidates.push({ id: entry.name, mtimeMs });
+    }
+    candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    return candidates[0]?.id ?? null;
+  } catch { return null; }
+}
+
 export class CliPtyManager {
-  private sessions = new Map<string, { term: pty.IPty; output: string; exited: boolean; exitCode?: number }>();
+  private sessions = new Map<string, { term: pty.IPty; cwd: string; startedAt: number; conversationId?: string; output: string; exited: boolean; exitCode?: number }>();
   async start(id: string, cwd: string, continueId?: string): Promise<CliSessionSnapshot> {
     const safeId = assertSafeId(id);
     const existing = this.sessions.get(safeId);
@@ -26,8 +43,9 @@ export class CliPtyManager {
     if (!file) throw new Error('FREEBUFF_CLI_NOT_INSTALLED');
     const args = ['--cwd', cwd];
     if (continueId) args.push('--continue', assertSafeId(continueId));
+    const startedAt = Date.now();
     const term = pty.spawn(file, args, { name: 'xterm-256color', cols: 160, rows: 48, cwd, useConpty: true, env: { ...process.env, TERM: 'xterm-256color' } });
-    const state = { term, output: '', exited: false, exitCode: undefined as number | undefined };
+    const state = { term, cwd, startedAt, conversationId: continueId, output: '', exited: false, exitCode: undefined as number | undefined };
     this.sessions.set(safeId, state);
     term.onData((data) => { state.output = (state.output + data).slice(-2_000_000); });
     term.onExit(({ exitCode }) => { state.exited = true; state.exitCode = exitCode; });
@@ -40,7 +58,8 @@ export class CliPtyManager {
     }
     if (/Freebuff is already running/i.test(state.output) && !/Enter a coding task or \/ for commands/i.test(state.output)) { term.kill(); this.sessions.delete(safeId); throw new Error('FREEBUFF_CLI_ALREADY_RUNNING'); }
     if (/Not authenticated|Press ENTER to login/i.test(state.output)) { term.kill(); this.sessions.delete(safeId); throw new Error('FREEBUFF_CLI_NOT_AUTHENTICATED'); }
-    return { id: safeId, pid: term.pid, output: state.output, exited: state.exited, exitCode: state.exitCode };
+    state.conversationId ??= (await findLatestCliConversationId(cwd, startedAt - 1000)) ?? undefined;
+    return { id: safeId, conversationId: state.conversationId, pid: term.pid, output: state.output, exited: state.exited, exitCode: state.exitCode };
   }
   async send(id: string, text: string, cwd = process.cwd(), continueId?: string): Promise<CliSessionSnapshot> {
     if (!text || text.length > 100_000) throw new Error('Message must be 1 to 100000 characters');
@@ -54,14 +73,17 @@ export class CliPtyManager {
     state.term.write(`\x1b[200~${clean}\x1b[201~`);
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
     state.term.write('\r');
-    return { id: session.id, pid: state.term.pid, output: state.output, exited: state.exited, exitCode: state.exitCode };
+    state.conversationId ??= (await findLatestCliConversationId(cwd, state.startedAt - 1000)) ?? undefined;
+    return { id: session.id, conversationId: state.conversationId, pid: state.term.pid, output: state.output, exited: state.exited, exitCode: state.exitCode };
   }
+  async sendToLatest(id: string, text: string, cwd = process.cwd()): Promise<CliSessionSnapshot> { return this.send(id, text, cwd, (await findLatestCliConversationId(cwd)) ?? undefined); }
+  async resumeLatest(id: string, cwd = process.cwd()): Promise<CliSessionSnapshot> { return this.send(id, '/resume', cwd, (await findLatestCliConversationId(cwd)) ?? undefined); }
   stop(id: string): CliSessionSnapshot {
     const state = this.sessions.get(assertSafeId(id));
     if (!state) throw new Error('FREEBUFF_CLI_SESSION_NOT_FOUND');
     state.term.write('\x1b');
-    return { id: assertSafeId(id), pid: state.term.pid, output: state.output, exited: state.exited, exitCode: state.exitCode };
+    return { id: assertSafeId(id), conversationId: state.conversationId, pid: state.term.pid, output: state.output, exited: state.exited, exitCode: state.exitCode };
   }
-  snapshot(id: string): CliSessionSnapshot { const state = this.sessions.get(assertSafeId(id)); if (!state) throw new Error('FREEBUFF_CLI_SESSION_NOT_FOUND'); return { id: assertSafeId(id), pid: state.term.pid, output: state.output, exited: state.exited, exitCode: state.exitCode }; }
+  snapshot(id: string): CliSessionSnapshot { const state = this.sessions.get(assertSafeId(id)); if (!state) throw new Error('FREEBUFF_CLI_SESSION_NOT_FOUND'); return { id: assertSafeId(id), conversationId: state.conversationId, pid: state.term.pid, output: state.output, exited: state.exited, exitCode: state.exitCode }; }
   dispose(): void { for (const state of this.sessions.values()) { if (!state.exited) state.term.kill(); } this.sessions.clear(); }
 }
