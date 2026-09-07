@@ -31,7 +31,7 @@ args = ['serve']
 enabled = true
 ```
 
-Desktop discovery is read-only until Freebuff documents a verifiable launch-authorization contract. Use the explicit CLI configuration below when you need bridge-owned prompt injection.
+Desktop discovery reads dynamic port/launch metadata when Freebuff exposes a readiness file, then verifies the launch ID through `/healthz`. If that handshake is unavailable, it stays read-only. Use the explicit CLI configuration below when you need bridge-owned prompt injection.
 
 ## Configure Codex for explicit Freebuff CLI mode
 
