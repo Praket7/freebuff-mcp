@@ -18,6 +18,7 @@ export interface ThreadProgressEvent {
   threadId: string;
   timestamp: string;
   kind: ThreadProgressKind;
+  phase?: 'planning' | 'reading_files' | 'running_tests' | 'editing_files' | 'reviewing_changes' | 'waiting_for_input' | 'completed' | 'failed' | 'unknown';
   state?: string;
   tool?: string;
   command?: string;
@@ -26,5 +27,5 @@ export interface ThreadProgressEvent {
   error?: string;
   raw?: Json;
 }
-export interface ThreadProgressSnapshot { threadId: string; currentState?: string; events: ThreadProgressEvent[]; nextSequence?: number; connected: boolean; stale: boolean; latestEventAt?: string; activeTool?: string; filesChanged?: string[]; }
+export interface ThreadProgressSnapshot { threadId: string; currentState?: string; events: ThreadProgressEvent[]; nextSequence?: number; connected: boolean; stale: boolean; latestEventAt?: string; activeTool?: string; filesChanged?: string[]; phase?: ThreadProgressEvent['phase']; lastMeaningfulUpdate?: string; lastError?: string; secondsSinceLastEvent?: number; }
 
