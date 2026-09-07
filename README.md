@@ -54,11 +54,15 @@ On macOS or Linux, use the same block and set the root to a Unix path such as `/
 
 Restart Codex and ask it to call `freebuff_status`, then `list_threads`.
 
+Run `freebuff-mcp install` to print a ready-to-paste configuration using the current executable, or `freebuff-mcp install --write` to append the Desktop-first entry to `%USERPROFILE%\\.codex\\config.toml` (or `~/.codex/config.toml`). The write mode refuses to overwrite an existing `freebuff` entry.
+
 CLI mode can start a managed Freebuff session, inject prompts, monitor live output, discover the local conversation ID, resume persisted CLI chats, read visible history, list safe project files, and read individual project files. Reasoning changes are supported through Freebuff slash commands. Model changes require Freebuff's interactive new-session model picker.
 
 ### Live Desktop progress
 
 When Desktop is discovered, the bridge subscribes to its read-only `/api/events` stream. Use `get_thread_progress` with a thread ID to poll bounded, in-memory progress events. Pass `afterSequence` from the previous response for incremental reads. `watch_thread` provides bounded long-polling for up to 30 seconds. These views can show turn state, assistant updates, tools, command summaries, file changes, and completion/failure while a task is running. `get_thread` remains the saved snapshot and may include a `live` summary; event history is intentionally not persisted. CLI mode reports Desktop live events as unavailable and continues to expose PTY output.
+
+For a simpler view, call `get_thread_progress_summary`. It reports the current phase (Planning, Reading files, Running tests, Editing files, Reviewing changes, Waiting for input, Completed, or Failed), latest meaningful update, active tool/command, changed files, last error, seconds since the last event, and whether the stream is stale. `watch_active_threads` returns the latest summary for every active Desktop thread. Detailed reasoning deltas are omitted by default.
 
 ## Run directly with npx
 
