@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3
+
+- Add readiness metadata discovery for Desktop port and launch ID.
+- Verify the launch ID through `/healthz` before enabling Desktop mutations.
+- Send `x-freebuff-launch-id` on authenticated Desktop requests.
+
 ## 0.1.2
 
 - Add native listener probing as a Desktop dynamic-port discovery fallback.
