@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Capabilities, ProjectSummary, ThreadDetail, ThreadSummary, Json } from './types.js';
 import { assertSafeId, blocked, redact, safeProjectPath, sanitizeFreebuff } from './security.js';
+import { CliPtyManager, findFreebuffCli } from './pty.js';
 
 export interface Runtime {
   capabilities(): Promise<Capabilities>;
@@ -65,6 +66,24 @@ export class ReadOnlyRuntime extends DesktopOrchestratorRuntime {
   override async setModel(_id: string, _model: string, _harnessId?: string): Promise<Json>{throw new Error('Freebuff is unavailable or read-only');}
   override async setReasoning(_id: string, _effort: string | null): Promise<Json>{throw new Error('Freebuff is unavailable or read-only');}
 }
-export async function detectRuntime(): Promise<Runtime> { const url=await discoverDesktopUrl(); const r=new DesktopOrchestratorRuntime(url); if((await r.capabilities()).orchestrator && process.env.FREEBUFF_LAUNCH_ID)return r; if((await r.capabilities()).orchestrator)return new ReadOnlyRuntime(url); return new ReadOnlyRuntime(url); }
-export async function localInstallInfo(): Promise<Json> { const found: Array<{path:string;signedIn:boolean}> = []; for(const c of candidates()){const j=await readJson(c); const o=j&&typeof j==='object'&&!Array.isArray(j)?j as Record<string,Json>:undefined; const d=o?.default&&typeof o.default==='object'&&!Array.isArray(o.default)?o.default as Record<string,Json>:undefined; if(o) found.push({path:c,signedIn:Boolean(d?.authToken||o.authToken)});} return {cli: Boolean(await readJson(path.join(os.homedir(),'.config','manicode','freebuff'))),credentials:found}; }
+export class CliPtyRuntime implements Runtime {
+  private manager = new CliPtyManager();
+  private root = envRoot();
+  async capabilities(): Promise<Capabilities> { const cli = await findFreebuffCli(); return { product:'cli', signedIn:'unknown', orchestrator:false, readOnly:!cli, endpoints:['managed PTY'], notes:[cli ? `Official Freebuff CLI detected at ${path.basename(cli)}. PTY control is enabled for bridge-owned sessions.` : 'Official Freebuff CLI was not found.'] }; }
+  async listProjects(): Promise<ProjectSummary[]> { return [{ id:this.root, path:this.root, name:path.basename(this.root) }]; }
+  async listThreads(): Promise<ThreadSummary[]> { return []; }
+  async getThread(id:string): Promise<ThreadDetail> { return { id:assertSafeId(id), projectId:this.root, title:'Managed Freebuff CLI session' }; }
+  async getMessages(id:string): Promise<Json> { return redact(this.manager.snapshot(id)) as Json; }
+  async activeWork(id?:string): Promise<Json> { return id ? redact(this.manager.snapshot(id)) as Json : []; }
+  async listFiles(_projectId:string): Promise<string[]> { return []; }
+  async readFile(_projectId:string, _relative:string): Promise<{path:string;content:string}> { throw new Error('CLI runtime does not expose project file reads'); }
+  async sendMessage(id:string,text:string): Promise<Json> { return redact(await this.manager.send(id,text,this.root,id)) as Json; }
+  async stop(id:string): Promise<Json> { return redact(this.manager.stop(id)) as Json; }
+  async resume(id:string): Promise<Json> { return redact(await this.manager.send(id,'/resume',this.root,id)) as Json; }
+  async listModels(): Promise<Json> { return { note:'Use the Freebuff CLI /model picker inside a managed PTY session.' }; }
+  async setModel(id:string,model:string): Promise<Json> { return redact(await this.manager.send(id,`/model ${model}`,this.root,id)) as Json; }
+  async setReasoning(id:string,effort:string|null): Promise<Json> { return redact(await this.manager.send(id,`/reasoning ${effort ?? ''}`,this.root,id)) as Json; }
+}
+export async function detectRuntime(): Promise<Runtime> { if(process.env.FREEBUFF_MCP_CLI_MODE==='pty' && await findFreebuffCli())return new CliPtyRuntime(); const url=await discoverDesktopUrl(); const r=new DesktopOrchestratorRuntime(url); if((await r.capabilities()).orchestrator && process.env.FREEBUFF_LAUNCH_ID)return r; return new ReadOnlyRuntime(url); }
+export async function localInstallInfo(): Promise<Json> { const found: Array<{path:string;signedIn:boolean}> = []; for(const c of candidates()){const j=await readJson(c); const o=j&&typeof j==='object'&&!Array.isArray(j)?j as Record<string,Json>:undefined; const d=o?.default&&typeof o.default==='object'&&!Array.isArray(o.default)?o.default as Record<string,Json>:undefined; if(o) found.push({path:c,signedIn:Boolean(d?.authToken||o.authToken)});} return {cli: Boolean(await findFreebuffCli()),credentials:found}; }
 
