@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.4
+
+- Document cross-platform Codex, CLI, and HTTP setup.
+- Correct the HTTP security policy and explain optional Cloudflare use.
+
 ## 0.1.3
 
 - Add readiness metadata discovery for Desktop port and launch ID.
