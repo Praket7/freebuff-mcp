@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.2
+
+- Add native listener probing as a Desktop dynamic-port discovery fallback.
+- Omit mutation tools when the active runtime is read-only.
+- Validate project and thread payload fields at the API boundary.
+- Use deterministic path-derived CLI history keys while retaining legacy lookup.
+
 ## 0.1.1
 
 - Discover Freebuff Desktop on Windows, macOS, and Linux from dynamic-port logs.
