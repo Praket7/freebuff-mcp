@@ -6,7 +6,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { detectRuntime, Runtime } from './runtime.js';
 
-export function createServer(runtime: Runtime, includeWrites = true): McpServer { const s=new McpServer({name:'freebuff-mcp',version:'0.1.3'});
+export function createServer(runtime: Runtime, includeWrites = true): McpServer { const s=new McpServer({name:'freebuff-mcp',version:'0.1.4'});
   const read=(name:string,description:string,schema:Record<string,z.ZodType>,fn:(a:any)=>Promise<unknown>)=>s.registerTool(name,{description,inputSchema:schema,annotations:{readOnlyHint:true,openWorldHint:false}},async(a)=>({content:[{type:'text',text:JSON.stringify(await fn(a),null,2)}]}));
   read('freebuff_status','Detect Freebuff and bridge capabilities.',{},()=>runtime.capabilities());
   read('list_projects','List discovered Freebuff projects.',{},()=>runtime.listProjects());
