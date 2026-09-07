@@ -14,4 +14,7 @@
 | CLI PTY and local chat history | Implemented; CLI writes require the managed PTY |
 | Live Freebuff Desktop write verification | `/healthz` launch-ID handshake; otherwise read-only |
 | Live Desktop progress | `/api/events` SSE with polling via `get_thread_progress` and bounded `watch_thread`; in-memory only |
+| Progress summaries | `get_thread_progress_summary` and `watch_active_threads`; user-facing phases and stale/error indicators |
+| Automatic Desktop readiness | Reads fresh port, launch ID, PID, and timestamp metadata; rejects stale records and retries live listener candidates |
+| Installer helper | `install` prints a current-path Codex entry; `install --write` appends without overwriting an existing entry |
 
