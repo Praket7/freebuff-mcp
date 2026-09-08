@@ -18,5 +18,3 @@
 | Automatic Desktop readiness | Reads fresh port, launch ID, PID, and timestamp metadata; rejects stale records and retries live listener candidates |
 | Installer helper | `install` prints a current-path Codex entry; `install --write` appends without overwriting an existing entry |
 | OpenCode adapter | Not included; OpenCode model/session operations must be implemented by a separate adapter using its server API contract |
-| Cursor project setup | `cursor-install --write` writes `.cursor/mcp.json` with absolute runtime paths |
-| Cursor global setup | `cursor-install --write --global` writes `~/.cursor/mcp.json` and preserves a backup |
