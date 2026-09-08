@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.5
+## 0.1.6
 
 - Add normalized, redacted, bounded live Desktop progress via `/api/events`.
 - Add `get_thread_progress` polling and bounded `watch_thread` long-polling.
