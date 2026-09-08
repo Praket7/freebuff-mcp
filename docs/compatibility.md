@@ -17,3 +17,4 @@
 | Progress summaries | `get_thread_progress_summary` and `watch_active_threads`; user-facing phases and stale/error indicators |
 | Automatic Desktop readiness | Reads fresh port, launch ID, PID, and timestamp metadata; rejects stale records and retries live listener candidates |
 | Installer helper | `install` prints a current-path Codex entry; `install --write` appends without overwriting an existing entry |
+| OpenCode adapter | Not included; OpenCode model/session operations must be implemented by a separate adapter using its server API contract |

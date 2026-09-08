@@ -13,8 +13,14 @@ function cliCandidates(): string[] {
 }
 
 export async function findFreebuffCli(): Promise<string | null> {
-  for (const candidate of cliCandidates()) { try { const stat = await fs.stat(candidate); if (stat.isFile()) return candidate; } catch { /* try next */ } }
+  for (const candidate of cliCandidates()) { try { const stat = await fs.stat(candidate); if (!stat.isFile()) continue; if (process.platform !== 'win32') await fs.access(candidate, 1); return candidate; } catch { /* try next */ } }
   return null;
+}
+
+export function describePtyLaunchError(error: unknown, file: string, cwd: string): Error {
+  const detail = error instanceof Error ? error.message : String(error);
+  const hint = /posix_spawnp failed/i.test(detail) ? ` Check that ${file} is executable, its interpreter exists, and node-pty was installed for this Node.js architecture. On macOS, repeated node-pty 1.1.0 launches can exhaust pseudo-terminal file descriptors; restart the bridge and update node-pty if the error repeats.` : '';
+  return new Error(`Unable to start Freebuff CLI at ${file} (cwd ${cwd}): ${detail}.${hint}`);
 }
 
 export async function findLatestCliConversationId(cwd: string, minimumMtimeMs = 0): Promise<string | null> {
@@ -46,7 +52,8 @@ export class CliPtyManager {
     const args = ['--cwd', cwd];
     if (continueId) args.push('--continue', assertSafeId(continueId));
     const startedAt = Date.now();
-    const term = pty.spawn(file, args, { name: 'xterm-256color', cols: 160, rows: 48, cwd, ...(process.platform === 'win32' ? { useConpty: true } : {}), env: { ...process.env, TERM: 'xterm-256color' } });
+    let term: pty.IPty;
+    try { term = pty.spawn(file, args, { name: 'xterm-256color', cols: 160, rows: 48, cwd, ...(process.platform === 'win32' ? { useConpty: true } : {}), env: { ...process.env, TERM: 'xterm-256color' } }); } catch (error) { throw describePtyLaunchError(error, file, cwd); }
     const state = { term, cwd, startedAt, conversationId: continueId, output: '', exited: false, exitCode: undefined as number | undefined };
     this.sessions.set(safeId, state);
     term.onData((data) => { state.output = (state.output + data).slice(-2_000_000); });

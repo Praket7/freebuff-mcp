@@ -58,6 +58,10 @@ Run `freebuff-mcp install` to print a ready-to-paste configuration using the cur
 
 CLI mode can start a managed Freebuff session, inject prompts, monitor live output, discover the local conversation ID, resume persisted CLI chats, read visible history, list safe project files, and read individual project files. Reasoning changes are supported through Freebuff slash commands. Model changes require Freebuff's interactive new-session model picker.
 
+If Desktop discovery is configured with `FREEBUFF_ORCHESTRATOR_URL`, Desktop remains the selected runtime unless `FREEBUFF_MCP_CLI_MODE = 'pty'` is set in the server's environment. For a CLI installed outside PATH, set `FREEBUFF_CLI_PATH` to its absolute executable path (for example `/Users/YOUR_NAME/.config/manicode/freebuff`). `freebuff_status` will identify which runtime was selected.
+
+On macOS, a `posix_spawnp failed` error is emitted with the executable and working directory. Verify the CLI is executable, its interpreter exists, and the native `node-pty` binary matches the Node architecture. Repeated failures after many PTY launches can indicate the known node-pty macOS pseudo-terminal descriptor leak; restart the bridge and update node-pty when a fixed stable release is available.
+
 ### Live Desktop progress
 
 When Desktop is discovered, the bridge subscribes to its read-only `/api/events` stream. Use `get_thread_progress` with a thread ID to poll bounded, in-memory progress events. Pass `afterSequence` from the previous response for incremental reads. `watch_thread` provides bounded long-polling for up to 30 seconds. These views can show turn state, assistant updates, tools, command summaries, file changes, and completion/failure while a task is running. `get_thread` remains the saved snapshot and may include a `live` summary; event history is intentionally not persisted. CLI mode reports Desktop live events as unavailable and continues to expose PTY output.
@@ -129,3 +133,5 @@ pnpm pack:check
 ```
 
 The bridge rejects unsafe identifiers and paths, redacts credential-like fields, and never returns Freebuff credentials.
+
+This package does not contain an OpenCode adapter. OpenCode integrations must send model selections as `{ providerID, modelID }` and use provider-specific variants; `low`/`high` are not agent names. OpenCode session model/reasoning mutation should not be exposed unless the adapter implements the corresponding supported server operation. Configure and authenticate OpenCode separately with its own CLI/server tools.
