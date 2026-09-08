@@ -54,6 +54,30 @@ On macOS or Linux, use the same block and set the root to a Unix path such as `/
 
 Restart Codex and ask it to call `freebuff_status`, then `list_threads`.
 
+## Cursor setup
+
+Cursor reads project MCP servers from `.cursor/mcp.json` and global MCP servers from `~/.cursor/mcp.json` on Windows, macOS, and Linux. Project settings take priority over global settings.
+
+Print a project configuration using the current executable path.
+
+```bash
+freebuff-mcp cursor-install
+```
+
+Save the project configuration and keep a backup of an earlier file.
+
+```bash
+freebuff-mcp cursor-install --write
+```
+
+Save a global configuration instead.
+
+```bash
+freebuff-mcp cursor-install --write --global
+```
+
+Open Cursor settings and confirm that `freebuff-mcp` is connected and that its tools are visible. If Cursor cannot start it, run the printed command in a terminal and run `freebuff-mcp doctor`. The installer uses an absolute Node path so GUI launched Cursor does not depend on its shell PATH.
+
 Run `freebuff-mcp install` to print a ready-to-paste configuration using the current executable, or `freebuff-mcp install --write` to append the Desktop-first entry to `%USERPROFILE%\\.codex\\config.toml` (or `~/.codex/config.toml`). The write mode refuses to overwrite an existing `freebuff` entry.
 
 CLI mode can start a managed Freebuff session, inject prompts, monitor live output, discover the local conversation ID, resume persisted CLI chats, read visible history, list safe project files, and read individual project files. Reasoning changes are supported through Freebuff slash commands. Model changes require Freebuff's interactive new-session model picker.

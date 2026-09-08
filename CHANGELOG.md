@@ -50,3 +50,10 @@ Improved progress phase labels and readiness process checks.
 Added HTTP Origin validation and a bounded request rate limit.
 
 Expanded setup and compatibility guidance.
+# 0.1.8
+
+Added Cursor project and global MCP configuration setup.
+
+Added absolute runtime paths for GUI launched Cursor sessions.
+
+Added configuration backups and JSON validation during Cursor setup.
