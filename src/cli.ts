@@ -15,5 +15,5 @@ if(command==='install'){await installConfig(process.argv.includes('--write'));}
 else if(command==='doctor'){const r=await detectRuntime();console.log(JSON.stringify({capabilities:await r.capabilities(),installation:await localInstallInfo()},null,2));}
 else if(command==='serve'){await runStdio();}
 else if(command==='serve-http'){await runHttp();}
-else if(command==='version'){console.log('0.1.6');}
+else if(command==='version'){console.log('0.1.7');}
 else {console.error('Usage: freebuff-mcp [serve|serve-http|doctor|install [--write]|version]');process.exitCode=2;}

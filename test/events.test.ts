@@ -16,6 +16,8 @@ test('normalizes, filters, redacts, and classifies progress events', () => {
   assert.equal(normalizeProgressEvent({ type:'completed' }), null);
   assert.equal(normalizeProgressEvent({ threadId:'bad/id', type:'x' }), null);
   assert.equal(normalizeProgressEvent({ threadId:'thread-1', type:'future_event' })?.kind, 'unknown');
+  assert.equal(normalizeProgressEvent({ threadId:'thread-1', type:'file_edit', files:['src/a.ts'] })?.phase, 'editing_files');
+  assert.equal(normalizeProgressEvent({ threadId:'thread-1', type:'permission_required' })?.phase, 'waiting_for_input');
 });
 
 test('stores bounded incremental progress and wakes waiters', async () => {

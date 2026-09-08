@@ -73,3 +73,24 @@ test('read-only servers omit mutation tools', () => {
   assert.equal(tools.includes('send_message'), false);
   assert.equal(tools.includes('set_model'), false);
 });
+
+test('status reports the selected Desktop runtime and live progress', async () => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith('/api/projects')) return new Response(JSON.stringify({ projects: [] }), { status: 200 });
+    throw new Error(`unexpected ${url}`);
+  };
+  try {
+    const runtime = new DesktopOrchestratorRuntime('http://127.0.0.1:55354');
+    const caps = await runtime.capabilities();
+    assert.equal(caps.status, 'desktop_read_only');
+    assert.equal(caps.liveProgress, 'connected');
+    assert.equal(caps.selectedRuntime, 'desktop');
+  } finally { globalThis.fetch = previousFetch; }
+});
+
+test('history search validates query length', async () => {
+  const runtime = new DesktopOrchestratorRuntime('http://127.0.0.1:55354');
+  await assert.rejects(() => runtime.searchHistory(''), /Query must be 1 to 200/);
+});

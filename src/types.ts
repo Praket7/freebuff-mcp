@@ -8,6 +8,9 @@ export interface Capabilities {
   readOnly: boolean;
   endpoints: string[];
   notes: string[];
+  status?: 'desktop_read_only' | 'desktop_writable' | 'cli_ready' | 'cli_unavailable' | 'not_found';
+  liveProgress?: 'connected' | 'stale' | 'unavailable';
+  selectedRuntime?: string;
 }
 export interface ProjectSummary { id: string; path: string; name?: string; metadata?: Json; }
 export interface ThreadSummary { id: string; projectId?: string; title?: string; state?: string; model?: string; metadata?: Json; }
@@ -28,3 +31,4 @@ export interface ThreadProgressEvent {
   raw?: Json;
 }
 export interface ThreadProgressSnapshot { threadId: string; currentState?: string; events: ThreadProgressEvent[]; nextSequence?: number; connected: boolean; stale: boolean; latestEventAt?: string; activeTool?: string; filesChanged?: string[]; phase?: ThreadProgressEvent['phase']; lastMeaningfulUpdate?: string; lastError?: string; secondsSinceLastEvent?: number; }
+export interface ModelCapability { id: string; provider?: string; variants?: string[]; supportsReasoning?: boolean; supportsSessionChange?: boolean; source: 'desktop' | 'cli' | 'unknown'; }

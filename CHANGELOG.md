@@ -37,3 +37,16 @@
 ## 0.1.0
 
 - Initial secure stdio MCP bridge with capability probing, project and thread reads, safe file access, and guarded Desktop actions.
+# 0.1.7
+
+Added structured runtime status and live progress availability.
+
+Added active thread discovery from Desktop snapshots.
+
+Added visible history search and attachment metadata tools.
+
+Improved progress phase labels and readiness process checks.
+
+Added HTTP Origin validation and a bounded request rate limit.
+
+Expanded setup and compatibility guidance.

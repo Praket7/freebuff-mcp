@@ -134,4 +134,18 @@ pnpm pack:check
 
 The bridge rejects unsafe identifiers and paths, redacts credential-like fields, and never returns Freebuff credentials.
 
+## User workflow
+
+Install the package and run `freebuff-mcp doctor` first. The result tells you which runtime is selected and whether live progress is connected.
+
+Use `freebuff-mcp install` to print a current Codex setup. Use `freebuff-mcp install --write` when you want the tool to add the setup for you. Restart Codex after changing the file.
+
+Start with `freebuff_status`, then use `list_projects`, `list_threads`, and `search_history`. Use `get_thread_progress_summary` for a readable progress view and `watch_active_threads` when several tasks are running.
+
+The bridge reports read only Desktop access separately from verified Desktop writes. Unsupported write tools are not registered in read only mode. CLI mode remains available as an explicit choice through `FREEBUFF_MCP_CLI_MODE = 'pty'`.
+
+Progress reconnects automatically and resumes from sequence numbers supplied by the client. The event window is bounded and sensitive reasoning fragments are omitted by default.
+
+For remote HTTP use, create a long random `FREEBUFF_MCP_TOKEN`, keep the host on loopback unless a trusted private network is used, and place HTTPS and access control in front of any remote route. Cloudflare is optional and is not part of local setup.
+
 This package does not contain an OpenCode adapter. OpenCode integrations must send model selections as `{ providerID, modelID }` and use provider-specific variants; `low`/`high` are not agent names. OpenCode session model/reasoning mutation should not be exposed unless the adapter implements the corresponding supported server operation. Configure and authenticate OpenCode separately with its own CLI/server tools.
