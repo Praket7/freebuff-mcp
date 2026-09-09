@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.10
+## 0.1.11
 
 - Update `node-pty` to `1.2.0-beta.15`, which includes the macOS `spawn-helper` packaging fix for `posix_spawnp failed`.
 
