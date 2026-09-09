@@ -43,3 +43,10 @@ test('event client sends launch ID and filters by thread through the store', asy
   const store = new ProgressStore(); const client = new DesktopEventClient(() => new URL('http://127.0.0.1:55354'), () => 'launch-id', store);
   try { client.start(); for (let i=0; i<20 && !store.read('thread-1').events.length; i++) await new Promise(r => setTimeout(r, 10)); const snapshot = store.read('thread-1'); assert.equal(snapshot.events[0]?.kind, 'turn_state'); assert.equal(requests[0]?.headers.get('x-freebuff-launch-id'), 'launch-id'); } finally { client.dispose(); globalThis.fetch = previous; }
 });
+
+test('event client refreshes launch ID after authorization failure', async () => {
+  const previous=globalThis.fetch; const requests:Request[]=[]; let launch='old-launch'; let refreshes=0;
+  globalThis.fetch=async(input,init)=>{ requests.push(new Request(input,init)); if(requests.length===1)return new Response('{}',{status:403}); const body=new ReadableStream<Uint8Array>({start(controller){controller.enqueue(new TextEncoder().encode('event: running\ndata: {"threadId":"thread-2","state":"running"}\n\n'));controller.close();}}); return new Response(body,{status:200,headers:{'content-type':'text/event-stream'}}); };
+  const store=new ProgressStore(); const client=new DesktopEventClient(()=>new URL('http://127.0.0.1:55354'),()=>launch,store,async()=>{launch='new-launch';refreshes++;});
+  try { client.start(); for(let i=0;i<40&&!store.read('thread-2').events.length;i++)await new Promise(r=>setTimeout(r,10)); assert.equal(refreshes,1); assert.equal(requests[1]?.headers.get('x-freebuff-launch-id'),'new-launch'); assert.equal(store.read('thread-2').events[0]?.kind,'turn_state'); } finally {client.dispose();globalThis.fetch=previous;}
+});
