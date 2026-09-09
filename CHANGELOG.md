@@ -54,6 +54,12 @@ Improved progress phase labels and readiness process checks.
 Added HTTP Origin validation and a bounded request rate limit.
 
 Expanded setup and compatibility guidance.
+# 0.1.12
+
+- Select Desktop first with CLI fallback when no CLI-only flag is configured.
+- Make direct GitHub npm installs use the committed compiled runtime.
+- Correct the reported CLI and MCP server version.
+
 # 0.1.9
 
 Removed the accidental Cursor specific integration.

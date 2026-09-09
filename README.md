@@ -20,20 +20,25 @@ freebuff-mcp doctor
 
 The package includes its compiled runtime files. No local build is required for npm users.
 
-## Configure Codex for Desktop-first discovery
+## Configure Codex for Desktop and CLI discovery
 
-By default the bridge probes the locally running Freebuff Desktop first, then falls back to the CLI if Desktop is unavailable. This requires no CLI-mode flag:
+The bridge probes the locally running Freebuff Desktop first, then falls back to the CLI if Desktop is unavailable. Do not set `FREEBUFF_MCP_CLI_MODE` in this setup:
 
 ```toml
 [mcp_servers.freebuff]
 command = 'freebuff-mcp'
 args = ['serve']
 enabled = true
+
+[mcp_servers.freebuff.env]
+FREEBUFF_PROJECT_ROOT = '/Users/YOUR_NAME/Desktop/freebuff-work'
+# Optional: use this when the Freebuff CLI is not on PATH.
+# FREEBUFF_CLI_PATH = '/Users/YOUR_NAME/.config/manicode/freebuff'
 ```
 
 Desktop discovery reads dynamic port/launch metadata when Freebuff exposes a readiness file, then verifies the launch ID through `/healthz`. If that handshake is unavailable, it stays read-only. Use the explicit CLI configuration below when you need bridge-owned prompt injection.
 
-## Configure Codex for explicit Freebuff CLI mode
+## Configure Codex for CLI-only mode
 
 Add this server to `~/.codex/config.toml` (`%USERPROFILE%\.codex\config.toml` on Windows):
 
@@ -54,7 +59,7 @@ On macOS or Linux, use the same block and set the root to a Unix path such as `/
 
 Restart Codex and ask it to call `freebuff_status`, then `list_threads`.
 
-Run `freebuff-mcp install` to print a ready-to-paste configuration using the current executable, or `freebuff-mcp install --write` to append the Desktop-first entry to `%USERPROFILE%\\.codex\\config.toml` (or `~/.codex/config.toml`). The write mode refuses to overwrite an existing `freebuff` entry.
+Run `freebuff-mcp install` to print a ready-to-paste Desktop-plus-CLI configuration using the current executable, or `freebuff-mcp install --write` to append it to `%USERPROFILE%\\.codex\\config.toml` (or `~/.codex/config.toml`). The write mode refuses to overwrite an existing `freebuff` entry.
 
 CLI mode can start a managed Freebuff session, inject prompts, monitor live output, discover the local conversation ID, resume persisted CLI chats, read visible history, list safe project files, and read individual project files. Reasoning changes are supported through Freebuff slash commands. Model changes require Freebuff's interactive new-session model picker.
 
@@ -68,7 +73,25 @@ When Desktop is discovered, the bridge subscribes to its read-only `/api/events`
 
 For a simpler view, call `get_thread_progress_summary`. It reports the current phase (Planning, Reading files, Running tests, Editing files, Reviewing changes, Waiting for input, Completed, or Failed), latest meaningful update, active tool/command, changed files, last error, seconds since the last event, and whether the stream is stale. `watch_active_threads` returns the latest summary for every active Desktop thread. Detailed reasoning deltas are omitted by default.
 
-## Run directly with npx
+## Run directly with npm or npx
+
+Install the published package:
+
+```bash
+npm install --global freebuff-mcp
+```
+
+Or install the latest GitHub checkout. The repository includes compiled `dist/src` files, so this does not require a local TypeScript build:
+
+```bash
+npm install --global github:Praket7/freebuff-mcp
+```
+
+Then verify the selected runtime:
+
+```bash
+freebuff-mcp doctor
+```
 
 The same server can be configured without a global install:
 
@@ -79,7 +102,6 @@ args = ['-y', 'freebuff-mcp@latest', 'serve']
 enabled = true
 
 [mcp_servers.freebuff.env]
-FREEBUFF_MCP_CLI_MODE = 'pty'
 FREEBUFF_PROJECT_ROOT = 'C:\Users\YOUR_NAME\Documents\FreeBuff WORK'
 ```
 
@@ -103,7 +125,6 @@ args = ['C:\path\to\freebuff-mcp\dist\src\cli.js', 'serve']
 enabled = true
 
 [mcp_servers.freebuff.env]
-FREEBUFF_MCP_CLI_MODE = 'pty'
 FREEBUFF_PROJECT_ROOT = 'C:\Users\YOUR_NAME\Documents\FreeBuff WORK'
 ```
 
