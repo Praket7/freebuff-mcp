@@ -2,12 +2,25 @@
   "name": "freebuff-mcp",
   "version": "0.1.12",
   "description": "A secure MCP bridge for locally installed Freebuff Desktop and CLI sessions.",
-  "keywords": ["mcp", "freebuff", "codex", "ai", "cli"],
-  "repository": { "type": "git", "url": "https://github.com/Praket7/freebuff-mcp.git" },
+  "keywords": [
+    "mcp",
+    "freebuff",
+    "codex",
+    "ai",
+    "cli"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Praket7/freebuff-mcp.git"
+  },
   "homepage": "https://github.com/Praket7/freebuff-mcp#readme",
-  "bugs": { "url": "https://github.com/Praket7/freebuff-mcp/issues" },
+  "bugs": {
+    "url": "https://github.com/Praket7/freebuff-mcp/issues"
+  },
   "license": "MIT",
-  "publishConfig": { "access": "public" },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "bin": {
     "freebuff-mcp": "dist/src/cli.js"
