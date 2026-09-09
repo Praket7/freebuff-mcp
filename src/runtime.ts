@@ -69,6 +69,8 @@ function desktopLogCandidates(): string[] {
 function desktopReadinessCandidates(): string[] {
   const home = os.homedir();
   return [
+    ...(process.env.FREEBUFF_DESKTOP_STATE_PATH ? [process.env.FREEBUFF_DESKTOP_STATE_PATH] : []),
+    path.join(home, '.config', 'freebuff-desktop', 'state.json'),
     path.join(process.env.APPDATA ?? '', 'Freebuff', 'orchestrator.json'),
     path.join(process.env.APPDATA ?? '', 'Freebuff', 'readiness.json'),
     path.join(home, 'Library', 'Application Support', 'Freebuff', 'orchestrator.json'),
@@ -79,8 +81,26 @@ function desktopReadinessCandidates(): string[] {
 }
 type DesktopCandidate = { url: string; launchId?: string; pid?: number; freshness?: number };
 function processIsAlive(pid: number | undefined): boolean { if (!pid) return true; try { process.kill(pid, 0); return true; } catch { return false; } }
+async function discoverLiveFreebuffProcess(): Promise<DesktopCandidate | null> {
+  if (process.platform !== 'darwin' && process.platform !== 'linux') return null;
+  try {
+    const { stdout } = await execFileAsync('ps', ['eww', '-Ao', 'pid,command'], { timeout: 2000 });
+    for (const line of stdout.split('\n')) {
+      if (!line.includes('orchestrator.js')) continue;
+      const pid = Number(line.match(/^\s*(\d+)/)?.[1]);
+      const launchId = line.match(/FREEBUFF_LAUNCH_ID=([^\s]+)/)?.[1];
+      const port = Number(line.match(/FREEBUFF_SHELL_LIFETIME_PORT=(\d+)/)?.[1] ?? line.match(/PORT=(\d+)/)?.[1]);
+      if (Number.isInteger(pid) && pid > 0 && launchId && Number.isInteger(port) && port > 0 && port < 65536) {
+        return { pid, launchId, url: `http://127.0.0.1:${port}`, freshness: Date.now() };
+      }
+    }
+  } catch { /* live process discovery is best effort */ }
+  return null;
+}
 async function discoverDesktopCandidates(): Promise<DesktopCandidate[]> {
   const candidates: DesktopCandidate[] = [];
+  const live = await discoverLiveFreebuffProcess();
+  if (live) candidates.push(live);
   for (const file of desktopReadinessCandidates()) {
     try {
       const value = asRecord(JSON.parse(await fs.readFile(file, 'utf8')));
