@@ -89,7 +89,13 @@ async function discoverLiveFreebuffProcess(): Promise<DesktopCandidate | null> {
       if (!line.includes('orchestrator.js')) continue;
       const pid = Number(line.match(/^\s*(\d+)/)?.[1]);
       const launchId = line.match(/FREEBUFF_LAUNCH_ID=([^\s]+)/)?.[1];
-      const port = Number(line.match(/FREEBUFF_SHELL_LIFETIME_PORT=(\d+)/)?.[1] ?? line.match(/PORT=(\d+)/)?.[1]);
+      let port = Number(line.match(/FREEBUFF_ORCHESTRATOR_PORT=(\d+)/)?.[1]);
+      if (!port) {
+        try {
+          const { stdout: sockets } = await execFileAsync('lsof', ['-nP', '-a', '-p', String(pid), '-iTCP', '-sTCP:LISTEN'], { timeout: 2000 });
+          port = Number(sockets.match(/TCP\s+127\.0\.0\.1:(\d+)\s+\(LISTEN\)/)?.[1]);
+        } catch { /* lsof is unavailable; continue with other candidates */ }
+      }
       if (Number.isInteger(pid) && pid > 0 && launchId && Number.isInteger(port) && port > 0 && port < 65536) {
         return { pid, launchId, url: `http://127.0.0.1:${port}`, freshness: Date.now() };
       }
