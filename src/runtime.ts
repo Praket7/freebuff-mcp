@@ -79,6 +79,16 @@ function desktopReadinessCandidates(): string[] {
     path.join(home, '.config', 'Freebuff', 'readiness.json'),
   ].filter((value, index, values) => value && values.indexOf(value) === index);
 }
+function desktopHandoffCandidates(): string[] {
+  const home = os.homedir();
+  return [
+    ...(process.env.FREEBUFF_MCP_HANDOFF_FILE ? [process.env.FREEBUFF_MCP_HANDOFF_FILE] : []),
+    path.join(process.env.LOCALAPPDATA ?? '', 'Freebuff', 'mcp-connection.json'),
+    path.join(process.env.APPDATA ?? '', 'Freebuff', 'mcp-connection.json'),
+    path.join(home, '.config', 'freebuff-desktop', 'mcp-connection.json'),
+    path.join(home, 'Library', 'Application Support', 'Freebuff', 'mcp-connection.json'),
+  ].filter((value, index, values) => value && values.indexOf(value) === index);
+}
 type DesktopCandidate = { url: string; launchId?: string; pid?: number; freshness?: number };
 function processIsAlive(pid: number | undefined): boolean { if (!pid) return true; try { process.kill(pid, 0); return true; } catch { return false; } }
 async function discoverLiveFreebuffProcess(): Promise<DesktopCandidate | null> {
@@ -107,6 +117,20 @@ async function discoverDesktopCandidates(): Promise<DesktopCandidate[]> {
   const candidates: DesktopCandidate[] = [];
   const live = await discoverLiveFreebuffProcess();
   if (live) candidates.push(live);
+  for (const file of desktopHandoffCandidates()) {
+    try {
+      const value = asRecord(JSON.parse(await fs.readFile(file, 'utf8')));
+      const port = typeof value?.port === 'number' || typeof value?.port === 'string' ? Number(value.port) : undefined;
+      const url = asString(value?.url) ?? (port && port > 0 && port < 65536 ? `http://127.0.0.1:${port}` : undefined);
+      const launchId = asString(value?.launchId) ?? asString(value?.['launch-id']) ?? asString(value?.launch_id);
+      const pidValue = Number(value?.pid ?? value?.processId ?? value?.process_id);
+      const freshnessValue = value?.expiresAt ?? value?.expires_at ?? value?.timestamp ?? value?.updatedAt ?? value?.updated_at;
+      const freshness = typeof freshnessValue === 'number' ? freshnessValue : typeof freshnessValue === 'string' ? Date.parse(freshnessValue) : undefined;
+      const pid = Number.isInteger(pidValue) && pidValue > 0 ? pidValue : undefined;
+      const notExpired = !value?.expiresAt && !value?.expires_at || (typeof freshness === 'number' && freshness > Date.now());
+      if (url && launchId && processIsAlive(pid) && notExpired) candidates.push({ url, launchId, pid, freshness: Date.now() });
+    } catch { /* the handoff is optional and may be absent during startup */ }
+  }
   for (const file of desktopReadinessCandidates()) {
     try {
       const value = asRecord(JSON.parse(await fs.readFile(file, 'utf8')));

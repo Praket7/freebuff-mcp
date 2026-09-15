@@ -109,6 +109,31 @@ test('stale readiness metadata is ignored', async () => {
   try { assert.equal(await discoverDesktopCandidate(),null); } finally { globalThis.fetch=previousFetch; if(previousFile===undefined)delete process.env.FREEBUFF_READINESS_FILE;else process.env.FREEBUFF_READINESS_FILE=previousFile; await fs.unlink(file).catch(()=>undefined); }
 });
 
+test('Windows MCP handoff metadata enables verified Desktop writes', async () => {
+  const file = path.join(os.tmpdir(), `freebuff-handoff-${Date.now()}-${Math.random()}.json`);
+  const previousFile = process.env.FREEBUFF_MCP_HANDOFF_FILE;
+  const previousFetch = globalThis.fetch;
+  await fs.writeFile(file, JSON.stringify({ url: 'http://127.0.0.1:55355', launchId: 'handoff-launch', pid: process.pid, expiresAt: new Date(Date.now() + 60_000).toISOString() }));
+  process.env.FREEBUFF_MCP_HANDOFF_FILE = file;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const headers = init?.headers as Record<string, string> | undefined;
+    if (url.endsWith('/api/projects')) { assert.equal(headers?.['x-freebuff-launch-id'], 'handoff-launch'); return new Response(JSON.stringify({ projects: [] }), { status: 200 }); }
+    if (url.endsWith('/healthz')) { assert.equal(headers?.['x-freebuff-launch-id'], 'handoff-launch'); return new Response(JSON.stringify({ ok: true }), { status: 200 }); }
+    throw new Error(`unexpected ${url}`);
+  };
+  try {
+    const candidate = await discoverDesktopCandidate();
+    assert.deepEqual(candidate?.launchId, 'handoff-launch');
+    const runtime = new DesktopOrchestratorRuntime();
+    assert.equal((await runtime.capabilities()).readOnly, false);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousFile === undefined) delete process.env.FREEBUFF_MCP_HANDOFF_FILE; else process.env.FREEBUFF_MCP_HANDOFF_FILE = previousFile;
+    await fs.unlink(file).catch(() => undefined);
+  }
+});
+
 test('separate bridge instances refresh independently after a rotation', async () => {
   const previousFetch=globalThis.fetch; const previousLaunch=process.env.FREEBUFF_LAUNCH_ID; process.env.FREEBUFF_LAUNCH_ID='first'; const seen:string[]=[];
   globalThis.fetch=async(input,init)=>{ const url=String(input); const launch=(init?.headers as Record<string,string> | undefined)?.['x-freebuff-launch-id'] ?? ''; if(url.endsWith('/api/projects')){seen.push(launch);return new Response(JSON.stringify({projects:[]}));} if(url.endsWith('/healthz'))return new Response(JSON.stringify({ok:true})); throw new Error('unexpected'); };

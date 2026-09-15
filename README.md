@@ -36,7 +36,18 @@ FREEBUFF_PROJECT_ROOT = '/Users/YOUR_NAME/Desktop/freebuff-work'
 # FREEBUFF_CLI_PATH = '/Users/YOUR_NAME/.config/manicode/freebuff'
 ```
 
-Desktop discovery reads dynamic port/launch metadata when Freebuff exposes a readiness file, then verifies the launch ID through `/healthz`. If that handshake is unavailable, it stays read-only. Use the explicit CLI configuration below when you need bridge-owned prompt injection.
+Desktop discovery reads dynamic port/launch metadata when Freebuff exposes a readiness file, then verifies the launch ID through `/healthz`. On Windows, the supported handoff file is `mcp-connection.json` under `%LOCALAPPDATA%\Freebuff` (or the path in `FREEBUFF_MCP_HANDOFF_FILE`) with this shape:
+
+```json
+{
+  "url": "http://127.0.0.1:58858",
+  "launchId": "desktop-minted-launch-id",
+  "pid": 12345,
+  "expiresAt": "2030-01-01T00:00:00.000Z"
+}
+```
+
+The Desktop must create this file with the current-user-only ACL, rotate it whenever the orchestrator restarts, and remove or expire it on shutdown. The MCP never reads another process's memory, command line, or environment to recover a secret. It verifies the handoff with `/healthz` before exposing mutation tools. If the handoff is absent or stale, it remains read-only and reports that fact in `freebuff-mcp doctor`.
 
 ## Configure Codex for CLI-only mode
 
