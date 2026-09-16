@@ -34,6 +34,15 @@ test('stores bounded incremental progress and wakes waiters', async () => {
   assert.equal(snapshot.connected, true);
 });
 
+test('notifies resource subscribers when progress changes', () => {
+  const store = new ProgressStore(); const seen: string[] = [];
+  const unsubscribe = store.subscribe(threadId => seen.push(threadId));
+  store.append({ threadId:'thread-1', timestamp:new Date().toISOString(), kind:'turn_state', state:'running' });
+  unsubscribe();
+  store.append({ threadId:'thread-1', timestamp:new Date().toISOString(), kind:'completed', state:'completed' });
+  assert.deepEqual(seen, ['thread-1']);
+});
+
 test('event client sends launch ID and filters by thread through the store', async () => {
   const previous = globalThis.fetch; const requests: Request[] = [];
   globalThis.fetch = async (input, init) => {
