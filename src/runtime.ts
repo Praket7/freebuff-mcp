@@ -31,6 +31,8 @@ export interface Runtime {
   searchHistory(query: string): Promise<Json>;
   setModel(id: string, model: string, harnessId?: string): Promise<Json>;
   setReasoning(id: string, effort: string | null): Promise<Json>;
+  onProgress?(listener: (threadId: string) => void): () => void;
+  createSession?(cwd: string): Promise<string>;
 }
 
 async function readJson(file: string): Promise<Json | undefined> { try { return JSON.parse(await fs.readFile(file, 'utf8')) as Json; } catch { return undefined; } }
@@ -179,6 +181,7 @@ export class DesktopOrchestratorRuntime implements Runtime {
   async setModel(id:string,model:string,harnessId='codebuff'){await this.assertWritable();if(model.length>200)throw new Error('Invalid model');return redact(await this.requestWithRefresh('POST',`/api/thread/${encodeURIComponent(assertSafeId(id))}/agent`,{model,harnessId})) as Json;}
   async setReasoning(id:string,effort:string|null){await this.assertWritable();return redact(await this.requestWithRefresh('POST',`/api/thread/${encodeURIComponent(assertSafeId(id))}/effort`,{effort})) as Json;}
   dispose(): void { this.events.dispose(); }
+  onProgress(listener: (threadId: string) => void): () => void { return this.progress.subscribe(listener); }
 }
 
 export class ReadOnlyRuntime extends DesktopOrchestratorRuntime {
@@ -223,6 +226,7 @@ export class CliPtyRuntime implements Runtime {
   async setModel(id:string,model:string): Promise<Json> { return redact(await this.manager.send(id,`/model ${model}`,this.root,assertSafeId(id))) as Json; }
   async setReasoning(id:string,effort:string|null): Promise<Json> { return redact(await this.manager.send(id,`/reasoning ${effort ?? ''}`,this.root,assertSafeId(id))) as Json; }
   dispose(): void { this.manager.dispose(); }
+  async createSession(cwd: string): Promise<string> { return `cli-${createHash('sha256').update(path.resolve(cwd)).digest('hex').slice(0, 24)}-${Date.now()}`; }
 }
 export class HybridRuntime implements Runtime {
   private cli = new CliPtyRuntime();
@@ -238,6 +242,8 @@ export class HybridRuntime implements Runtime {
   listProjects(){return this.desktop.listProjects();} listThreads(p?:string){return this.desktop.listThreads(p);} getThread(id:string){return this.desktop.getThread(id);} getMessages(id:string){return this.desktop.getMessages(id);} activeWork(id?:string){return this.desktop.activeWork(id);} getThreadProgress(id:string,a?:number,l?:number){return this.desktop.getThreadProgress(id,a,l);} watchThread(id:string,a?:number,t?:number,l?:number){return this.desktop.watchThread(id,a,t,l);} getThreadProgressSummary(id:string){return this.desktop.getThreadProgressSummary(id);} watchActiveThreads(){return this.desktop.watchActiveThreads();} listFiles(id:string,r?:string){return this.desktop.listFiles(id,r);} readFile(id:string,r:string){return this.desktop.readFile(id,r);} listAttachments(id:string){return this.desktop.listAttachments(id);} listModels(){return this.desktop.listModels();} searchHistory(q:string){return this.desktop.searchHistory(q);}
   stop(id:string){return this.desktop.capabilities().then(c=>c.readOnly?Promise.reject(new Error('DESKTOP_THREAD_WRITE_REQUIRES_EXACT_CLI_SESSION')):this.desktop.stop(id));} resume(id:string){return this.desktop.capabilities().then(c=>c.readOnly?Promise.reject(new Error('DESKTOP_THREAD_WRITE_REQUIRES_EXACT_CLI_SESSION')):this.desktop.resume(id));} setModel(id:string,m:string,h?:string){return this.desktop.capabilities().then(c=>c.readOnly?Promise.reject(new Error('DESKTOP_THREAD_WRITE_REQUIRES_EXACT_CLI_SESSION')):this.desktop.setModel(id,m,h));} setReasoning(id:string,e:string|null){return this.desktop.capabilities().then(c=>c.readOnly?Promise.reject(new Error('DESKTOP_THREAD_WRITE_REQUIRES_EXACT_CLI_SESSION')):this.desktop.setReasoning(id,e));}
   dispose(){this.desktop.dispose();this.cli.dispose();}
+  onProgress(listener: (threadId: string) => void): () => void { return this.desktop.onProgress?.(listener) ?? (() => undefined); }
+  createSession(cwd: string): Promise<string> { return this.cli.createSession(cwd); }
 }
 export async function detectRuntime(): Promise<Runtime> {
   if (process.env.FREEBUFF_MCP_CLI_MODE === 'pty') return new CliPtyRuntime();
