@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.17
+
+- Restore full MCP v2 tool parity and structured results.
+- Stream ACP progress, map ACP sessions to backing CLI identities, and stop backing work on cancellation.
+- Emit MCP resource updates when Desktop progress changes.
+- Fix CI workflow YAML parsing.
+
 ## 0.1.16
 
 - Add MCP v2 stdio serving with structured tool results and Freebuff resources.
@@ -76,3 +83,7 @@ Expanded setup and compatibility guidance.
 # 0.1.9
 
 Removed the accidental Cursor specific integration.
+# 0.1.17
+
+- Restore full MCP v2 tool parity, including writes, progress, file, history, and attachment operations.
+- Fix CI workflow YAML parsing and clarify the generated legacy/CLI configuration entries.
