@@ -75,6 +75,8 @@ For a simpler view, call `get_thread_progress_summary`. It reports the current p
 
 ## Run directly with npm or npx
 
+The default `serve` command speaks MCP v2 over stdio and exposes Freebuff read state as structured resources (`freebuff://projects`, project threads, thread messages, and progress). Use `serve-acp` for the ACP adapter; it implements the stable ACP v1 wire contract while the ACP v2 SDK remains experimental.
+
 Install the published package:
 
 ```bash

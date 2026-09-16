@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.17
+
+- Restore full MCP v2 tool parity and structured results.
+- Stream ACP progress, map ACP sessions to backing CLI identities, and stop backing work on cancellation.
+- Emit MCP resource updates when Desktop progress changes.
+- Fix CI workflow YAML parsing.
+
+## 0.1.16
+
+- Add MCP v2 stdio serving with structured tool results and Freebuff resources.
+- Add `serve-acp`, an ACP session/prompt adapter with live session updates and cancellation.
+- Keep the v1 stdio server available as `serve-v1` during the migration.
+
+## 0.1.14
+
+- Harden project-file reads with sensitive-name blocking, text-only validation, redaction, and a 1 MB limit.
+- Redact normalized live-event fields, fix progress staleness, and close the progress lost-wakeup race.
+- Bound and clean up CLI PTY sessions and neutralize terminal control input.
+- Add granular hybrid mutation capability registration and use the safer node-pty beta.14 Windows baseline.
+
 ## 0.1.11
 
 - Update `node-pty` to `1.2.0-beta.15`, which includes the macOS `spawn-helper` packaging fix for `posix_spawnp failed`.
@@ -63,3 +83,7 @@ Expanded setup and compatibility guidance.
 # 0.1.9
 
 Removed the accidental Cursor specific integration.
+# 0.1.17
+
+- Restore full MCP v2 tool parity, including writes, progress, file, history, and attachment operations.
+- Fix CI workflow YAML parsing and clarify the generated legacy/CLI configuration entries.

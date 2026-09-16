@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { DesktopOrchestratorRuntime, detectRuntime, discoverDesktopCandidate } from '../src/runtime.js';
+import { DesktopOrchestratorRuntime, HybridRuntime, detectRuntime, discoverDesktopCandidate } from '../src/runtime.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -107,6 +107,52 @@ test('write refreshes authorization after Freebuff rotates its launch ID', async
 test('stale readiness metadata is ignored', async () => {
   const file=path.join(os.tmpdir(),`freebuff-stale-${Date.now()}-${Math.random()}.json`); const previousFile=process.env.FREEBUFF_READINESS_FILE; const previousFetch=globalThis.fetch; await fs.writeFile(file,JSON.stringify({url:'http://127.0.0.1:55354',launchId:'stale',pid:process.pid,timestamp:new Date(Date.now()-20*60_000).toISOString()})); process.env.FREEBUFF_READINESS_FILE=file; globalThis.fetch=async()=>new Response('{}',{status:503});
   try { assert.equal(await discoverDesktopCandidate(),null); } finally { globalThis.fetch=previousFetch; if(previousFile===undefined)delete process.env.FREEBUFF_READINESS_FILE;else process.env.FREEBUFF_READINESS_FILE=previousFile; await fs.unlink(file).catch(()=>undefined); }
+});
+
+test('read-only Desktop plus an installed CLI selects the hybrid runtime', async () => {
+  const previousMode = process.env.FREEBUFF_MCP_CLI_MODE;
+  const previousFetch = globalThis.fetch;
+  delete process.env.FREEBUFF_MCP_CLI_MODE;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith('/api/projects')) return new Response(JSON.stringify({ projects: [] }), { status: 200 });
+    throw new Error(`unexpected ${url}`);
+  };
+  try {
+    const runtime = new HybridRuntime(new DesktopOrchestratorRuntime('http://127.0.0.1:55354'));
+    const caps = await runtime.capabilities();
+    assert.equal(caps.selectedRuntime, 'hybrid');
+    assert.equal(caps.readOnly, false);
+    assert.equal(caps.status, 'desktop_read_only_cli_writable');
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousMode === undefined) delete process.env.FREEBUFF_MCP_CLI_MODE; else process.env.FREEBUFF_MCP_CLI_MODE = previousMode;
+  }
+});
+
+test('Windows MCP handoff metadata enables verified Desktop writes', async () => {
+  const file = path.join(os.tmpdir(), `freebuff-handoff-${Date.now()}-${Math.random()}.json`);
+  const previousFile = process.env.FREEBUFF_MCP_HANDOFF_FILE;
+  const previousFetch = globalThis.fetch;
+  await fs.writeFile(file, JSON.stringify({ url: 'http://127.0.0.1:55355', launchId: 'handoff-launch', pid: process.pid, expiresAt: new Date(Date.now() + 60_000).toISOString() }));
+  process.env.FREEBUFF_MCP_HANDOFF_FILE = file;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const headers = init?.headers as Record<string, string> | undefined;
+    if (url.endsWith('/api/projects')) { assert.equal(headers?.['x-freebuff-launch-id'], 'handoff-launch'); return new Response(JSON.stringify({ projects: [] }), { status: 200 }); }
+    if (url.endsWith('/healthz')) { assert.equal(headers?.['x-freebuff-launch-id'], 'handoff-launch'); return new Response(JSON.stringify({ ok: true }), { status: 200 }); }
+    throw new Error(`unexpected ${url}`);
+  };
+  try {
+    const candidate = await discoverDesktopCandidate();
+    assert.deepEqual(candidate?.launchId, 'handoff-launch');
+    const runtime = new DesktopOrchestratorRuntime();
+    assert.equal((await runtime.capabilities()).readOnly, false);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousFile === undefined) delete process.env.FREEBUFF_MCP_HANDOFF_FILE; else process.env.FREEBUFF_MCP_HANDOFF_FILE = previousFile;
+    await fs.unlink(file).catch(() => undefined);
+  }
 });
 
 test('separate bridge instances refresh independently after a rotation', async () => {
