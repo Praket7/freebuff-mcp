@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.13
+
+- Add a Desktop-first hybrid runtime for Windows and other systems where Desktop is discoverable but read-only.
+- Preserve Desktop as the source for projects, threads, messages, attachments, and live progress.
+- Route writes through the local CLI PTY only after resolving the Desktop project and checking the exact CLI conversation ID.
+- Report separate-session fallback explicitly instead of claiming the Desktop thread was mutated.
+- Keep stop, resume, model, and reasoning changes blocked unless Desktop authorization is available.
+
 ## 0.1.11
 
 - Update `node-pty` to `1.2.0-beta.15`, which includes the macOS `spawn-helper` packaging fix for `posix_spawnp failed`.

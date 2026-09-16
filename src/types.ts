@@ -8,7 +8,7 @@ export interface Capabilities {
   readOnly: boolean;
   endpoints: string[];
   notes: string[];
-  status?: 'desktop_read_only' | 'desktop_writable' | 'cli_ready' | 'cli_unavailable' | 'not_found';
+  status?: 'desktop_read_only' | 'desktop_writable' | 'desktop_read_only_cli_writable' | 'cli_ready' | 'cli_unavailable' | 'not_found';
   liveProgress?: 'connected' | 'stale' | 'unavailable';
   selectedRuntime?: string;
 }
