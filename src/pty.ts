@@ -46,6 +46,8 @@ export class CliPtyManager {
   async start(id: string, cwd: string, continueId?: string): Promise<CliSessionSnapshot> {
     const safeId = assertSafeId(id);
     const existing = this.sessions.get(safeId);
+    if (existing?.exited) { this.sessions.delete(safeId); }
+    if (this.sessions.size >= 16 && !existing) throw new Error('FREEBUFF_CLI_SESSION_LIMIT');
     if (existing) return { id: safeId, pid: existing.term.pid, output: existing.output, exited: existing.exited, exitCode: existing.exitCode };
     const file = await findFreebuffCli();
     if (!file) throw new Error('FREEBUFF_CLI_NOT_INSTALLED');
@@ -57,7 +59,7 @@ export class CliPtyManager {
     const state = { term, cwd, startedAt, conversationId: continueId, output: '', exited: false, exitCode: undefined as number | undefined };
     this.sessions.set(safeId, state);
     term.onData((data) => { state.output = (state.output + data).slice(-2_000_000); });
-    term.onExit(({ exitCode }) => { state.exited = true; state.exitCode = exitCode; });
+    term.onExit(({ exitCode }) => { state.exited = true; state.exitCode = exitCode; const timer = setTimeout(() => { if (this.sessions.get(safeId) === state) this.sessions.delete(safeId); }, 300_000); timer.unref?.(); });
     const deadline = Date.now() + 12_000;
     while (Date.now() < deadline && !/Enter a coding task or \/ for commands/i.test(state.output) && !/Not authenticated|Press ENTER to login/i.test(state.output)) await new Promise<void>((resolve) => setTimeout(resolve, 250));
     if (/Freebuff is already running/i.test(state.output) && process.env.FREEBUFF_CLI_TAKEOVER === '1') {
@@ -76,7 +78,7 @@ export class CliPtyManager {
     const state = this.sessions.get(assertSafeId(id));
     if (!state || state.exited) throw new Error('FREEBUFF_CLI_SESSION_EXITED');
     await new Promise<void>((resolve) => setTimeout(resolve, 300));
-    const clean = text.replace(/[\r\n]+/g, ' ');
+    const clean = text.replace(/[\u0000-\u001f\u007f\u001b]/g, ' ').replace(/[\r\n]+/g, ' ').replace(/\x1b\[201~/g, ' ');
     state.term.write('\x15');
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
     state.term.write(`\x1b[200~${clean}\x1b[201~`);
