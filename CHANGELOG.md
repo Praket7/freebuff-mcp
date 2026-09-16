@@ -1,20 +1,11 @@
 # Changelog
 
-## 0.1.15
-
-- Accept the current Desktop thread envelope shape when resolving project identity for hybrid writes.
-
 ## 0.1.14
 
-- Ensure hybrid writes discover the installed CLI even when a caller sends a mutation before requesting capabilities.
-
-## 0.1.13
-
-- Add a Desktop-first hybrid runtime for Windows and other systems where Desktop is discoverable but read-only.
-- Preserve Desktop as the source for projects, threads, messages, attachments, and live progress.
-- Route writes through the local CLI PTY only after resolving the Desktop project and checking the exact CLI conversation ID.
-- Report separate-session fallback explicitly instead of claiming the Desktop thread was mutated.
-- Keep stop, resume, model, and reasoning changes blocked unless Desktop authorization is available.
+- Harden project-file reads with sensitive-name blocking, text-only validation, redaction, and a 1 MB limit.
+- Redact normalized live-event fields, fix progress staleness, and close the progress lost-wakeup race.
+- Bound and clean up CLI PTY sessions and neutralize terminal control input.
+- Add granular hybrid mutation capability registration and use the safer node-pty beta.14 Windows baseline.
 
 ## 0.1.11
 
