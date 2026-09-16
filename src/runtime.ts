@@ -5,7 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { Capabilities, ProjectSummary, ThreadDetail, ThreadSummary, Json, ThreadProgressSnapshot, ModelCapability } from './types.js';
-import { assertSafeId, blocked, redact, safeProjectPath, sanitizeFreebuff } from './security.js';
+import { assertSafeId, blocked, redact, safeProjectPath, safeTextContent, sanitizeFreebuff } from './security.js';
 import { CliPtyManager, findFreebuffCli, findLatestCliConversationId } from './pty.js';
 import { DesktopEventClient, ProgressStore } from './events.js';
 
@@ -79,16 +79,6 @@ function desktopReadinessCandidates(): string[] {
     path.join(home, '.config', 'Freebuff', 'readiness.json'),
   ].filter((value, index, values) => value && values.indexOf(value) === index);
 }
-function desktopHandoffCandidates(): string[] {
-  const home = os.homedir();
-  return [
-    ...(process.env.FREEBUFF_MCP_HANDOFF_FILE ? [process.env.FREEBUFF_MCP_HANDOFF_FILE] : []),
-    path.join(process.env.LOCALAPPDATA ?? '', 'Freebuff', 'mcp-connection.json'),
-    path.join(process.env.APPDATA ?? '', 'Freebuff', 'mcp-connection.json'),
-    path.join(home, '.config', 'freebuff-desktop', 'mcp-connection.json'),
-    path.join(home, 'Library', 'Application Support', 'Freebuff', 'mcp-connection.json'),
-  ].filter((value, index, values) => value && values.indexOf(value) === index);
-}
 type DesktopCandidate = { url: string; launchId?: string; pid?: number; freshness?: number };
 function processIsAlive(pid: number | undefined): boolean { if (!pid) return true; try { process.kill(pid, 0); return true; } catch { return false; } }
 async function discoverLiveFreebuffProcess(): Promise<DesktopCandidate | null> {
@@ -117,20 +107,6 @@ async function discoverDesktopCandidates(): Promise<DesktopCandidate[]> {
   const candidates: DesktopCandidate[] = [];
   const live = await discoverLiveFreebuffProcess();
   if (live) candidates.push(live);
-  for (const file of desktopHandoffCandidates()) {
-    try {
-      const value = asRecord(JSON.parse(await fs.readFile(file, 'utf8')));
-      const port = typeof value?.port === 'number' || typeof value?.port === 'string' ? Number(value.port) : undefined;
-      const url = asString(value?.url) ?? (port && port > 0 && port < 65536 ? `http://127.0.0.1:${port}` : undefined);
-      const launchId = asString(value?.launchId) ?? asString(value?.['launch-id']) ?? asString(value?.launch_id);
-      const pidValue = Number(value?.pid ?? value?.processId ?? value?.process_id);
-      const freshnessValue = value?.expiresAt ?? value?.expires_at ?? value?.timestamp ?? value?.updatedAt ?? value?.updated_at;
-      const freshness = typeof freshnessValue === 'number' ? freshnessValue : typeof freshnessValue === 'string' ? Date.parse(freshnessValue) : undefined;
-      const pid = Number.isInteger(pidValue) && pidValue > 0 ? pidValue : undefined;
-      const notExpired = !value?.expiresAt && !value?.expires_at || (typeof freshness === 'number' && freshness > Date.now());
-      if (url && launchId && processIsAlive(pid) && notExpired) candidates.push({ url, launchId, pid, freshness: Date.now() });
-    } catch { /* the handoff is optional and may be absent during startup */ }
-  }
   for (const file of desktopReadinessCandidates()) {
     try {
       const value = asRecord(JSON.parse(await fs.readFile(file, 'utf8')));
@@ -184,7 +160,7 @@ export class DesktopOrchestratorRuntime implements Runtime {
   private async requestWithRefresh<T>(method: string, pathname: string, body?: unknown): Promise<T> { try { return await this.request<T>(method, pathname, body); } catch (error) { if (!/HTTP (401|403|404)/.test(String(error))) throw error; this.invalidateConnection(); await this.refreshDesktopConnection(); return await this.request<T>(method, pathname, body); } }
   async listProjects(): Promise<ProjectSummary[]> { const record=asRecord(await this.request<unknown>('GET','/api/projects')); if (!record || !Array.isArray(record.projects)) throw new Error('Invalid Freebuff /api/projects response'); return record.projects.flatMap((value) => { const p=asRecord(value); const projectPath=asString(p?.path); return projectPath ? [{ id:projectPath, path:projectPath, name:path.basename(projectPath), metadata:redact(p as Record<string, Json>) as Json }] : []; }); }
   async listThreads(projectId?: string): Promise<ThreadSummary[]> { const projects = await this.listProjects(); return projects.filter(p=>!projectId||p.id===projectId||p.path===projectId).flatMap(p=>{const raw=asRecord(p.metadata); const threads=Array.isArray(raw?.threads)?raw.threads:[]; return threads.flatMap((value)=>{const t=asRecord(value); const id=asString(t?.id); if(!id)return []; return [{id,projectId:p.id,title:asString(t?.title),state:asString(t?.turnState),model:asString(t?.model),metadata:redact(t as Record<string, Json>) as Json}];});}); }
-  async getThread(id:string):Promise<ThreadDetail>{const envelope=asRecord(await this.request('GET',`/api/thread/${encodeURIComponent(assertSafeId(id))}`));const value=asRecord(envelope?.thread)??envelope;if(!value)throw new Error('Invalid Freebuff thread response');const threadId=asString(value.id)??assertSafeId(id);const messages=Array.isArray(envelope?.messages)?envelope.messages:value.messages;return {id:threadId,projectId:asString(value.projectId),title:asString(value.title),state:asString(value.turnState),model:asString(value.model),messages:Array.isArray(messages)?sanitizeFreebuff(messages) as Json[]:undefined,activeWork:value.activeWork===undefined?undefined:sanitizeFreebuff(value.activeWork) as Json,live:this.progress.read(threadId),metadata:redact(value as Record<string, Json>) as Json};}
+  async getThread(id:string):Promise<ThreadDetail>{const value=asRecord(await this.request('GET',`/api/thread/${encodeURIComponent(assertSafeId(id))}`));if(!value)throw new Error('Invalid Freebuff thread response');const threadId=asString(value.id)??assertSafeId(id);return {id:threadId,projectId:asString(value.projectId),title:asString(value.title),state:asString(value.turnState),model:asString(value.model),messages:Array.isArray(value.messages)?sanitizeFreebuff(value.messages) as Json[]:undefined,activeWork:value.activeWork===undefined?undefined:sanitizeFreebuff(value.activeWork) as Json,live:this.progress.read(threadId),metadata:redact(value as Record<string, Json>) as Json};}
   async getMessages(id:string):Promise<Json>{const t=await this.getThread(id); return sanitizeFreebuff(t.messages ?? []) as Json;}
   async activeWork(id?:string):Promise<Json>{const threads=await this.listThreads();return threads.filter(t=>(!id||t.id===id)&&t.state&&t.state!=='idle').map(t=>({...t,live:this.progress.read(t.id)})) as unknown as Json;}
   async getThreadProgress(id:string, afterSequence=0, limit=50):Promise<ThreadProgressSnapshot>{const safe=assertSafeId(id); await this.capabilities(); return this.progress.read(safe, afterSequence, limit);}
@@ -192,7 +168,7 @@ export class DesktopOrchestratorRuntime implements Runtime {
   async getThreadProgressSummary(id:string):Promise<ThreadProgressSnapshot>{const safe=assertSafeId(id); await this.capabilities(); const snapshot=this.progress.read(safe, 0, 1); return {...snapshot, events:[]};}
   async watchActiveThreads():Promise<ThreadProgressSnapshot[]>{await this.capabilities(); const known = new Set(this.progress.active()); try { const threads = await this.listThreads(); for (const thread of threads) if (thread.state && !['idle','completed','failed'].includes(thread.state)) known.add(thread.id); } catch { /* progress remains useful if the snapshot endpoint is temporarily unavailable */ } return [...known].map(id => this.progress.read(id, 0, 1));}
   async listFiles(projectId:string, relative='.') { const p=(await this.listProjects()).find(x=>x.id===projectId||x.path===projectId); if(!p) throw new Error('Project not found'); const root=await fs.realpath(p.path); const dir=relative==='.'?root:await fs.realpath(path.resolve(root,relative)); const rel=path.relative(root,dir); if(rel.startsWith('..')||path.isAbsolute(rel)||rel.split(path.sep).some(part=>blocked.test(part))) throw new Error('Path escapes the Freebuff project'); const entries=await fs.readdir(dir,{withFileTypes:true}); return entries.filter(e=>e.isFile()&&!blocked.test(e.name)).map(e=>path.relative(root,path.join(dir,e.name))); }
-  async readFile(projectId:string, relative:string){const p=(await this.listProjects()).find(x=>x.id===projectId||x.path===projectId);if(!p)throw new Error('Project not found');const file=await safeProjectPath(p.path,relative);return {path:relative,content:await fs.readFile(file,'utf8')};}
+  async readFile(projectId:string, relative:string){const p=(await this.listProjects()).find(x=>x.id===projectId||x.path===projectId);if(!p)throw new Error('Project not found');const file=await safeProjectPath(p.path,relative);return {path:relative,content:safeTextContent(await fs.readFile(file),file)};}
   async listAttachments(id:string):Promise<Json>{const safe=assertSafeId(id); const value=await this.request<unknown>('GET',`/api/thread/${encodeURIComponent(safe)}/attachment`); return sanitizeFreebuff(value) as Json;}
   private async assertWritable(): Promise<void> { const caps = await this.refreshDesktopConnection(); if (!this.launchId || caps.readOnly) throw new Error('Freebuff Desktop writes are unavailable'); }
   async sendMessage(id:string,text:string){await this.assertWritable();if(!text||text.length>100000)throw new Error('Message must be 1 to 100000 characters');return redact(await this.requestWithRefresh('POST',`/api/thread/${encodeURIComponent(assertSafeId(id))}/message`,{text})) as Json;}
@@ -201,7 +177,7 @@ export class DesktopOrchestratorRuntime implements Runtime {
   async listModels(){return {note:'The installed Desktop does not expose a standalone model-catalog route. Use the current thread model and set_model validation.'};}
   async searchHistory(query:string):Promise<Json>{const q=query.trim().toLowerCase(); if (!q || q.length > 200) throw new Error('Query must be 1 to 200 characters'); const projects=await this.listProjects(); const results: Json[]=[]; for (const project of projects) { const raw=asRecord(project.metadata); const threads=Array.isArray(raw?.threads)?raw.threads:[]; for(const value of threads){const t=asRecord(value); const threadId=asString(t?.id); if(threadId && JSON.stringify(t).toLowerCase().includes(q)) results.push({projectId:project.id,threadId,title:asString(t?.title) ?? '',state:asString(t?.turnState) ?? ''});} } return results.slice(0,100);}
   async setModel(id:string,model:string,harnessId='codebuff'){await this.assertWritable();if(model.length>200)throw new Error('Invalid model');return redact(await this.requestWithRefresh('POST',`/api/thread/${encodeURIComponent(assertSafeId(id))}/agent`,{model,harnessId})) as Json;}
-  async setReasoning(id:string,effort:string | null){await this.assertWritable();return redact(await this.requestWithRefresh('POST',`/api/thread/${encodeURIComponent(assertSafeId(id))}/effort`,{effort})) as Json;}
+  async setReasoning(id:string,effort:string|null){await this.assertWritable();return redact(await this.requestWithRefresh('POST',`/api/thread/${encodeURIComponent(assertSafeId(id))}/effort`,{effort})) as Json;}
   dispose(): void { this.events.dispose(); }
 }
 
@@ -234,114 +210,34 @@ export class CliPtyRuntime implements Runtime {
   async getThreadProgressSummary(id:string):Promise<ThreadProgressSnapshot>{ return this.getThreadProgress(id); }
   async watchActiveThreads():Promise<ThreadProgressSnapshot[]>{ return []; }
   async listFiles(_projectId:string, relative='.') { const root=await fs.realpath(this.root); const dir=relative==='.'?root:await fs.realpath(path.resolve(root,relative)); const rel=path.relative(root,dir); if(rel.startsWith('..')||path.isAbsolute(rel)||rel.split(path.sep).some(part=>blocked.test(part))) throw new Error('Path escapes the Freebuff project'); const entries=await fs.readdir(dir,{withFileTypes:true}); return entries.filter(e=>e.isFile()&&!blocked.test(e.name)).map(e=>path.relative(root,path.join(dir,e.name))); }
-  async readFile(_projectId:string, relative:string): Promise<{path:string;content:string}> { const file=await safeProjectPath(this.root,relative); return {path:relative,content:await fs.readFile(file,'utf8')}; }
+  async readFile(_projectId:string, relative:string): Promise<{path:string;content:string}> { const file=await safeProjectPath(this.root,relative); return {path:relative,content:safeTextContent(await fs.readFile(file),file)}; }
   async listAttachments(_id:string):Promise<Json>{return [];}
-  async sendMessage(id:string,text:string): Promise<Json> { return redact(await this.manager.send(id,text,this.root)) as Json; }
-  async hasConversation(id: string, cwd = this.root): Promise<boolean> {
-    const safe = assertSafeId(id);
-    return (await cliHistory(cwd)).some((conversation) => conversation.id === safe);
-  }
-  async sendMessageInProject(id: string, text: string, cwd: string, continueId?: string): Promise<Json> {
-    return redact(await this.manager.send(id, text, cwd, continueId)) as Json;
-  }
-  async sendNewMessageInProject(id: string, text: string, cwd: string): Promise<Json> {
-    return redact(await this.manager.send(id, text, cwd)) as Json;
-  }
+  async sendMessage(id:string,text:string): Promise<Json> { return redact(await this.manager.send(id,text,this.root,assertSafeId(id))) as Json; }
+  async hasConversation(id:string,cwd=this.root):Promise<boolean>{return (await cliHistory(cwd)).some(c=>c.id===assertSafeId(id));}
+  async sendMessageInProject(id:string,text:string,cwd:string,continueId?:string):Promise<Json>{return redact(await this.manager.send(id,text,cwd,continueId)) as Json;}
+  async sendNewMessageInProject(id:string,text:string,cwd:string):Promise<Json>{return redact(await this.manager.send(id,text,cwd)) as Json;}
   async stop(id:string): Promise<Json> { return redact(this.manager.stop(id)) as Json; }
-  async resume(id:string): Promise<Json> { return redact(await this.manager.resumeLatest(id,this.root)) as Json; }
+  async resume(id:string): Promise<Json> { return redact(await this.manager.send(id,'/resume',this.root,assertSafeId(id))) as Json; }
   async listModels(): Promise<Json> { return { note:'Use the Freebuff CLI /model picker inside a managed PTY session.' }; }
   async searchHistory(query:string):Promise<Json>{const q=query.trim().toLowerCase(); if(!q||q.length>200)throw new Error('Query must be 1 to 200 characters'); return (await cliHistory(this.root)).filter(c=>JSON.stringify(c).toLowerCase().includes(q)).slice(0,100).map(c=>({threadId:c.id,title:c.meta.firstPrompt,state:c.state}));}
-  async setModel(id:string,model:string): Promise<Json> { return redact(await this.manager.sendToLatest(id,`/model ${model}`,this.root)) as Json; }
-  async setReasoning(id:string,effort:string|null): Promise<Json> { return redact(await this.manager.sendToLatest(id,`/reasoning ${effort ?? ''}`,this.root)) as Json; }
+  async setModel(id:string,model:string): Promise<Json> { return redact(await this.manager.send(id,`/model ${model}`,this.root,assertSafeId(id))) as Json; }
+  async setReasoning(id:string,effort:string|null): Promise<Json> { return redact(await this.manager.send(id,`/reasoning ${effort ?? ''}`,this.root,assertSafeId(id))) as Json; }
   dispose(): void { this.manager.dispose(); }
 }
-
-/**
- * Desktop-first runtime with a deliberately explicit write fallback.
- *
- * Desktop remains authoritative for projects, threads, messages, attachments,
- * and live progress. When its launch authorization is unavailable, writes may
- * use the local CLI PTY, but only after resolving the Desktop thread's project
- * path and checking whether the exact thread ID exists in the CLI store.
- */
 export class HybridRuntime implements Runtime {
-  private readonly cli: CliPtyRuntime;
+  private cli = new CliPtyRuntime();
   private cliAvailable = false;
-  constructor(private readonly desktop: DesktopOrchestratorRuntime, cli = new CliPtyRuntime()) {
-    this.cli = cli;
-  }
+  constructor(private desktop: DesktopOrchestratorRuntime, cli?: CliPtyRuntime) { if (cli) this.cli = cli; }
   async capabilities(): Promise<Capabilities> {
-    const desktopCaps = await this.desktop.capabilities();
-    this.cliAvailable = Boolean(await findFreebuffCli());
-    if (!desktopCaps.orchestrator || !this.cliAvailable) return desktopCaps;
-    const writable = !desktopCaps.readOnly;
-    return {
-      ...desktopCaps,
-      readOnly: false,
-      status: writable ? desktopCaps.status : 'desktop_read_only_cli_writable',
-      selectedRuntime: 'hybrid',
-      endpoints: [...desktopCaps.endpoints, 'managed CLI PTY fallback'],
-      notes: [
-        ...desktopCaps.notes,
-        writable
-          ? 'Desktop writes are authorized; CLI PTY is retained as a recovery path.'
-          : 'Desktop is read-only. Mutations use the CLI PTY after exact project/thread resolution.',
-      ],
-    };
+    const caps = await this.desktop.capabilities(); this.cliAvailable = Boolean(await findFreebuffCli());
+    if (!caps.orchestrator || !this.cliAvailable) return caps;
+    return { ...caps, readOnly:false, selectedRuntime:'hybrid', status:caps.readOnly?'desktop_read_only_cli_writable':caps.status, actions:{sendMessage:true,stop:!caps.readOnly,resume:!caps.readOnly,setModel:!caps.readOnly,setReasoning:!caps.readOnly}, endpoints:[...caps.endpoints,'managed CLI PTY fallback'], notes:[...caps.notes, caps.readOnly?'Desktop reads remain authoritative; send_message uses an exact-ID CLI fallback.':'Desktop writes are authorized; CLI PTY is retained as recovery.'] };
   }
-  private async projectPathForThread(id: string): Promise<string> {
-    const thread = await this.desktop.getThread(id);
-    const projects = await this.desktop.listProjects();
-    const project = projects.find((candidate) => candidate.id === thread.projectId || candidate.path === thread.projectId)
-      ?? projects.find((candidate) => candidate.id === id || candidate.path === id);
-    if (!project?.path) throw new Error('DESKTOP_THREAD_PROJECT_NOT_FOUND');
-    return await fs.realpath(project.path);
-  }
-  private async routeCliWrite(id: string, text: string): Promise<Json> {
-    if (!this.cliAvailable) this.cliAvailable = Boolean(await findFreebuffCli());
-    if (!this.cliAvailable) throw new Error('FREEBUFF_CLI_NOT_INSTALLED');
-    const cwd = await this.projectPathForThread(id);
-    const exact = await this.cli.hasConversation(id, cwd);
-    const result = exact
-      ? await this.cli.sendMessageInProject(id, text, cwd, id)
-      : await this.cli.sendNewMessageInProject(`desktop-fallback-${createHash('sha256').update(`${cwd}\0${id}`).digest('hex').slice(0, 24)}`, text, cwd);
-    return {
-      ...asRecord(result),
-      routedVia: 'cli_pty',
-      desktopThreadId: id,
-      projectPath: cwd,
-      identityMatch: exact,
-      separateSession: !exact,
-      warning: exact
-        ? 'Desktop was read-only; the exact Desktop thread ID was found in the local CLI store.'
-        : 'Desktop was read-only and the exact thread ID was not found in the CLI store. A separate CLI session was created; the Desktop thread was not mutated.',
-    } as Json;
-  }
-  private async write<T>(desktopWrite: () => Promise<T>, cliWrite: () => Promise<Json>): Promise<T | Json> {
-    const caps = await this.desktop.capabilities();
-    if (!caps.readOnly) return desktopWrite();
-    return cliWrite();
-  }
-  listProjects(): Promise<ProjectSummary[]> { return this.desktop.listProjects(); }
-  listThreads(projectId?: string): Promise<ThreadSummary[]> { return this.desktop.listThreads(projectId); }
-  getThread(id: string): Promise<ThreadDetail> { return this.desktop.getThread(id); }
-  getMessages(id: string): Promise<Json> { return this.desktop.getMessages(id); }
-  activeWork(id?: string): Promise<Json> { return this.desktop.activeWork(id); }
-  getThreadProgress(id: string, afterSequence?: number, limit?: number): Promise<ThreadProgressSnapshot> { return this.desktop.getThreadProgress(id, afterSequence, limit); }
-  watchThread(id: string, afterSequence?: number, timeoutMs?: number, limit?: number): Promise<ThreadProgressSnapshot> { return this.desktop.watchThread(id, afterSequence, timeoutMs, limit); }
-  getThreadProgressSummary(id: string): Promise<ThreadProgressSnapshot> { return this.desktop.getThreadProgressSummary(id); }
-  watchActiveThreads(): Promise<ThreadProgressSnapshot[]> { return this.desktop.watchActiveThreads(); }
-  listFiles(projectId: string, relative?: string): Promise<string[]> { return this.desktop.listFiles(projectId, relative); }
-  readFile(projectId: string, relative: string): Promise<{ path: string; content: string }> { return this.desktop.readFile(projectId, relative); }
-  listAttachments(id: string): Promise<Json> { return this.desktop.listAttachments(id); }
-  sendMessage(id: string, text: string): Promise<Json> { return this.write(() => this.desktop.sendMessage(id, text), () => this.routeCliWrite(id, text)) as Promise<Json>; }
-  stop(id: string): Promise<Json> { return this.write(() => this.desktop.stop(id), async () => { throw new Error('DESKTOP_THREAD_WRITE_REQUIRES_EXACT_CLI_SESSION'); }) as Promise<Json>; }
-  resume(id: string): Promise<Json> { return this.write(() => this.desktop.resume(id), async () => { throw new Error('DESKTOP_THREAD_WRITE_REQUIRES_EXACT_CLI_SESSION'); }) as Promise<Json>; }
-  listModels(): Promise<Json> { return this.desktop.listModels(); }
-  searchHistory(query: string): Promise<Json> { return this.desktop.searchHistory(query); }
-  setModel(id: string, model: string, harnessId?: string): Promise<Json> { return this.write(() => this.desktop.setModel(id, model, harnessId), async () => { throw new Error('DESKTOP_THREAD_WRITE_REQUIRES_EXACT_CLI_SESSION'); }) as Promise<Json>; }
-  setReasoning(id: string, effort: string | null): Promise<Json> { return this.write(() => this.desktop.setReasoning(id, effort), async () => { throw new Error('DESKTOP_THREAD_WRITE_REQUIRES_EXACT_CLI_SESSION'); }) as Promise<Json>; }
-  dispose(): void { this.desktop.dispose(); this.cli.dispose(); }
+  private async projectPath(id:string): Promise<string> { const thread=await this.desktop.getThread(id); const projects=await this.desktop.listProjects(); const project=projects.find(p=>p.id===thread.projectId||p.path===thread.projectId); if(!project?.path) throw new Error('DESKTOP_THREAD_PROJECT_NOT_FOUND'); return fs.realpath(project.path); }
+  async sendMessage(id:string,text:string): Promise<Json> { const caps=await this.desktop.capabilities(); if(!caps.readOnly) return this.desktop.sendMessage(id,text); if(!this.cliAvailable) throw new Error('FREEBUFF_CLI_NOT_INSTALLED'); const cwd=await this.projectPath(id); const exact=await this.cli.hasConversation(id,cwd); const cliId=exact?id:`desktop-fallback-${createHash('sha256').update(`${cwd}\0${id}`).digest('hex').slice(0,24)}`; const result=exact?await this.cli.sendMessageInProject(cliId,text,cwd,id):await this.cli.sendNewMessageInProject(cliId,text,cwd); return {...(asRecord(result)??{}),routedVia:'cli_pty',desktopThreadId:id,projectPath:cwd,identityMatch:exact,separateSession:!exact,warning:exact?'Exact CLI conversation resumed; Desktop was read-only.':'Separate CLI session created; the Desktop thread was not mutated.'} as Json; }
+  listProjects(){return this.desktop.listProjects();} listThreads(p?:string){return this.desktop.listThreads(p);} getThread(id:string){return this.desktop.getThread(id);} getMessages(id:string){return this.desktop.getMessages(id);} activeWork(id?:string){return this.desktop.activeWork(id);} getThreadProgress(id:string,a?:number,l?:number){return this.desktop.getThreadProgress(id,a,l);} watchThread(id:string,a?:number,t?:number,l?:number){return this.desktop.watchThread(id,a,t,l);} getThreadProgressSummary(id:string){return this.desktop.getThreadProgressSummary(id);} watchActiveThreads(){return this.desktop.watchActiveThreads();} listFiles(id:string,r?:string){return this.desktop.listFiles(id,r);} readFile(id:string,r:string){return this.desktop.readFile(id,r);} listAttachments(id:string){return this.desktop.listAttachments(id);} listModels(){return this.desktop.listModels();} searchHistory(q:string){return this.desktop.searchHistory(q);}
+  stop(id:string){return this.desktop.capabilities().then(c=>c.readOnly?Promise.reject(new Error('DESKTOP_THREAD_WRITE_REQUIRES_EXACT_CLI_SESSION')):this.desktop.stop(id));} resume(id:string){return this.desktop.capabilities().then(c=>c.readOnly?Promise.reject(new Error('DESKTOP_THREAD_WRITE_REQUIRES_EXACT_CLI_SESSION')):this.desktop.resume(id));} setModel(id:string,m:string,h?:string){return this.desktop.capabilities().then(c=>c.readOnly?Promise.reject(new Error('DESKTOP_THREAD_WRITE_REQUIRES_EXACT_CLI_SESSION')):this.desktop.setModel(id,m,h));} setReasoning(id:string,e:string|null){return this.desktop.capabilities().then(c=>c.readOnly?Promise.reject(new Error('DESKTOP_THREAD_WRITE_REQUIRES_EXACT_CLI_SESSION')):this.desktop.setReasoning(id,e));}
+  dispose(){this.desktop.dispose();this.cli.dispose();}
 }
 export async function detectRuntime(): Promise<Runtime> {
   if (process.env.FREEBUFF_MCP_CLI_MODE === 'pty') return new CliPtyRuntime();
