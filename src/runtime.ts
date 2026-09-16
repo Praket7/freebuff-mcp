@@ -5,7 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { Capabilities, ProjectSummary, ThreadDetail, ThreadSummary, Json, ThreadProgressSnapshot, ModelCapability } from './types.js';
-import { assertSafeId, blocked, redact, safeProjectPath, sanitizeFreebuff } from './security.js';
+import { assertSafeId, blocked, redact, safeProjectPath, safeTextContent, sanitizeFreebuff } from './security.js';
 import { CliPtyManager, findFreebuffCli, findLatestCliConversationId } from './pty.js';
 import { DesktopEventClient, ProgressStore } from './events.js';
 
@@ -168,7 +168,7 @@ export class DesktopOrchestratorRuntime implements Runtime {
   async getThreadProgressSummary(id:string):Promise<ThreadProgressSnapshot>{const safe=assertSafeId(id); await this.capabilities(); const snapshot=this.progress.read(safe, 0, 1); return {...snapshot, events:[]};}
   async watchActiveThreads():Promise<ThreadProgressSnapshot[]>{await this.capabilities(); const known = new Set(this.progress.active()); try { const threads = await this.listThreads(); for (const thread of threads) if (thread.state && !['idle','completed','failed'].includes(thread.state)) known.add(thread.id); } catch { /* progress remains useful if the snapshot endpoint is temporarily unavailable */ } return [...known].map(id => this.progress.read(id, 0, 1));}
   async listFiles(projectId:string, relative='.') { const p=(await this.listProjects()).find(x=>x.id===projectId||x.path===projectId); if(!p) throw new Error('Project not found'); const root=await fs.realpath(p.path); const dir=relative==='.'?root:await fs.realpath(path.resolve(root,relative)); const rel=path.relative(root,dir); if(rel.startsWith('..')||path.isAbsolute(rel)||rel.split(path.sep).some(part=>blocked.test(part))) throw new Error('Path escapes the Freebuff project'); const entries=await fs.readdir(dir,{withFileTypes:true}); return entries.filter(e=>e.isFile()&&!blocked.test(e.name)).map(e=>path.relative(root,path.join(dir,e.name))); }
-  async readFile(projectId:string, relative:string){const p=(await this.listProjects()).find(x=>x.id===projectId||x.path===projectId);if(!p)throw new Error('Project not found');const file=await safeProjectPath(p.path,relative);return {path:relative,content:await fs.readFile(file,'utf8')};}
+  async readFile(projectId:string, relative:string){const p=(await this.listProjects()).find(x=>x.id===projectId||x.path===projectId);if(!p)throw new Error('Project not found');const file=await safeProjectPath(p.path,relative);return {path:relative,content:safeTextContent(await fs.readFile(file),file)};}
   async listAttachments(id:string):Promise<Json>{const safe=assertSafeId(id); const value=await this.request<unknown>('GET',`/api/thread/${encodeURIComponent(safe)}/attachment`); return sanitizeFreebuff(value) as Json;}
   private async assertWritable(): Promise<void> { const caps = await this.refreshDesktopConnection(); if (!this.launchId || caps.readOnly) throw new Error('Freebuff Desktop writes are unavailable'); }
   async sendMessage(id:string,text:string){await this.assertWritable();if(!text||text.length>100000)throw new Error('Message must be 1 to 100000 characters');return redact(await this.requestWithRefresh('POST',`/api/thread/${encodeURIComponent(assertSafeId(id))}/message`,{text})) as Json;}
@@ -177,7 +177,7 @@ export class DesktopOrchestratorRuntime implements Runtime {
   async listModels(){return {note:'The installed Desktop does not expose a standalone model-catalog route. Use the current thread model and set_model validation.'};}
   async searchHistory(query:string):Promise<Json>{const q=query.trim().toLowerCase(); if (!q || q.length > 200) throw new Error('Query must be 1 to 200 characters'); const projects=await this.listProjects(); const results: Json[]=[]; for (const project of projects) { const raw=asRecord(project.metadata); const threads=Array.isArray(raw?.threads)?raw.threads:[]; for(const value of threads){const t=asRecord(value); const threadId=asString(t?.id); if(threadId && JSON.stringify(t).toLowerCase().includes(q)) results.push({projectId:project.id,threadId,title:asString(t?.title) ?? '',state:asString(t?.turnState) ?? ''});} } return results.slice(0,100);}
   async setModel(id:string,model:string,harnessId='codebuff'){await this.assertWritable();if(model.length>200)throw new Error('Invalid model');return redact(await this.requestWithRefresh('POST',`/api/thread/${encodeURIComponent(assertSafeId(id))}/agent`,{model,harnessId})) as Json;}
-  async setReasoning(id:string,effort:string){await this.assertWritable();return redact(await this.requestWithRefresh('POST',`/api/thread/${encodeURIComponent(assertSafeId(id))}/effort`,{effort})) as Json;}
+  async setReasoning(id:string,effort:string|null){await this.assertWritable();return redact(await this.requestWithRefresh('POST',`/api/thread/${encodeURIComponent(assertSafeId(id))}/effort`,{effort})) as Json;}
   dispose(): void { this.events.dispose(); }
 }
 
@@ -210,20 +210,39 @@ export class CliPtyRuntime implements Runtime {
   async getThreadProgressSummary(id:string):Promise<ThreadProgressSnapshot>{ return this.getThreadProgress(id); }
   async watchActiveThreads():Promise<ThreadProgressSnapshot[]>{ return []; }
   async listFiles(_projectId:string, relative='.') { const root=await fs.realpath(this.root); const dir=relative==='.'?root:await fs.realpath(path.resolve(root,relative)); const rel=path.relative(root,dir); if(rel.startsWith('..')||path.isAbsolute(rel)||rel.split(path.sep).some(part=>blocked.test(part))) throw new Error('Path escapes the Freebuff project'); const entries=await fs.readdir(dir,{withFileTypes:true}); return entries.filter(e=>e.isFile()&&!blocked.test(e.name)).map(e=>path.relative(root,path.join(dir,e.name))); }
-  async readFile(_projectId:string, relative:string): Promise<{path:string;content:string}> { const file=await safeProjectPath(this.root,relative); return {path:relative,content:await fs.readFile(file,'utf8')}; }
+  async readFile(_projectId:string, relative:string): Promise<{path:string;content:string}> { const file=await safeProjectPath(this.root,relative); return {path:relative,content:safeTextContent(await fs.readFile(file),file)}; }
   async listAttachments(_id:string):Promise<Json>{return [];}
-  async sendMessage(id:string,text:string): Promise<Json> { return redact(await this.manager.send(id,text,this.root)) as Json; }
+  async sendMessage(id:string,text:string): Promise<Json> { return redact(await this.manager.send(id,text,this.root,assertSafeId(id))) as Json; }
+  async hasConversation(id:string,cwd=this.root):Promise<boolean>{return (await cliHistory(cwd)).some(c=>c.id===assertSafeId(id));}
+  async sendMessageInProject(id:string,text:string,cwd:string,continueId?:string):Promise<Json>{return redact(await this.manager.send(id,text,cwd,continueId)) as Json;}
+  async sendNewMessageInProject(id:string,text:string,cwd:string):Promise<Json>{return redact(await this.manager.send(id,text,cwd)) as Json;}
   async stop(id:string): Promise<Json> { return redact(this.manager.stop(id)) as Json; }
-  async resume(id:string): Promise<Json> { return redact(await this.manager.resumeLatest(id,this.root)) as Json; }
+  async resume(id:string): Promise<Json> { return redact(await this.manager.send(id,'/resume',this.root,assertSafeId(id))) as Json; }
   async listModels(): Promise<Json> { return { note:'Use the Freebuff CLI /model picker inside a managed PTY session.' }; }
   async searchHistory(query:string):Promise<Json>{const q=query.trim().toLowerCase(); if(!q||q.length>200)throw new Error('Query must be 1 to 200 characters'); return (await cliHistory(this.root)).filter(c=>JSON.stringify(c).toLowerCase().includes(q)).slice(0,100).map(c=>({threadId:c.id,title:c.meta.firstPrompt,state:c.state}));}
-  async setModel(id:string,model:string): Promise<Json> { return redact(await this.manager.sendToLatest(id,`/model ${model}`,this.root)) as Json; }
-  async setReasoning(id:string,effort:string|null): Promise<Json> { return redact(await this.manager.sendToLatest(id,`/reasoning ${effort ?? ''}`,this.root)) as Json; }
+  async setModel(id:string,model:string): Promise<Json> { return redact(await this.manager.send(id,`/model ${model}`,this.root,assertSafeId(id))) as Json; }
+  async setReasoning(id:string,effort:string|null): Promise<Json> { return redact(await this.manager.send(id,`/reasoning ${effort ?? ''}`,this.root,assertSafeId(id))) as Json; }
   dispose(): void { this.manager.dispose(); }
+}
+export class HybridRuntime implements Runtime {
+  private cli = new CliPtyRuntime();
+  private cliAvailable = false;
+  constructor(private desktop: DesktopOrchestratorRuntime, cli?: CliPtyRuntime) { if (cli) this.cli = cli; }
+  async capabilities(): Promise<Capabilities> {
+    const caps = await this.desktop.capabilities(); this.cliAvailable = Boolean(await findFreebuffCli());
+    if (!caps.orchestrator || !this.cliAvailable) return caps;
+    return { ...caps, readOnly:false, selectedRuntime:'hybrid', status:caps.readOnly?'desktop_read_only_cli_writable':caps.status, actions:{sendMessage:true,stop:!caps.readOnly,resume:!caps.readOnly,setModel:!caps.readOnly,setReasoning:!caps.readOnly}, endpoints:[...caps.endpoints,'managed CLI PTY fallback'], notes:[...caps.notes, caps.readOnly?'Desktop reads remain authoritative; send_message uses an exact-ID CLI fallback.':'Desktop writes are authorized; CLI PTY is retained as recovery.'] };
+  }
+  private async projectPath(id:string): Promise<string> { const thread=await this.desktop.getThread(id); const projects=await this.desktop.listProjects(); const project=projects.find(p=>p.id===thread.projectId||p.path===thread.projectId); if(!project?.path) throw new Error('DESKTOP_THREAD_PROJECT_NOT_FOUND'); return fs.realpath(project.path); }
+  async sendMessage(id:string,text:string): Promise<Json> { const caps=await this.desktop.capabilities(); if(!caps.readOnly) return this.desktop.sendMessage(id,text); if(!this.cliAvailable) throw new Error('FREEBUFF_CLI_NOT_INSTALLED'); const cwd=await this.projectPath(id); const exact=await this.cli.hasConversation(id,cwd); const cliId=exact?id:`desktop-fallback-${createHash('sha256').update(`${cwd}\0${id}`).digest('hex').slice(0,24)}`; const result=exact?await this.cli.sendMessageInProject(cliId,text,cwd,id):await this.cli.sendNewMessageInProject(cliId,text,cwd); return {...(asRecord(result)??{}),routedVia:'cli_pty',desktopThreadId:id,projectPath:cwd,identityMatch:exact,separateSession:!exact,warning:exact?'Exact CLI conversation resumed; Desktop was read-only.':'Separate CLI session created; the Desktop thread was not mutated.'} as Json; }
+  listProjects(){return this.desktop.listProjects();} listThreads(p?:string){return this.desktop.listThreads(p);} getThread(id:string){return this.desktop.getThread(id);} getMessages(id:string){return this.desktop.getMessages(id);} activeWork(id?:string){return this.desktop.activeWork(id);} getThreadProgress(id:string,a?:number,l?:number){return this.desktop.getThreadProgress(id,a,l);} watchThread(id:string,a?:number,t?:number,l?:number){return this.desktop.watchThread(id,a,t,l);} getThreadProgressSummary(id:string){return this.desktop.getThreadProgressSummary(id);} watchActiveThreads(){return this.desktop.watchActiveThreads();} listFiles(id:string,r?:string){return this.desktop.listFiles(id,r);} readFile(id:string,r:string){return this.desktop.readFile(id,r);} listAttachments(id:string){return this.desktop.listAttachments(id);} listModels(){return this.desktop.listModels();} searchHistory(q:string){return this.desktop.searchHistory(q);}
+  stop(id:string){return this.desktop.capabilities().then(c=>c.readOnly?Promise.reject(new Error('DESKTOP_THREAD_WRITE_REQUIRES_EXACT_CLI_SESSION')):this.desktop.stop(id));} resume(id:string){return this.desktop.capabilities().then(c=>c.readOnly?Promise.reject(new Error('DESKTOP_THREAD_WRITE_REQUIRES_EXACT_CLI_SESSION')):this.desktop.resume(id));} setModel(id:string,m:string,h?:string){return this.desktop.capabilities().then(c=>c.readOnly?Promise.reject(new Error('DESKTOP_THREAD_WRITE_REQUIRES_EXACT_CLI_SESSION')):this.desktop.setModel(id,m,h));} setReasoning(id:string,e:string|null){return this.desktop.capabilities().then(c=>c.readOnly?Promise.reject(new Error('DESKTOP_THREAD_WRITE_REQUIRES_EXACT_CLI_SESSION')):this.desktop.setReasoning(id,e));}
+  dispose(){this.desktop.dispose();this.cli.dispose();}
 }
 export async function detectRuntime(): Promise<Runtime> {
   if (process.env.FREEBUFF_MCP_CLI_MODE === 'pty') return new CliPtyRuntime();
   const desktop = new DesktopOrchestratorRuntime();
+  if ((await desktop.capabilities()).orchestrator && await findFreebuffCli()) return new HybridRuntime(desktop);
   if ((await desktop.capabilities()).orchestrator) return desktop;
   if (await findFreebuffCli()) return new CliPtyRuntime();
   return new ReadOnlyRuntime();

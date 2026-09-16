@@ -13,6 +13,7 @@ test('normalizes, filters, redacts, and classifies progress events', () => {
   assert.equal(event?.kind, 'tool_start');
   assert.equal(event?.threadId, 'thread-1');
   assert.match(event?.raw ? JSON.stringify(event.raw) : '', /REDACTED/);
+  assert.doesNotMatch(`${event?.command} ${event?.text} ${event?.error}`, /secret/i);
   assert.equal(normalizeProgressEvent({ type:'completed' }), null);
   assert.equal(normalizeProgressEvent({ threadId:'bad/id', type:'x' }), null);
   assert.equal(normalizeProgressEvent({ threadId:'thread-1', type:'future_event' })?.kind, 'unknown');
