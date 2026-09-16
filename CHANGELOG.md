@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.15
+
+- Accept the current Desktop thread envelope shape when resolving project identity for hybrid writes.
+
+## 0.1.14
+
+- Ensure hybrid writes discover the installed CLI even when a caller sends a mutation before requesting capabilities.
+
 ## 0.1.13
 
 - Add a Desktop-first hybrid runtime for Windows and other systems where Desktop is discoverable but read-only.
