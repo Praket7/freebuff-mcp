@@ -8,7 +8,7 @@ import { detectRuntime, Runtime } from './runtime.js';
 
 function writeNames(caps: Awaited<ReturnType<Runtime['capabilities']>>): Set<string> { const map={sendMessage:'send_message',stop:'stop_thread',resume:'resume_thread',setModel:'set_model',setReasoning:'set_reasoning'}; return new Set(Object.entries(caps.actions??{sendMessage:!caps.readOnly,stop:!caps.readOnly,resume:!caps.readOnly,setModel:!caps.readOnly,setReasoning:!caps.readOnly}).filter(([,v])=>v).map(([k])=>map[k as keyof typeof map])); }
 
-export function createServer(runtime: Runtime, includeWrites = true, allowedWrites = new Set(['send_message','stop_thread','resume_thread','set_model','set_reasoning'])): McpServer { const s=new McpServer({name:'freebuff-mcp',version:'0.1.14'});
+export function createServer(runtime: Runtime, includeWrites = true, allowedWrites = new Set(['send_message','stop_thread','resume_thread','set_model','set_reasoning'])): McpServer { const s=new McpServer({name:'freebuff-mcp',version:'0.1.16'});
   const read=(name:string,description:string,schema:Record<string,z.ZodType>,fn:(a:any)=>Promise<unknown>)=>s.registerTool(name,{description,inputSchema:schema,annotations:{readOnlyHint:true,openWorldHint:false}},async(a)=>({content:[{type:'text',text:JSON.stringify(await fn(a),null,2)}]}));
   read('freebuff_status','Detect Freebuff and bridge capabilities.',{},()=>runtime.capabilities());
   read('list_projects','List discovered Freebuff projects.',{},()=>runtime.listProjects());
