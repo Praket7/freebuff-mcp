@@ -11,6 +11,7 @@ export interface Capabilities {
   status?: 'desktop_read_only' | 'desktop_writable' | 'desktop_read_only_cli_writable' | 'cli_ready' | 'cli_unavailable' | 'not_found';
   liveProgress?: 'connected' | 'stale' | 'unavailable';
   selectedRuntime?: string;
+  actions?: { sendMessage: boolean; stop: boolean; resume: boolean; setModel: boolean; setReasoning: boolean };
 }
 export interface ProjectSummary { id: string; path: string; name?: string; metadata?: Json; }
 export interface ThreadSummary { id: string; projectId?: string; title?: string; state?: string; model?: string; metadata?: Json; }
