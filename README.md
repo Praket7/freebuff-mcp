@@ -36,18 +36,7 @@ FREEBUFF_PROJECT_ROOT = '/Users/YOUR_NAME/Desktop/freebuff-work'
 # FREEBUFF_CLI_PATH = '/Users/YOUR_NAME/.config/manicode/freebuff'
 ```
 
-Desktop discovery reads dynamic port/launch metadata when Freebuff exposes a readiness file, then verifies the launch ID through `/healthz`. On Windows, the supported handoff file is `mcp-connection.json` under `%LOCALAPPDATA%\Freebuff` (or the path in `FREEBUFF_MCP_HANDOFF_FILE`) with this shape:
-
-```json
-{
-  "url": "http://127.0.0.1:58858",
-  "launchId": "desktop-minted-launch-id",
-  "pid": 12345,
-  "expiresAt": "2030-01-01T00:00:00.000Z"
-}
-```
-
-The Desktop must create this file with the current-user-only ACL, rotate it whenever the orchestrator restarts, and remove or expire it on shutdown. The MCP never reads another process's memory, command line, or environment to recover a secret. It verifies the handoff with `/healthz` before exposing mutation tools. If the handoff is absent or stale, it remains read-only and reports that fact in `freebuff-mcp doctor`.
+Desktop discovery reads dynamic port/launch metadata when Freebuff exposes a readiness file, then verifies the launch ID through `/healthz`. If that handshake is unavailable, it stays read-only. Use the explicit CLI configuration below when you need bridge-owned prompt injection.
 
 ## Configure Codex for CLI-only mode
 
@@ -82,11 +71,11 @@ On macOS, a `posix_spawnp failed` error is emitted with the executable and worki
 
 When Desktop is discovered, the bridge subscribes to its read-only `/api/events` stream. Use `get_thread_progress` with a thread ID to poll bounded, in-memory progress events. Pass `afterSequence` from the previous response for incremental reads. `watch_thread` provides bounded long-polling for up to 30 seconds. These views can show turn state, assistant updates, tools, command summaries, file changes, and completion/failure while a task is running. `get_thread` remains the saved snapshot and may include a `live` summary; event history is intentionally not persisted. CLI mode reports Desktop live events as unavailable and continues to expose PTY output.
 
-When Desktop is available but its launch authorization is missing or stale, the bridge automatically uses a hybrid mode if the local Freebuff CLI is installed. Desktop remains authoritative for reads and live progress. A message write first resolves the Desktop thread's project path and checks for the exact same conversation ID in the CLI store. An exact match continues that CLI conversation; otherwise a separate CLI session is created and the response explicitly reports that the Desktop thread was not mutated. Stop, resume, model, and reasoning changes remain blocked in this state because they cannot be safely mapped without exact Desktop authorization.
-
 For a simpler view, call `get_thread_progress_summary`. It reports the current phase (Planning, Reading files, Running tests, Editing files, Reviewing changes, Waiting for input, Completed, or Failed), latest meaningful update, active tool/command, changed files, last error, seconds since the last event, and whether the stream is stale. `watch_active_threads` returns the latest summary for every active Desktop thread. Detailed reasoning deltas are omitted by default.
 
 ## Run directly with npm or npx
+
+The default `serve` command speaks MCP v2 over stdio and exposes Freebuff read state as structured resources (`freebuff://projects`, project threads, thread messages, and progress). Use `serve-acp` for the ACP adapter; it implements the stable ACP v1 wire contract while the ACP v2 SDK remains experimental.
 
 Install the published package:
 
