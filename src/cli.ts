@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { createServer, runHttp, runStdio } from './mcp.js';
+import { runStdioV2 } from './mcp-v2.js';
+import { runAcp } from './acp.js';
 import { detectRuntime, localInstallInfo } from './runtime.js';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,7 +15,9 @@ async function installConfig(write: boolean): Promise<void> {
 }
 if(command==='install'){await installConfig(process.argv.includes('--write'));}
 else if(command==='doctor'){const r=await detectRuntime();console.log(JSON.stringify({capabilities:await r.capabilities(),installation:await localInstallInfo()},null,2));}
-else if(command==='serve'){await runStdio();}
+else if(command==='serve'){await runStdioV2();}
+else if(command==='serve-v1'){await runStdio();}
+else if(command==='serve-acp'){await runAcp();}
 else if(command==='serve-http'){await runHttp();}
-else if(command==='version'){console.log('0.1.14');}
+else if(command==='version'){console.log('0.1.16');}
 else {console.error('Usage: freebuff-mcp [serve|serve-http|doctor|install [--write]|version]');process.exitCode=2;}
