@@ -11,6 +11,6 @@ Please report security issues privately to the repository maintainers. Do not in
 - `/healthz` is unauthenticated only for loopback health checks; remote health checks require the bearer token.
 - Desktop mutations require a dynamically discovered launch ID and successful `/healthz` verification. Otherwise mutation tools are not registered.
 - CLI writes use a bridge-owned PTY and do not take over an existing CLI process by default.
-- Project paths are confined to the configured root, unsafe identifiers are rejected, and credentials are never returned or logged.
+- Project paths are confined to the configured root, unsafe identifiers are rejected, protected file classes are denied, file reads are size/type checked, and exposed values are redacted. Credentials are not returned or logged by the bridge.
 
 This project has not undergone an independent security audit. Treat remote HTTP exposure as an advanced deployment and review the configuration before enabling it.
