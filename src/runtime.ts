@@ -372,17 +372,21 @@ export class DesktopOrchestratorRuntime implements Runtime {
   }
 
   async getThread(id: string): Promise<ThreadDetail> {
-    const value = asRecord(await this.request<unknown>('GET', `/api/thread/${encodeURIComponent(assertSafeId(id))}`));
+    const payload = asRecord(await this.request<unknown>('GET', `/api/thread/${encodeURIComponent(assertSafeId(id))}`));
+    // The Desktop returns `{ thread, messages, items }`; unwrap it so callers
+    // see the thread fields directly.
+    const value = asRecord(payload?.thread) ?? payload;
     if (!value) throw new Error('Invalid Freebuff thread response');
     const threadId = asString(value.id) ?? assertSafeId(id);
+    const messages = payload && Array.isArray(payload.messages) ? payload.messages : Array.isArray(value.messages) ? value.messages : undefined;
     return {
       id: threadId,
-      projectId: asString(value.projectId),
+      projectId: asString(value.projectId) ?? asString(value.projectPath),
       title: asString(value.title),
       state: asString(value.turnState),
       model: asString(value.model),
-      messages: Array.isArray(value.messages) ? sanitizeFreebuff(value.messages) as Json[] : undefined,
-      activeWork: value.activeWork === undefined ? undefined : sanitizeFreebuff(value.activeWork) as Json,
+      messages: messages ? sanitizeFreebuff(messages) as Json[] : undefined,
+      activeWork: (value.activeWork ?? payload?.items) === undefined ? undefined : sanitizeFreebuff(value.activeWork ?? payload?.items) as Json,
       live: this.snapshot(threadId, 0, 1),
       metadata: redact(value as Record<string, Json>) as Json,
     };
@@ -446,10 +450,20 @@ export class DesktopOrchestratorRuntime implements Runtime {
     return { path: relative, content: safeTextContent(await fs.readFile(file), file) };
   }
 
+  /**
+   * Attachments come from the thread's own messages. The Desktop
+   * `/attachment` route requires a `path` parameter and returns one file, so it
+   * cannot serve a listing.
+   */
   async listAttachments(id: string): Promise<Json> {
-    const safe = assertSafeId(id);
-    const value = await this.request<unknown>('GET', `/api/thread/${encodeURIComponent(safe)}/attachment`);
-    return sanitizeFreebuff(value) as Json;
+    const thread = await this.getThread(assertSafeId(id));
+    const attachments: Json[] = [];
+    for (const message of thread.messages ?? []) {
+      const record = asRecord(message);
+      const list = record && Array.isArray(record.attachments) ? record.attachments : [];
+      for (const attachment of list) attachments.push(sanitizeFreebuff(attachment) as Json);
+    }
+    return attachments as unknown as Json;
   }
 
   private async assertWritable(): Promise<void> {

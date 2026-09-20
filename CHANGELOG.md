@@ -35,6 +35,24 @@ Production rebuild around one canonical session/turn/event lifecycle shared by e
 - Rewrite the CLI: full usage text, `doctor --json` with structured diagnostics and nonzero exit when nothing is detected, centralized `version` from package.json.
 - Add `tsconfig.test.json` and `typecheck:test` so tests are typechecked; CI runs it on every matrix job and performs a packed-tarball smoke test (install, version, doctor, installers).
 
+### Desktop HTTP contract audit (real-API fixes)
+
+Every adapter's tests had used `fetch` stubs or scripted backends, so the bridge was never checked against the Desktop's real HTTP contract. Verifying against a live Freebuff Desktop (and its bundled orchestrator) surfaced these defects:
+
+- **Thread creation did not exist for Desktop.** `DesktopBackend` had no `createSession`, and the composite backend asserted its way past that, so `start_thread`, an auto-created `run_turn`/`send_message`, and ACP `session/new` all died with `TypeError: ... is not a function`. Threads are now created with `POST /api/threads` (the route the Desktop UI uses), verified against the live API.
+- **`list_threads` returned projects, not threads.** `/api/projects` nests `threads` inside each project; the backend returned the project array. It now flattens, so `list_threads` and `get_active_work` work.
+- **`get_thread` lost all metadata.** `/api/thread/:id` returns `{ thread, messages, items }`; the raw wrapper was forwarded, so `id`/`title`/`turnState`/`model` read as `undefined`. It is now flattened.
+- **`list_thread_attachments` could never succeed.** It called `/api/thread/:id/attachment`, which requires a `path` parameter and returns a single file. Attachments are now collected from the thread's messages.
+- **`run_turn` reported `completed` before any work happened.** `sendMessage` returned as soon as the Desktop acknowledged the prompt, and it unsubscribed from the event stream at the same moment, so live progress was dropped too. It now stays subscribed and waits for the thread's terminal state (Desktop `turnState: running | idle`, with `lastTurnOutcome`/`lastTurnFinishedAt`), mapping failures to `failed`, cancellation to `cancelled`, and an unconfirmed turn to a non-terminal `waiting_for_user` rather than claiming success. Bounded by a 30-minute deadline and a 60-second "never started" grace.
+- **`get_diff` was invented.** The Desktop exposes real change routes: `GET /api/thread/:id/changes` and `/changes/diff?file=&scope=`. `get_diff` now returns the real change summary and real `{ patch }` text, and surfaces `binary`/`tooLarge`/`error` results instead of fabricating anything.
+- Add a `get_changes` tool for the Desktop change summary.
+
+### Verification you can rerun
+
+- Add a fake Desktop HTTP server (`test/helpers/fake-desktop.ts`) that serves the real contract, so CI — which has no Desktop — tests the actual wire protocol: status codes, payload wrappers, nested thread lists, SSE snapshot frames, and turn lifecycle.
+- Add `test/desktop-wire.test.ts` pinning the real payload shapes (captured from a live Desktop) plus `test/desktop-http-integration.test.ts` driving real sockets, including that a turn is awaited and that cancellation/failure are reported correctly.
+- Add `test/http-transport.test.ts` (bearer auth, `Origin` validation, 404s, malformed/oversized bodies, 429 rate limiting, full MCP handshake) and `test/acp-wire.test.ts` (`initialize` capabilities, `session/new` creating a real thread, `session/prompt` → `end_turn`, `session/cancel` → `cancelled`) — both surfaces previously had **zero** wire-level coverage.
+
 ### Legacy adapters & parity
 
 - Delete the duplicated legacy Desktop implementation (`src/events.ts` and the private discovery/SSE/progress store inside `src/runtime.ts`). MCP v1 (`serve-v1`) and the HTTP transport (`serve-http`) now reuse the canonical `desktop/discovery.ts`, `desktop/sse.ts`, `desktop/event-adapter.ts`, and `bridge/event-store.ts`, so Desktop discovery — including removing the broad all-listener port scan from the legacy path — and SSE parsing exist exactly once.

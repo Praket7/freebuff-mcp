@@ -77,6 +77,24 @@ Run `freebuff-mcp doctor` (or `freebuff-mcp doctor --json`) first — it reports
 
 **Fixes:** Re-run the installer for your client after moving or reinstalling the package; it emits the exact current paths.
 
+## `get_diff` returns no patch text
+
+**Symptoms:** `get_diff` returns `files` with `error`, `binary`, or `tooLarge` instead of `diff`.
+
+**Fixes:** The Desktop only produces diffs for a **git** project, and only for paths that actually changed. `{ error: "this folder is not a git repository" }` means the project is not a git repo; `{ binary: true }` means the file is binary; `{ tooLarge: true }` means the patch exceeded the Desktop's size cap. A clean thread has no changes at all. `get_changes` shows the authoritative file list.
+
+## A turn never reports completion
+
+**Symptoms:** `run_turn` returns `state: "waiting_for_user"`.
+
+**Fixes:** The bridge only reports `completed` after the Desktop stops reporting `running` (or `lastTurnFinishedAt` advances). `waiting_for_user` means that could not be confirmed within bounds — the turn may still be running. Poll `get_turn`/`watch_turn`, and check the Desktop UI for the thread's real state.
+
+## `start_thread` fails with `FREEBUFF_DESKTOP_API_INCOMPATIBLE`
+
+**Symptoms:** creating a session on the Desktop fails while reads still work.
+
+**Fixes:** The installed Desktop build did not return a thread id from `POST /api/threads` (or does not expose the change/diff routes). Update Freebuff Desktop, or pass an existing `threadId` to `run_turn` to reuse a thread you already have.
+
 ## Session/turn errors
 
 - `FREEBUFF_SESSION_NOT_FOUND` / `FREEBUFF_TURN_NOT_FOUND` — the bridge restarted or the id was mistyped; call `start_thread` again.

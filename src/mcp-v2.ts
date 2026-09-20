@@ -2,6 +2,7 @@ import { McpServer, ResourceTemplate } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import * as z from 'zod/v4';
 import { CompositeBackend } from './backends/backend.js';
+import { MAX_DIFF_FILES } from './backends/desktop-backend.js';
 import { SessionManager } from './bridge/session-manager.js';
 import { TurnManager } from './bridge/turn-manager.js';
 import { BridgeError, ErrorCodes, toErrorShape, BackendSession } from './bridge/types.js';
@@ -14,6 +15,34 @@ const json = (value: unknown): Json => value as Json;
 /** Helper: structured tool result. */
 const result = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }], structuredContent: json(value) });
 const id = z.string().min(1).max(200);
+
+const asObject = (value: unknown): Record<string, unknown> | undefined =>
+  value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+
+interface DesktopChangesApi {
+  getChanges(threadId: string, scope?: 'all' | 'uncommitted'): Promise<unknown>;
+  getDiff(threadId: string, file: string, scope?: 'all' | 'uncommitted'): Promise<unknown>;
+}
+
+/** The Desktop change/diff routes are optional: say so clearly, never invent data. */
+function desktopChanges(adapter: V2Adapter): DesktopChangesApi {
+  const desktop = adapter.backend.desktop as unknown as Partial<DesktopChangesApi> | undefined;
+  const missing = (what: string): BridgeError => new BridgeError(
+    ErrorCodes.DESKTOP_API_INCOMPATIBLE,
+    `The Desktop ${what} is unavailable.`,
+    'This requires an authorized Freebuff Desktop; CLI-mode sessions expose no change summary. Use get_changed_files for event-derived paths.',
+  );
+  return {
+    getChanges: (threadId, scope = 'all') => {
+      if (!desktop || typeof desktop.getChanges !== 'function') throw missing('change-summary route');
+      return desktop.getChanges(threadId, scope);
+    },
+    getDiff: (threadId, file, scope = 'all') => {
+      if (!desktop || typeof desktop.getDiff !== 'function') throw missing('diff route');
+      return desktop.getDiff(threadId, file, scope);
+    },
+  };
+}
 
 export interface V2Adapter {
   backend: CompositeBackend;
@@ -194,27 +223,58 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
     const snapshot = adapter.sessions.events.progress(assertSafeId(args.threadId), 0, 100);
     return { ok: true, threadId: args.threadId, files: snapshot.filesChanged ?? [] };
   }));
-  read('get_diff', 'Return the changed files for a thread plus any diff text the Desktop exposes.', { threadId: id }, (args) => shapeError(async () => {
+  read('get_changes', 'Read the Desktop change summary (files, adds, dels) for a thread.', { threadId: id, scope: z.enum(['all', 'uncommitted']).optional() }, (args) => shapeError(async () => {
+    const changes = await desktopChanges(adapter).getChanges(assertSafeId(args.threadId), args.scope ?? 'all');
+    return { ok: true, ...(asObject(changes) ?? { changes }) };
+  }));
+
+  read('get_diff', 'Read real per-file diffs for a thread from the Desktop, falling back to the changed files observed in live events.', { threadId: id, file: z.string().optional(), scope: z.enum(['all', 'uncommitted']).optional() }, (args) => shapeError(async () => {
     const threadId = assertSafeId(args.threadId);
-    const snapshot = adapter.sessions.events.progress(threadId, 0, 100);
-    const files = snapshot.filesChanged ?? [];
-    // The changed-file list is always available from live events. Diff text is
-    // only reported when this Desktop build exposes it on the thread payload;
-    // the bridge never fabricates a diff.
-    let diff: string | undefined;
-    try {
-      const thread = await adapter.backend.getThread(threadId);
-      const record = thread && typeof thread === 'object' && !Array.isArray(thread) ? thread as Record<string, unknown> : undefined;
-      const candidate = record?.diff ?? record?.patch ?? record?.changes;
-      if (typeof candidate === 'string' && candidate.trim()) diff = String(redact(candidate)).slice(0, 100_000);
-    } catch { /* a live-only thread may not be readable through the HTTP API */ }
+    const scope = args.scope ?? 'all';
+    const desktop = desktopChanges(adapter);
+    const eventFiles = adapter.sessions.events.progress(threadId, 0, 100).filesChanged ?? [];
+
+    let changes: Record<string, unknown> | undefined;
+    try { changes = asObject(await desktop.getChanges(threadId, scope)); } catch { changes = undefined; }
+
+    const changed = Array.isArray(changes?.files)
+      ? (changes!.files as unknown[]).flatMap((entry) => { const record = asObject(entry); const path = typeof record?.path === 'string' ? record.path : undefined; return path ? [{ path, adds: typeof record?.adds === 'number' ? record.adds : undefined, dels: typeof record?.dels === 'number' ? record.dels : undefined }] : []; })
+      : eventFiles.map((path) => ({ path, adds: undefined as number | undefined, dels: undefined as number | undefined }));
+
+    const requested = typeof args.file === 'string' && args.file ? args.file : undefined;
+    const targets = (requested ? changed.filter((f) => f.path === requested) : changed).slice(0, MAX_DIFF_FILES);
+
+    const files: Array<Record<string, unknown>> = [];
+    let unavailable = 0;
+    for (const target of targets) {
+      const entry: Record<string, unknown> = { path: target.path };
+      if (target.adds !== undefined) entry.adds = target.adds;
+      if (target.dels !== undefined) entry.dels = target.dels;
+      try {
+        // Real Desktop contract: `{ patch }` on success, or `{ error }`,
+        // `{ tooLarge }`, `{ binary }` — never a fabricated diff.
+        const result = asObject(await desktop.getDiff(threadId, target.path, scope));
+        const text = typeof result?.patch === 'string' ? result.patch : typeof result?.diff === 'string' ? result.diff : undefined;
+        if (text !== undefined) entry.diff = String(redact(text)).slice(0, 100_000);
+        else if (result?.binary === true) entry.binary = true;
+        else if (result?.tooLarge === true) entry.tooLarge = true;
+        else if (typeof result?.error === 'string') entry.error = String(redact(result.error));
+        else unavailable += 1;
+      } catch (error) { entry.error = error instanceof Error ? error.message : 'diff unavailable'; unavailable += 1; }
+      files.push(entry);
+    }
+
     return {
       ok: true,
       threadId,
+      scope,
+      ...(typeof changes?.branch === 'string' || changes?.branch === null ? { branch: changes?.branch } : {}),
+      ...(asObject(changes?.totals) ? { totals: changes!.totals } : {}),
       files,
-      ...(diff !== undefined ? { diff } : {}),
-      diffAvailable: diff !== undefined,
-      note: diff === undefined ? 'This Desktop build does not expose diff text; the changed-file list comes from live events.' : 'Diff text was truncated to 100000 characters.',
+      ...(requested ? { requestedFile: requested } : {}),
+      ...(changed.length > targets.length ? { truncated: true, changedFileCount: changed.length } : {}),
+      diffAvailable: files.some((f) => typeof f.diff === 'string'),
+      ...(unavailable ? { note: `${unavailable} file diff(s) could not be read from the Desktop; no diff text is ever invented.` } : {}),
     };
   }));
 

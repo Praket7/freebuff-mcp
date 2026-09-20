@@ -1,14 +1,40 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { assertSafeId, redact, safeProjectPath, safeTextContent, sanitizeFreebuff } from '../security.js';
 import { blocked } from '../security.js';
 import { SseClient, SseEvent } from '../desktop/sse.js';
 import { mapDesktopEvent, safeMetadata } from '../desktop/event-adapter.js';
 import { discoverDesktop, invalidateDiscoveryCache, DesktopCandidate } from '../desktop/discovery.js';
-import { BackendCapabilities, BackendEventInput, BackendTurnResult, BackendSession, BridgeError, ErrorCodes, FreebuffBackend } from '../bridge/types.js';
+import { BackendCapabilities, BackendEventInput, BackendTurnResult, BackendSession, BridgeError, BridgeTurnState, ErrorCodes, FreebuffBackend } from '../bridge/types.js';
 
 const REQUEST_TIMEOUT_MS = 8_000;
 const RECOVERABLE = /(fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|network|socket)/i;
+
+/** Maximum number of per-file diffs fetched by a single `get_diff` call. */
+export const MAX_DIFF_FILES = 5;
+
+/** How long `sendMessage` waits for a turn to reach a terminal state. */
+export const TURN_DEADLINE_MS = 30 * 60_000;
+/** How often the fallback poll checks a thread when the event stream is quiet. */
+const TURN_POLL_MS = 1_000;
+/** How long to wait for a turn to become visible before treating it as instant. */
+const TURN_START_GRACE_MS = 60_000;
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/** Desktop turn state as the orchestrator reports it. */
+interface ThreadTurnState {
+  turnState: string;
+  lastTurnOutcome?: string;
+  lastTurnFinishedAt?: number;
+}
 
 export interface DesktopBackendOptions {
   /** Explicit base URL (disables broad discovery). */
@@ -37,6 +63,9 @@ export class DesktopBackend implements FreebuffBackend {
   private lastEventAt?: number;
   private eventListeners = new Set<(event: BackendEventInput) => void>();
   private lastUpstreamId?: string;
+  /** Latest turn state per thread, kept current from the event stream. */
+  private readonly threadStates = new Map<string, ThreadTurnState>();
+  private stateWaiters = new Set<() => void>();
 
   constructor(private options: DesktopBackendOptions = {}) {}
 
@@ -125,6 +154,8 @@ export class DesktopBackend implements FreebuffBackend {
         const threadId = typeof thread.id === 'string' ? thread.id : undefined;
         const turnState = typeof thread.turnState === 'string' ? thread.turnState : undefined;
         if (!threadId || !turnState) continue;
+        // Track authoritative turn state so a turn can be awaited to completion.
+        this.recordThreadState(threadId, thread);
         const type = turnState === 'running' ? 'phase' : turnState === 'completed' ? 'completed' : turnState === 'failed' ? 'failed' : turnState === 'cancelled' ? 'cancelled' : 'phase';
         this.emit({ threadId, type, ...(turnState ? { state: turnState } : {}) });
       }
@@ -137,6 +168,74 @@ export class DesktopBackend implements FreebuffBackend {
 
   private emit(event: BackendEventInput): void {
     for (const listener of this.eventListeners) listener(event);
+  }
+
+  private recordThreadState(threadId: string, source: Record<string, unknown>): void {
+    const turnState = typeof source.turnState === 'string' ? source.turnState : undefined;
+    if (!turnState) return;
+    const previous = this.threadStates.get(threadId);
+    this.threadStates.set(threadId, {
+      turnState,
+      ...(typeof source.lastTurnOutcome === 'string' ? { lastTurnOutcome: source.lastTurnOutcome } : previous?.lastTurnOutcome ? { lastTurnOutcome: previous.lastTurnOutcome } : {}),
+      ...(typeof source.lastTurnFinishedAt === 'number' ? { lastTurnFinishedAt: source.lastTurnFinishedAt } : previous?.lastTurnFinishedAt !== undefined ? { lastTurnFinishedAt: previous.lastTurnFinishedAt } : {}),
+    });
+    if (previous?.turnState !== turnState) for (const wake of this.stateWaiters) wake();
+  }
+
+  /** Read the latest known turn state, falling back to a direct thread read. */
+  private async readThreadState(threadId: string): Promise<ThreadTurnState> {
+    const cached = this.threadStates.get(threadId);
+    if (cached) return cached;
+    const thread = asRecord(await this.request<unknown>('GET', `/api/thread/${encodeURIComponent(threadId)}`));
+    const inner = asRecord(thread?.thread) ?? thread ?? {};
+    return {
+      turnState: typeof inner.turnState === 'string' ? inner.turnState : 'idle',
+      ...(typeof inner.lastTurnOutcome === 'string' ? { lastTurnOutcome: inner.lastTurnOutcome } : {}),
+      ...(typeof inner.lastTurnFinishedAt === 'number' ? { lastTurnFinishedAt: inner.lastTurnFinishedAt } : {}),
+    };
+  }
+
+  /**
+   * Wait until the thread's turn reaches a terminal state.
+   *
+   * The Desktop reports `turnState: "running" | "idle"` and records the outcome
+   * of the last turn in `lastTurnOutcome` / `lastTurnFinishedAt`. A turn is done
+   * when it has left `running` (or when `lastTurnFinishedAt` advances).
+   * Returns `undefined` on timeout so the caller can report a non-terminal state
+   * instead of inventing a result.
+   */
+  private async waitForTurnEnd(threadId: string, before: ThreadTurnState, signal?: AbortSignal): Promise<ThreadTurnState | undefined> {
+    const deadline = Date.now() + TURN_DEADLINE_MS;
+    // If the turn never visibly starts (an instant turn, or a prompt the Desktop
+    // discarded), don't hold the request open for the full deadline.
+    const startDeadline = Math.min(deadline, Date.now() + TURN_START_GRACE_MS);
+    let sawRunning = false;
+    for (;;) {
+      if (signal?.aborted) return this.threadStates.get(threadId);
+      let current: ThreadTurnState;
+      try { current = await this.readThreadState(threadId); } catch { current = this.threadStates.get(threadId) ?? { turnState: 'running' }; }
+      const finished = current.lastTurnFinishedAt !== undefined && (before.lastTurnFinishedAt ?? 0) < current.lastTurnFinishedAt;
+      if (current.turnState === 'running') sawRunning = true;
+      if (finished || (sawRunning && current.turnState !== 'running')) return current;
+      if (!sawRunning && Date.now() >= startDeadline) return current;
+      if (Date.now() >= deadline) return undefined;
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const wake = () => { if (!settled) { settled = true; this.stateWaiters.delete(wake); clearTimeout(timer); resolve(); } };
+        const timer = setTimeout(wake, TURN_POLL_MS);
+        timer.unref?.();
+        this.stateWaiters.add(wake);
+        signal?.addEventListener('abort', wake, { once: true });
+      });
+    }
+  }
+
+  private mapTurnOutcome(state: ThreadTurnState | undefined, aborted: boolean): { state: BridgeTurnState; error?: string } {
+    if (aborted) return { state: 'cancelled' };
+    if (!state) return { state: 'waiting_for_user', error: undefined };
+    if (state.lastTurnOutcome === 'error') return { state: 'failed', error: 'The Freebuff turn reported an error outcome.' };
+    if (state.turnState === 'running') return { state: 'waiting_for_user' };
+    return { state: 'completed' };
   }
 
   async probe(): Promise<BackendCapabilities> {
@@ -180,34 +279,106 @@ export class DesktopBackend implements FreebuffBackend {
     return redact(value);
   }
 
-  async listThreads(): Promise<unknown> {
-    const projects = await this.request<Record<string, unknown>>('GET', '/api/projects');
-    return Array.isArray(projects.projects) ? projects.projects : [];
+  /**
+   * Create a real Desktop thread. The installed Desktop exposes no dedicated
+   * "new conversation" route: `POST /api/threads` is the route the Desktop UI
+   * itself uses, and it returns the created thread object (including its id).
+   * A brand-new thread is a draft with no messages until the first prompt.
+   */
+  async createSession({ cwd, continueBackendId }: { cwd: string; continueBackendId?: string }): Promise<BackendSession> {
+    await this.assertWritable();
+    if (continueBackendId) {
+      // Continue an existing thread only after confirming it really exists.
+      const thread = asRecord(await this.getThread(continueBackendId));
+      const existingId = asString(thread?.id);
+      if (!existingId) throw new BridgeError(ErrorCodes.DESKTOP_API_INCOMPATIBLE, `Freebuff Desktop could not read thread ${continueBackendId}.`, 'Verify the thread id, or open the project in Freebuff Desktop first.');
+      return { id: randomUUID(), backend: 'desktop', backendSessionId: existingId, cwd };
+    }
+    const created = asRecord(await this.request<unknown>('POST', '/api/threads', { projectPath: cwd }));
+    const id = asString(created?.id) ?? asString(asRecord(created?.thread)?.id);
+    if (!id) throw new BridgeError(ErrorCodes.DESKTOP_API_INCOMPATIBLE, 'Freebuff Desktop did not return an id for the new thread.', 'Update Freebuff Desktop, or pass an existing threadId to run_turn.');
+    return { id: randomUUID(), backend: 'desktop', backendSessionId: id, cwd };
   }
 
+  /**
+   * `/api/projects` returns PROJECTS with a nested `threads` array; flatten it
+   * so callers see threads (each carrying its `projectId`/`projectPath`).
+   */
+  async listThreads(): Promise<unknown> {
+    const projects = await this.request<Record<string, unknown>>('GET', '/api/projects');
+    const list = Array.isArray(projects.projects) ? projects.projects : [];
+    const threads: Array<Record<string, unknown>> = [];
+    for (const value of list) {
+      const project = asRecord(value);
+      if (!project) continue;
+      const projectPath = asString(project.path) ?? asString(project.projectId);
+      const nested = Array.isArray(project.threads) ? project.threads : [];
+      for (const entry of nested) {
+        const thread = asRecord(entry);
+        if (!thread) continue;
+        threads.push({
+          ...thread,
+          ...(asString(thread.projectId) ?? projectPath ? { projectId: asString(thread.projectId) ?? projectPath } : {}),
+          ...(asString(thread.projectPath) ?? projectPath ? { projectPath: asString(thread.projectPath) ?? projectPath } : {}),
+        });
+      }
+    }
+    return sanitizeFreebuff(threads);
+  }
+
+  /**
+   * `/api/thread/:id` returns `{ thread, messages, items }`. Flatten it so
+   * consumers see the thread fields plus `messages`/`items` at the top level
+   * (the bridge never forwards the raw wrapper).
+   */
   async getThread(backendSessionId: string): Promise<unknown> {
     const value = await this.request<unknown>('GET', `/api/thread/${encodeURIComponent(assertSafeId(backendSessionId))}`);
-    return sanitizeFreebuff(value);
+    const record = asRecord(value);
+    const thread = asRecord(record?.thread) ?? record;
+    if (!thread) throw new BridgeError(ErrorCodes.DESKTOP_API_INCOMPATIBLE, 'Freebuff Desktop returned an unreadable thread payload.', 'Update Freebuff Desktop, then retry.');
+    const messages = record && Array.isArray(record.messages) ? record.messages : Array.isArray(thread.messages) ? thread.messages : undefined;
+    return sanitizeFreebuff({
+      ...thread,
+      ...(messages ? { messages } : {}),
+      ...(record && Array.isArray(record.items) ? { items: record.items } : {}),
+    });
   }
 
   async getMessages(backendSessionId: string): Promise<unknown> {
-    const thread = await this.getThread(backendSessionId);
-    const record = thread && typeof thread === 'object' && !Array.isArray(thread) ? thread as Record<string, unknown> : undefined;
-    const messages = record && Array.isArray(record.messages) ? record.messages : [];
+    const thread = asRecord(await this.getThread(backendSessionId));
+    const messages = thread && Array.isArray(thread.messages) ? thread.messages : [];
     return sanitizeFreebuff(messages);
   }
 
+  /**
+   * Submit a prompt and WAIT for the turn to reach a terminal state.
+   *
+   * The Desktop's POST /message only acknowledges submission, so returning at
+   * that point would report every turn as `completed` before any work happened.
+   * We keep the subscription open for the whole turn and await the terminal
+   * state reported by the event stream.
+   */
   async sendMessage({ session, text, signal, onEvent }: { session: BackendSession; text: string; signal?: AbortSignal; onEvent?: (event: BackendEventInput) => void | Promise<void> }): Promise<BackendTurnResult> {
     if (!text || text.length > 100_000) throw new BridgeError(ErrorCodes.INVALID_INPUT, 'Message must be 1 to 100000 characters.');
     await this.assertWritable();
     const threadId = session.backendSessionId ? assertSafeId(session.backendSessionId) : session.id;
     const unsubscribe = onEvent ? this.onBackendEvent((event) => { if (event.threadId === threadId) void onEvent(event); }) : undefined;
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    if (signal) { if (signal.aborted) controller.abort(); else signal.addEventListener('abort', onAbort, { once: true }); }
     try {
+      const before = await this.readThreadState(threadId).catch((): ThreadTurnState => ({ turnState: 'idle' }));
       const response = await this.request<unknown>('POST', `/api/thread/${encodeURIComponent(threadId)}/message`, { text });
-      if (onEvent) for (const listener of this.eventListeners) { void listener({ threadId, type: 'phase', state: 'submitted' }); break; }
-      void signal; // The Desktop manages turn lifetime; the request completes when accepted.
-      return { state: 'completed', result: redact(response) };
+      const submitted = { threadId, type: 'phase' as const, state: 'submitted' };
+      this.emit(submitted);
+      if (onEvent) void onEvent(submitted);
+      const end = await this.waitForTurnEnd(threadId, before, controller.signal);
+      const mapped = this.mapTurnOutcome(end, controller.signal.aborted);
+      const result: BackendTurnResult = { state: mapped.state, result: redact(response) };
+      if (mapped.error) result.error = mapped.error;
+      return result;
     } finally {
+      signal?.removeEventListener('abort', onAbort);
       unsubscribe?.();
     }
   }
@@ -238,8 +409,38 @@ export class DesktopBackend implements FreebuffBackend {
     return redact(await this.request('POST', `/api/thread/${encodeURIComponent(threadId)}/effort`, { effort }));
   }
 
+  /**
+   * Attachments are collected from the thread's own messages. The Desktop's
+   * `/attachment` route requires a `path` query parameter and returns ONE file,
+   * so it cannot serve a listing.
+   */
   async listAttachments(backendSessionId: string): Promise<unknown> {
-    return sanitizeFreebuff(await this.request('GET', `/api/thread/${encodeURIComponent(assertSafeId(backendSessionId))}/attachment`));
+    const thread = asRecord(await this.getThread(backendSessionId));
+    const messages = thread && Array.isArray(thread.messages) ? thread.messages : [];
+    const attachments: unknown[] = [];
+    for (const message of messages) {
+      const record = asRecord(message);
+      const list = record && Array.isArray(record.attachments) ? record.attachments : [];
+      for (const attachment of list) attachments.push(attachment);
+    }
+    return sanitizeFreebuff(attachments);
+  }
+
+  /** Change summary for a thread (`/api/thread/:id/changes`). */
+  async getChanges(backendSessionId: string, scope: 'all' | 'uncommitted' = 'all'): Promise<unknown> {
+    const query = new URLSearchParams({ scope });
+    return sanitizeFreebuff(await this.request('GET', `/api/thread/${encodeURIComponent(assertSafeId(backendSessionId))}/changes?${query.toString()}`));
+  }
+
+  /**
+   * Real per-file diff for a thread (`/api/thread/:id/changes/diff`). The
+   * Desktop requires a `file` path; an empty path is rejected with
+   * `{ error: "invalid path" }`.
+   */
+  async getDiff(backendSessionId: string, file: string, scope: 'all' | 'uncommitted' = 'all', untracked = false): Promise<unknown> {
+    if (!file) throw new BridgeError(ErrorCodes.INVALID_INPUT, 'A file path is required to read a diff.', 'Call get_changes first to list changed files, then request one of them.');
+    const query = new URLSearchParams({ file, scope, ...(untracked ? { untracked: 'true' } : {}) });
+    return sanitizeFreebuff(await this.request('GET', `/api/thread/${encodeURIComponent(assertSafeId(backendSessionId))}/changes/diff?${query.toString()}`));
   }
 
   async listFiles(projectRoot: string, relative = '.'): Promise<string[]> {

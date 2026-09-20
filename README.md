@@ -65,7 +65,8 @@ claude mcp add --scope user freebuff -- node /path/to/freebuff-mcp/dist/src/cli.
 The catalog is stable: tools are always registered and return structured actionable errors (`{ ok:false, code, message, recovery }`) when Freebuff is unavailable — availability never depends on the client processing dynamic tool-list updates.
 
 - Status/discovery: `freebuff_status`, `list_projects`, `list_threads`, `get_thread`, `get_thread_messages`, `get_active_work`, `search_history`, `list_models`
-- Progress: `get_turn`, `watch_turn`, `get_thread_progress`, `watch_thread`, `get_thread_progress_summary`, `watch_active_threads`, `get_changed_files`, `get_diff`
+- Progress: `get_turn`, `watch_turn`, `get_thread_progress`, `watch_thread`, `get_thread_progress_summary`, `watch_active_threads`, `get_changed_files`
+- Changes/diff: `get_changes` (Desktop change summary), `get_diff` (real per-file patches; reports `binary`/`tooLarge`/`error` rather than inventing a diff)
 - Sessions/turns: `start_thread`, `send_message` (async, returns `turnId`), `run_turn` (synchronous with progress + cancellation), `stop_turn`, `stop_thread`, `resume_thread`, `set_model`, `set_reasoning`
 - Files/attachments: `list_project_files`, `read_project_file`, `list_thread_attachments`
 
@@ -111,7 +112,9 @@ pnpm build
 pnpm pack:check
 ```
 
-The suite (83 tests) covers the event store (cursors past 100 events, retention, per-thread staleness), SSE parsing/reconnect/Last-Event-ID/retry, handoff validation matrix, Desktop restart recovery, session/turn lifecycle and cancellation, phase classification, live-progress honesty, redaction classes, installers on existing/missing configs, and MCP integration tests that drive the real server through the MCP SDK client for both the v2 (`serve`) and legacy v1 (`serve-v1`) surfaces (tools/list, run_turn, cancellation survival, legacy progress on the canonical store).
+The suite (105 tests) covers the event store (cursors past 100 events, retention, per-thread staleness), SSE parsing/reconnect/Last-Event-ID/retry, handoff validation matrix, Desktop restart recovery, session/turn lifecycle and cancellation, phase classification, live-progress honesty, redaction classes, installers on existing/missing configs, and MCP integration tests that drive the real server through the MCP SDK client for both the v2 (`serve`) and legacy v1 (`serve-v1`) surfaces.
+
+Because CI has no Freebuff Desktop, `test/helpers/fake-desktop.ts` serves the **real** Desktop HTTP contract (verified against a live installation): `test/desktop-wire.test.ts` pins the exact payload shapes, `test/desktop-http-integration.test.ts` drives real sockets including turn completion/cancellation, and `test/http-transport.test.ts` / `test/acp-wire.test.ts` spawn the real `serve-http` and `serve-acp` processes to verify auth, rate limiting, capability advertisement, and prompt semantics on the wire.
 
 ## Security
 

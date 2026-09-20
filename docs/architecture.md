@@ -62,6 +62,21 @@ Validation covers presence, JSON shape, version, loopback URL, live PID, and exp
 
 Global monotonic sequence; per-thread bounded retention (500 events / 1 MB / 30 min TTL); per-thread (never global) staleness; terminal turn states recorded and surfaced; waiters woken per thread without lost wakeups; cursors are incremental (`afterSequence` → `nextSequence`), verified past 100 events.
 
+## Desktop HTTP contract (verified against a live Desktop)
+
+The bridge speaks the routes the Desktop UI itself uses. Shapes that are easy to get wrong are pinned by fixtures in `test/desktop-wire.test.ts`:
+
+- `GET /api/projects` → `{ projects: [{ path, threads: [...] }] }` — threads are **nested inside projects**.
+- `GET /api/thread/:id` → `{ thread, messages, items }` — the thread is **wrapped**.
+- `POST /api/threads` → creates a thread (returns the thread object, including its id).
+- `POST /api/thread/:id/<action>` — one wildcard route; actions include `message`, `stop`, `resume`, `agent` (`{ harnessId, model }`), `effort` (`{ effort }`), `rename`, `fork`, `close`.
+- `GET /api/thread/:id/changes` → `{ scope, branch, files: [{ path, adds, dels }], totals }`.
+- `GET /api/thread/:id/changes/diff?file=&scope=&untracked=` → `{ patch }`, or `{ error }` / `{ tooLarge }` / `{ binary }`.
+- `GET /api/events` → SSE frames `data: {"type":"state","snapshot":{ threads: [...] }}` (no `event:` field).
+- Thread `turnState` is `running | idle`; a finished turn records `lastTurnOutcome` (`closed` / `error`) and `lastTurnFinishedAt`.
+
+A turn is only reported `completed` after the Desktop stops reporting `running` (or `lastTurnFinishedAt` advances). If that cannot be confirmed within bounds the bridge returns the non-terminal `waiting_for_user` instead of claiming success.
+
 ## Turn lifecycle (`bridge/session-manager.ts`)
 
 `startTurn` → `queued` → `running` → (terminal: `completed` | `failed` | `cancelled`, or `waiting_for_user`). The turn's AbortController is registered so `cancelTurn`/MCP cancellation/ACP cancel abort the backend; terminal states clear the session's active turn. One active turn per session; concurrent attempts fail with `FREEBUFF_TURN_ALREADY_ACTIVE`.

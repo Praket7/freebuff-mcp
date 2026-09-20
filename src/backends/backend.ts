@@ -72,8 +72,18 @@ export class CompositeBackend implements FreebuffBackend {
 
   async createSession(options: { cwd: string; continueBackendId?: string }): Promise<BackendSession> {
     const kind = await this.selected();
-    const session = await this.backendFor(kind).createSession!(options);
-    this.sessions.set(session.id, { backend: this.backendFor(kind), session });
+    const backend = this.backendFor(kind);
+    // Never assert: a backend that cannot create sessions must fail with a
+    // structured, actionable error instead of a TypeError.
+    if (typeof backend.createSession !== 'function') {
+      throw new BridgeError(
+        ErrorCodes.BACKEND_UNAVAILABLE,
+        `The ${kind} backend cannot create new sessions.`,
+        'Pass an existing threadId to run_turn/start_thread, or set FREEBUFF_MCP_CLI_MODE=pty to create CLI sessions.',
+      );
+    }
+    const session = await backend.createSession(options);
+    this.sessions.set(session.id, { backend, session });
     return session;
   }
 
