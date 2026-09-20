@@ -24,6 +24,29 @@ test('MCP v2 server exposes the stable guarded tool surface', () => {
   assert.equal(names.length, 28, `unexpected extra tools: ${names.join(', ')}`);
 });
 
+test('MCP v2: resume_thread uses the Desktop resume route instead of submitting /resume as a prompt', async () => {
+  const calls: string[] = [];
+  const backend = {
+    kind: 'desktop' as const,
+    desktop: {
+      resume: async (session: { backendSessionId?: string }) => { calls.push(`resume:${session.backendSessionId}`); return { ok: true }; },
+    },
+    probe: async () => ({ backend: 'desktop' as const, connection: 'connected_writable' as const, authorization: 'write_authorized' as const, liveProgress: 'connected' as const, canCreateSession: true, canSendMessage: true, canStop: true, canResume: true, canSetModel: true, canSetReasoning: true, notes: [] }),
+    sendMessage: async () => { calls.push('sendMessage'); return { state: 'completed' as const }; },
+    dispose: () => undefined,
+  } as unknown as CompositeBackend;
+  const sessions = new SessionManager(backend as unknown as FreebuffBackend);
+  const adapter: V2Adapter = { backend, sessions, turns: new TurnManager(sessions) };
+  const server = createV2ServerFromAdapter(adapter);
+  const session = sessions.registerExisting({ backendSessionId: 'thread-abc', cwd: '/tmp/project' });
+
+  const result = await toolOf(server, 'resume_thread').handler({ sessionId: session.id, threadId: 'thread-abc' }, {
+    mcpReq: { _meta: {}, signal: new AbortController().signal, notify: async () => undefined },
+  });
+  assert.equal(result.structuredContent?.ok, true);
+  assert.deepEqual(calls, ['resume:thread-abc'], 'the Desktop resume route is used and no prompt is submitted');
+});
+
 type LooseTool = { handler: (args: unknown, ctx: unknown) => Promise<{ structuredContent?: Record<string, unknown> }> };
 
 function toolOf(server: unknown, name: string): LooseTool {

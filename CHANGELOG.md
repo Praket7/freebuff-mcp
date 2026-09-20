@@ -46,6 +46,7 @@ Every adapter's tests had used `fetch` stubs or scripted backends, so the bridge
 - **`run_turn` reported `completed` before any work happened.** `sendMessage` returned as soon as the Desktop acknowledged the prompt, and it unsubscribed from the event stream at the same moment, so live progress was dropped too. It now stays subscribed and waits for the thread's terminal state (Desktop `turnState: running | idle`, with `lastTurnOutcome`/`lastTurnFinishedAt`), mapping failures to `failed`, cancellation to `cancelled`, and an unconfirmed turn to a non-terminal `waiting_for_user` rather than claiming success. Bounded by a 30-minute deadline and a 60-second "never started" grace.
 - **`get_diff` was invented.** The Desktop exposes real change routes: `GET /api/thread/:id/changes` and `/changes/diff?file=&scope=`. `get_diff` now returns the real change summary and real `{ patch }` text, and surfaces `binary`/`tooLarge`/`error` results instead of fabricating anything.
 - Add a `get_changes` tool for the Desktop change summary.
+- **`resume_thread` sent `/resume` to the model as a prompt.** It submitted the text `/resume` through the message route for every backend, but `/resume` is a CLI *harness* command — the Desktop unpauses a thread's queue through its own `POST /api/thread/:id/resume` route (which is what tool, the Desktop backend, and legacy MCP v1 all use). On the Desktop this started a turn whose prompt was the literal string `/resume`. It now routes by backend.
 
 ### Verification you can rerun
 
