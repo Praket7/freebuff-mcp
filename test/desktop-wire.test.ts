@@ -17,6 +17,20 @@ const THREAD_ID = '91c7739f-45fa-46a5-b653-120a85a63838';
 const PROJECT_PATH = '/Users/example/proj';
 const LAUNCH_ID = 'launch-fixture-id';
 
+/**
+ * These tests must not depend on a Desktop installed on the machine running
+ * them. An earlier revision called `new DesktopBackend()` with no options, so
+ * discovery ran against the real machine: locally it found a live Desktop and
+ * the mocked fetch happily answered, while CI (no Desktop) failed with
+ * FREEBUFF_DESKTOP_NOT_FOUND. Pin the origin explicitly, and hard-fail on any
+ * foreign origin so a live dependency can never silently come back.
+ */
+const WIRE_ORIGIN = 'http://127.0.0.1:38211';
+
+function wireBackend(): DesktopBackend {
+  return new DesktopBackend({ baseUrl: WIRE_ORIGIN, explicitLaunchId: LAUNCH_ID });
+}
+
 /** Real `/api/projects`: an array of PROJECTS, each with a nested `threads`. */
 const REAL_PROJECTS = {
   projects: [
@@ -88,6 +102,7 @@ function mockDesktop(overrides: Record<string, (req: Captured) => Response | und
   const json = (value: unknown, status = 200): Response => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
   globalThis.fetch = async (input, init) => {
     const url = new URL(String(input));
+    if (url.origin !== WIRE_ORIGIN) throw new Error(`wire test attempted a real network call to ${url.origin}; it must stay hermetic`);
     const method = (init?.method ?? 'GET').toUpperCase();
     const call: Captured = { method, path: url.pathname + url.search, ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}) };
     calls.push(call);
@@ -117,7 +132,7 @@ function mockDesktop(overrides: Record<string, (req: Captured) => Response | und
 
 test('wire: listThreads flattens projects into threads (never returns projects)', async () => {
   const mock = mockDesktop();
-  const backend = new DesktopBackend();
+  const backend = wireBackend();
   try {
     const threads = (await backend.listThreads()) as Array<Record<string, unknown>>;
     assert.equal(threads.length, 1);
@@ -133,7 +148,7 @@ test('wire: listThreads flattens projects into threads (never returns projects)'
 
 test('wire: getThread unwraps {thread,messages,items} so metadata is not lost', async () => {
   const mock = mockDesktop();
-  const backend = new DesktopBackend();
+  const backend = wireBackend();
   try {
     const thread = (await backend.getThread(THREAD_ID)) as Record<string, unknown>;
     assert.equal(thread.id, THREAD_ID);
@@ -152,7 +167,7 @@ test('wire: getThread unwraps {thread,messages,items} so metadata is not lost', 
 
 test('wire: getMessages returns real messages from the snapshot wrapper', async () => {
   const mock = mockDesktop();
-  const backend = new DesktopBackend();
+  const backend = wireBackend();
   try {
     const messages = (await backend.getMessages(THREAD_ID)) as unknown[];
     assert.equal(messages.length, 2);
@@ -164,7 +179,7 @@ test('wire: getMessages returns real messages from the snapshot wrapper', async 
 
 test('wire: listAttachments reads message attachments and never calls the single-file /attachment route', async () => {
   const mock = mockDesktop();
-  const backend = new DesktopBackend();
+  const backend = wireBackend();
   try {
     const attachments = (await backend.listAttachments(THREAD_ID)) as Array<Record<string, unknown>>;
     assert.equal(attachments.length, 1);
@@ -178,7 +193,7 @@ test('wire: listAttachments reads message attachments and never calls the single
 
 test('wire: createSession uses POST /api/threads and returns the real new thread id', async () => {
   const mock = mockDesktop();
-  const backend = new DesktopBackend();
+  const backend = wireBackend();
   try {
     const session = await backend.createSession!({ cwd: PROJECT_PATH });
     assert.equal(session.backend, 'desktop');
@@ -194,7 +209,7 @@ test('wire: createSession uses POST /api/threads and returns the real new thread
 
 test('wire: createSession with continueBackendId verifies the thread exists instead of guessing', async () => {
   const mock = mockDesktop();
-  const backend = new DesktopBackend();
+  const backend = wireBackend();
   try {
     const session = await backend.createSession!({ cwd: PROJECT_PATH, continueBackendId: THREAD_ID });
     assert.equal(session.backendSessionId, THREAD_ID);
@@ -207,7 +222,7 @@ test('wire: createSession with continueBackendId verifies the thread exists inst
 
 test('wire: getDiff sends file+scope and parses the real {patch} response', async () => {
   const mock = mockDesktop();
-  const backend = new DesktopBackend();
+  const backend = wireBackend();
   try {
     const diff = (await backend.getDiff(THREAD_ID, 'src/a.ts', 'all')) as Record<string, unknown>;
     assert.match(String(diff.patch), /^diff --git/);

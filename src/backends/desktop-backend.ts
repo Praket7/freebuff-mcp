@@ -251,13 +251,21 @@ export class DesktopBackend implements FreebuffBackend {
       try { const health = await this.request<{ ok?: unknown }>('GET', '/healthz'); writable = health?.ok === true; } catch { writable = false; }
     }
     if (!this.connection) return { backend: 'desktop', connection: 'not_running', authorization: 'none', liveProgress: 'unavailable', canCreateSession: false, canSendMessage: false, canStop: false, canResume: false, canSetModel: false, canSetReasoning: false, notes: ['Desktop connection was lost during the health check.'] };
-    const streamHealthy = this.sseConnected && this.lastEventAt !== undefined && Date.now() - this.lastEventAt < 120_000;
     const started = this.sse !== undefined;
     return {
       backend: 'desktop',
       connection: writable ? 'connected_writable' : 'connected_read_only',
       authorization: writable ? 'write_authorized' : this.connection.launchId ? 'read_only' : 'none',
-      liveProgress: this.sseConnected ? (streamHealthy || this.lastEventAt !== undefined ? 'connected' : 'connected') : started ? 'stale' : 'unavailable',
+      // `liveProgress` must never claim progress that isn't arriving, but it
+      // must not slander a healthy idle Desktop either. The Desktop event
+      // stream has NO heartbeat: it sends a burst of snapshot frames on
+      // connect and then stays silent while the project is idle (measured
+      // against the live Desktop: 14 frames at connect, then nothing for 45s).
+      // Freshness of `lastEventAt` is therefore NOT evidence of health and must
+      // not gate this field. The SseClient's own connection state is the honest
+      // signal: 'stale' means the stream was started but is currently
+      // disconnected and retrying.
+      liveProgress: this.sseConnected ? 'connected' : started ? 'stale' : 'unavailable',
       ...(this.lastEventAt !== undefined ? { lastEventAt: new Date(this.lastEventAt).toISOString() } : {}),
       canCreateSession: true,
       canSendMessage: writable,
