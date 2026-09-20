@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { assertSafeId, redact, safeProjectPath, safeTextContent, sanitizeFreebuff } from '../security.js';
+import { assertSafeId, redact, redactString, safeProjectPath, safeTextContent, sanitizeFreebuff } from '../security.js';
 import { blocked } from '../security.js';
 import { SseClient, SseEvent } from '../desktop/sse.js';
 import { mapDesktopEvent, safeMetadata } from '../desktop/event-adapter.js';
@@ -10,6 +10,18 @@ import { BackendCapabilities, BackendEventInput, BackendStreamHealth, BackendTur
 
 const REQUEST_TIMEOUT_MS = 8_000;
 const RECOVERABLE = /(fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|network|socket)/i;
+/**
+ * How long a verified write-authorization result is trusted. Every write needs
+ * it, so without a short cache each send/stop/resume would pay an extra
+ * /healthz round-trip on top of its own request.
+ */
+const HEALTH_TTL_MS = 3_000;
+/**
+ * How long the FIRST probe waits for the just-started event stream to connect,
+ * so a healthy Desktop is not reported as `stale` simply because the stream had
+ * not finished connecting when the status call arrived.
+ */
+const STREAM_SETTLE_MS = 1_500;
 
 /** Maximum number of per-file diffs fetched by a single `get_diff` call. */
 export const MAX_DIFF_FILES = 5;
@@ -60,6 +72,10 @@ export class DesktopBackend implements FreebuffBackend {
   private connecting?: Promise<void>;
   private sse?: SseClient;
   private sseConnected = false;
+  /** True once the stream has connected at least once in this process. */
+  private streamEverConnected = false;
+  private healthWritable = false;
+  private healthCheckedAt = 0;
   private lastEventAt?: number;
   private eventListeners = new Set<(event: BackendEventInput) => void>();
   private streamListeners = new Set<(health: BackendStreamHealth) => void>();
@@ -108,8 +124,33 @@ export class DesktopBackend implements FreebuffBackend {
     // Losing an established stream means events may have been missed until a
     // fresh full snapshot arrives; claiming otherwise would be a silent lie.
     if (this.sseConnected && !value) this.gapSuspected = true;
+    if (value) this.streamEverConnected = true;
     this.sseConnected = value;
     this.notifyStreamHealth();
+  }
+
+  /**
+   * Fresh write-authorization check. A status query must never be answered from
+   * cache — its whole purpose is to report current truth.
+   */
+  private async checkWritable(): Promise<boolean> {
+    let result = false;
+    if (this.connection?.launchId) {
+      try { const health = await this.request<{ ok?: unknown }>('GET', '/healthz'); result = health?.ok === true; } catch { result = false; }
+    }
+    this.healthWritable = result;
+    this.healthCheckedAt = Date.now();
+    return result;
+  }
+
+  /**
+   * Write-path guard. Reuses a very recent authorization result so one operation
+   * does not pay two round-trips; the write request itself remains the
+   * authority, and a rotated launch id is recovered by the request layer.
+   */
+  private async assertWritableCached(): Promise<boolean> {
+    if (Date.now() - this.healthCheckedAt < HEALTH_TTL_MS) return this.healthWritable;
+    return this.checkWritable();
   }
 
   /** Full state is known again, so any suspected gap is resolved. */
@@ -123,6 +164,8 @@ export class DesktopBackend implements FreebuffBackend {
     if (this.connection && !force) return;
     if (this.connecting) return this.connecting;
     this.connecting = (async () => {
+      // A new connection invalidates any cached authorization result.
+      this.healthCheckedAt = 0;
       if (this.options.baseUrl) {
         this.connection = { base: new URL(this.options.baseUrl), ...(this.options.explicitLaunchId || process.env.FREEBUFF_LAUNCH_ID ? { launchId: this.options.explicitLaunchId ?? process.env.FREEBUFF_LAUNCH_ID } : {}), source: 'explicit' };
       } else {
@@ -154,7 +197,15 @@ export class DesktopBackend implements FreebuffBackend {
           await this.connect(true);
           return await this.request<T>(method, pathname, body, false);
         }
-        throw new BridgeError(response.status === 401 || response.status === 403 ? ErrorCodes.DESKTOP_AUTH_REQUIRED : ErrorCodes.BACKEND_UNAVAILABLE, `Freebuff Desktop returned HTTP ${response.status} for ${pathname}.`, response.status === 401 || response.status === 403 ? 'Restart Freebuff Desktop or reopen the project so it can issue a fresh launch authorization, then retry.' : undefined);
+        // Surface the Desktop's own explanation (for example "no project" or
+        // "invalid model") instead of reducing every failure to a status code.
+        let detail: string | undefined;
+        try {
+          const failure = await response.json() as { error?: unknown; message?: unknown };
+          const raw = typeof failure?.error === 'string' ? failure.error : typeof failure?.message === 'string' ? failure.message : undefined;
+          if (raw) detail = redactString(raw).slice(0, 300);
+        } catch { /* the Desktop may return an empty or non-JSON body */ }
+        throw new BridgeError(response.status === 401 || response.status === 403 ? ErrorCodes.DESKTOP_AUTH_REQUIRED : ErrorCodes.BACKEND_UNAVAILABLE, `Freebuff Desktop returned HTTP ${response.status} for ${pathname}.${detail ? ` ${detail}` : ''}`, response.status === 401 || response.status === 403 ? 'Restart Freebuff Desktop or reopen the project so it can issue a fresh launch authorization, then retry.' : undefined);
       }
       return await response.json() as T;
     } catch (error) {
@@ -293,11 +344,16 @@ export class DesktopBackend implements FreebuffBackend {
       return { backend: 'desktop', connection: notFound ? 'not_running' : 'unavailable', authorization: 'none', liveProgress: 'unavailable', canCreateSession: false, canSendMessage: false, canStop: false, canResume: false, canSetModel: false, canSetReasoning: false, notes: [error instanceof Error ? error.message : 'Desktop unavailable'] };
     }
     if (!this.connection) return { backend: 'desktop', connection: 'unavailable', authorization: 'none', liveProgress: 'unavailable', canCreateSession: false, canSendMessage: false, canStop: false, canResume: false, canSetModel: false, canSetReasoning: false, notes: ['Desktop not connected.'] };
-    let writable = false;
-    if (this.connection?.launchId) {
-      try { const health = await this.request<{ ok?: unknown }>('GET', '/healthz'); writable = health?.ok === true; } catch { writable = false; }
-    }
+    const writable = await this.checkWritable();
     if (!this.connection) return { backend: 'desktop', connection: 'not_running', authorization: 'none', liveProgress: 'unavailable', canCreateSession: false, canSendMessage: false, canStop: false, canResume: false, canSetModel: false, canSetReasoning: false, notes: ['Desktop connection was lost during the health check.'] };
+    // First call only: give the just-started stream a bounded moment to
+    // connect, so a healthy Desktop is not misreported as `stale`.
+    if (this.sse !== undefined && !this.sseConnected && !this.streamEverConnected) {
+      const settle = Date.now() + STREAM_SETTLE_MS;
+      while (!this.sseConnected && Date.now() < settle) {
+        await new Promise<void>((resolve) => { setTimeout(resolve, 50); });
+      }
+    }
     const started = this.sse !== undefined;
     return {
       backend: 'desktop',
@@ -314,7 +370,8 @@ export class DesktopBackend implements FreebuffBackend {
       // disconnected and retrying.
       liveProgress: this.sseConnected ? 'connected' : started ? 'stale' : 'unavailable',
       ...(this.lastEventAt !== undefined ? { lastEventAt: new Date(this.lastEventAt).toISOString() } : {}),
-      canCreateSession: true,
+      // Creating a thread is a write: read-only means it is not available.
+      canCreateSession: writable,
       canSendMessage: writable,
       canStop: writable,
       canResume: writable,
@@ -325,8 +382,9 @@ export class DesktopBackend implements FreebuffBackend {
   }
 
   private async assertWritable(): Promise<void> {
-    const caps = await this.probe();
-    if (!this.connection?.launchId || caps.connection !== 'connected_writable') throw new BridgeError(ErrorCodes.DESKTOP_AUTH_REQUIRED, 'Freebuff Desktop write authorization is unavailable.', 'Restart Freebuff Desktop or reopen the project, then retry.');
+    // Connect first: the launch id only exists once a Desktop is resolved.
+    await this.connect();
+    if (!this.connection?.launchId || !(await this.assertWritableCached())) throw new BridgeError(ErrorCodes.DESKTOP_AUTH_REQUIRED, 'Freebuff Desktop write authorization is unavailable.', 'Restart Freebuff Desktop or reopen the project, then retry.');
   }
 
   async listProjects(): Promise<unknown> {
@@ -523,5 +581,8 @@ export class DesktopBackend implements FreebuffBackend {
     this.streamListeners.clear();
     this.gapSuspected = false;
     this.sseConnected = false;
+    this.streamEverConnected = false;
+    this.healthCheckedAt = 0;
+    this.healthWritable = false;
   }
 }

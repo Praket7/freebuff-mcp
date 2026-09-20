@@ -30,6 +30,40 @@ test('phase classification: only actual test commands are running_tests', () => 
   assert.notEqual(classifyPhase('tool_start', 'run_terminal_command', 'python script.py'), 'running_tests');
 });
 
+test('composite backend: model and reasoning changes route to the backend that owns the session', async () => {
+  // Previously the MCP tool reached into `backend.desktop` directly, so a CLI
+  // session would have been changed through the Desktop backend.
+  const calls: string[] = [];
+  const desktop = {
+    kind: 'desktop' as const,
+    setModel: async () => { calls.push('desktop.setModel'); return {}; },
+    setReasoning: async () => { calls.push('desktop.setReasoning'); return {}; },
+    dispose: () => undefined,
+  };
+  const cli = {
+    kind: 'cli' as const,
+    setModel: async () => { calls.push('cli.setModel'); return {}; },
+    setReasoning: async () => { calls.push('cli.setReasoning'); return {}; },
+    dispose: () => undefined,
+  };
+  const composite = new CompositeBackend({ desktop, cli } as never);
+
+  await composite.setModel(composite.useExisting('cli', 'conv-1', '/tmp/project'), 'some/model', 'codebuff');
+  await composite.setReasoning(composite.useExisting('desktop', 'thread-1', '/tmp/project'), 'high');
+  assert.deepEqual(calls, ['cli.setModel', 'desktop.setReasoning']);
+});
+
+test('composite backend: a backend without model support fails with a structured error', async () => {
+  const composite = new CompositeBackend({
+    desktop: { kind: 'desktop' as const, dispose: () => undefined },
+    cli: { kind: 'cli' as const, dispose: () => undefined },
+  } as never);
+  await assert.rejects(
+    () => composite.setModel(composite.useExisting('desktop', 'thread-1', '/tmp/project'), 'm'),
+    (error: unknown) => (error as { name?: string }).name === 'BridgeError' && (error as { code?: string }).code === 'FREEBUFF_BACKEND_UNAVAILABLE',
+  );
+});
+
 test('desktop event mapping: types map to bridge events without fabricating text', () => {
   const mapped = mapDesktopEvent({ threadId: 'th1', type: 'assistant_update', text: 'partial answer' }, undefined);
   assert.equal(mapped?.type, 'assistant_delta');

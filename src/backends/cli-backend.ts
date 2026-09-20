@@ -149,6 +149,24 @@ export class CliBackend implements FreebuffBackend {
     return { backendTurnId: conversationId, state: snapshot.exited ? 'failed' : 'completed', result: redact({ output: snapshot.output.slice(-20_000) }) };
   }
 
+  /**
+   * Model and reasoning effort are set through the harness slash commands, the
+   * same mechanism `resume` uses. These are advertised via `canSetModel` /
+   * `canSetReasoning`, so they must exist rather than being claimed.
+   */
+  async setModel(session: BackendSession, model: string, _harnessId = 'codebuff'): Promise<unknown> {
+    if (!model || model.length > 200) throw new BridgeError(ErrorCodes.INVALID_INPUT, 'Invalid model.');
+    const snapshot = await this.manager.send(session.id, `/model ${model}`, session.cwd, session.backendSessionId);
+    if (snapshot.exited) throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, 'The Freebuff CLI exited before the model could be set.');
+    return redact({ model, output: snapshot.output.slice(-4_000) });
+  }
+
+  async setReasoning(session: BackendSession, effort: string | null): Promise<unknown> {
+    const snapshot = await this.manager.send(session.id, `/reasoning ${effort ?? ''}`.trimEnd(), session.cwd, session.backendSessionId);
+    if (snapshot.exited) throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, 'The Freebuff CLI exited before the reasoning effort could be set.');
+    return redact({ effort, output: snapshot.output.slice(-4_000) });
+  }
+
   listThreads(): Promise<unknown> { return this.manager.listConversations(this.projectRoot); }
 
   snapshot(sessionId: string): { id: string; conversationId?: string; pid: number; output: string; exited: boolean; exitCode?: number } {

@@ -270,5 +270,12 @@ export interface FreebuffBackend {
    * that stream only while a turn runs (CLI/PTY) omit it.
    */
   onStreamHealth?(listener: (health: BackendStreamHealth) => void): () => void;
+  /**
+   * Set the model for an existing backend session. Advertised through
+   * `canSetModel`, so a backend that reports the capability must implement it.
+   */
+  setModel?(session: BackendSession, model: string, harnessId?: string): Promise<unknown>;
+  /** Set the reasoning effort for an existing backend session. */
+  setReasoning?(session: BackendSession, effort: string | null): Promise<unknown>;
   dispose(): Promise<void> | void;
 }

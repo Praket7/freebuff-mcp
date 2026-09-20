@@ -219,8 +219,10 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
     const session = await findSessionByBackendId(adapter, assertSafeId(args.threadId));
     if (!session) throw new BridgeError(ErrorCodes.SESSION_NOT_FOUND, 'set_model requires a bridge session for this thread.', 'Call start_thread first.');
     const caps = await adapter.backend.probe();
-    if (!caps.canSetModel) throw new BridgeError(ErrorCodes.DESKTOP_AUTH_REQUIRED, 'Model changes require Desktop write authorization.');
-    await (adapter.backend.desktop as unknown as { setModel(session: BackendSession, model: string, harnessId?: string): Promise<unknown> }).setModel({ id: session.id, backend: 'desktop', ...(session.backendSessionId ? { backendSessionId: session.backendSessionId } : {}), cwd: session.projectRoot }, args.model, args.harnessId);
+    if (!caps.canSetModel) throw new BridgeError(ErrorCodes.DESKTOP_AUTH_REQUIRED, 'Model changes require write authorization.');
+    const backendSession: BackendSession = { id: session.id, backend: session.backend, ...(session.backendSessionId ? { backendSessionId: session.backendSessionId } : {}), cwd: session.projectRoot };
+    if (typeof adapter.backend.setModel !== 'function') throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, `The ${session.backend} backend cannot change models.`);
+    await adapter.backend.setModel(backendSession, args.model, args.harnessId);
     return { ok: true };
   }));
 
@@ -228,8 +230,10 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
     const session = await findSessionByBackendId(adapter, assertSafeId(args.threadId));
     if (!session) throw new BridgeError(ErrorCodes.SESSION_NOT_FOUND, 'set_reasoning requires a bridge session for this thread.', 'Call start_thread first.');
     const caps = await adapter.backend.probe();
-    if (!caps.canSetReasoning) throw new BridgeError(ErrorCodes.DESKTOP_AUTH_REQUIRED, 'Reasoning changes require Desktop write authorization.');
-    await (adapter.backend.desktop as unknown as { setReasoning(session: BackendSession, effort: string | null): Promise<unknown> }).setReasoning({ id: session.id, backend: 'desktop', ...(session.backendSessionId ? { backendSessionId: session.backendSessionId } : {}), cwd: session.projectRoot }, args.effort);
+    if (!caps.canSetReasoning) throw new BridgeError(ErrorCodes.DESKTOP_AUTH_REQUIRED, 'Reasoning changes require write authorization.');
+    const backendSession: BackendSession = { id: session.id, backend: session.backend, ...(session.backendSessionId ? { backendSessionId: session.backendSessionId } : {}), cwd: session.projectRoot };
+    if (typeof adapter.backend.setReasoning !== 'function') throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, `The ${session.backend} backend cannot change reasoning effort.`);
+    await adapter.backend.setReasoning(backendSession, args.effort);
     return { ok: true };
   }));
 

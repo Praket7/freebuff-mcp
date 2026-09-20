@@ -60,7 +60,10 @@ export class CompositeBackend implements FreebuffBackend {
     const desktopCaps = this.desktopCaps;
     const cliCaps = await this.cli.probe().catch(() => null);
     if (desktopCaps && (desktopCaps.connection === 'connected_writable' || desktopCaps.connection === 'connected_read_only')) {
-      return { ...desktopCaps, canCreateSession: true, notes: [...desktopCaps.notes, ...(cliCaps ? [cliCaps.notes[0] ?? ''] : []).filter(Boolean)] };
+      // Never claim a capability the Desktop did not grant: creating a thread is
+      // a write, so a read-only Desktop cannot do it.
+      const writable = desktopCaps.connection === 'connected_writable';
+      return { ...desktopCaps, canCreateSession: writable, notes: [...desktopCaps.notes, ...(cliCaps ? [cliCaps.notes[0] ?? ''] : []).filter(Boolean)] };
     }
     if (cliCaps) return cliCaps;
     return { backend: 'desktop', connection: 'unavailable', authorization: 'none', liveProgress: 'unavailable', canCreateSession: false, canSendMessage: false, canStop: false, canResume: false, canSetModel: false, canSetReasoning: false, notes: ['No Freebuff backend is available.'] };
@@ -113,6 +116,19 @@ export class CompositeBackend implements FreebuffBackend {
     const backend = entry?.backend ?? await this.pickForSession(session);
     if (!backend.stop) throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, `The ${backend.kind} backend cannot stop turns.`);
     await backend.stop(session);
+  }
+
+  /** Route model/reasoning changes to the backend that owns the session. */
+  async setModel(session: BackendSession, model: string, harnessId = 'codebuff'): Promise<unknown> {
+    const backend = this.sessions.get(session.id)?.backend ?? await this.pickForSession(session);
+    if (!backend.setModel) throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, `The ${backend.kind} backend cannot change models.`);
+    return backend.setModel(session, model, harnessId);
+  }
+
+  async setReasoning(session: BackendSession, effort: string | null): Promise<unknown> {
+    const backend = this.sessions.get(session.id)?.backend ?? await this.pickForSession(session);
+    if (!backend.setReasoning) throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, `The ${backend.kind} backend cannot change reasoning effort.`);
+    return backend.setReasoning(session, effort);
   }
 
   async listProjects(): Promise<Json> { return sanitizeFreebuff(await this.desktop.listProjects()) as Json; }

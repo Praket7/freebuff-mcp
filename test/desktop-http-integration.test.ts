@@ -127,6 +127,57 @@ test('http: cancelling a running turn aborts it and reports cancelled', async ()
   }
 });
 
+test('http: a Desktop rejection keeps the Desktop own explanation in the structured error', async () => {
+  const desktop = await startFakeDesktop();
+  const restoreEnv = withEnv(desktop.url, desktop.launchId);
+  const backend = new DesktopBackend();
+  try {
+    // The fake rejects an absolute diff path with { error: 'invalid path' } and
+    // HTTP 400, exactly like the real Desktop.
+    await assert.rejects(
+      () => backend.getDiff(desktop.threadId, '/etc/passwd', 'all'),
+      (error: unknown) => {
+        const typed = error as { name?: string; code?: string; message?: string };
+        assert.equal(typed.name, 'BridgeError');
+        assert.equal(typed.code, 'FREEBUFF_BACKEND_UNAVAILABLE');
+        assert.match(String(typed.message), /HTTP 400/);
+        assert.match(String(typed.message), /invalid path/, 'the Desktop explanation is preserved');
+        return true;
+      },
+    );
+  } finally {
+    backend.dispose();
+    restoreEnv();
+    await desktop.close();
+  }
+});
+
+test('http: a read-only Desktop does not advertise capabilities it cannot perform', async () => {
+  const desktop = await startFakeDesktop();
+  // No launch id: every write is unauthorized, so the Desktop is read-only.
+  const restoreEnv = withEnv(desktop.url, '');
+  const backend = new DesktopBackend();
+  try {
+    const caps = await backend.probe();
+    assert.equal(caps.connection, 'connected_read_only');
+    assert.equal(caps.canCreateSession, false, 'creating a thread is a write');
+    assert.equal(caps.canSendMessage, false);
+    assert.equal(caps.canStop, false);
+    assert.equal(caps.canResume, false);
+    assert.equal(caps.canSetModel, false);
+    assert.equal(caps.canSetReasoning, false);
+    await assert.rejects(
+      () => backend.createSession!({ cwd: desktop.projectPath }),
+      (error: unknown) => (error as { code?: string }).code === 'FREEBUFF_DESKTOP_AUTH_REQUIRED',
+      'and the write still fails with an actionable error',
+    );
+  } finally {
+    backend.dispose();
+    restoreEnv();
+    await desktop.close();
+  }
+});
+
 test('http: a dropped stream is reported as connected=false plus a suspected gap, then clears on resync', async () => {
   const desktop = await startFakeDesktop();
   const restoreEnv = withEnv(desktop.url, desktop.launchId);

@@ -48,9 +48,18 @@ function validOrigin(req: IncomingMessage): boolean {
   if (!origin) return true;
   try { const parsed = new URL(origin); return isLoopback(parsed.hostname); } catch { return false; }
 }
+const MAX_BODY_BYTES = 2_000_000;
 async function body(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
-  for await (const chunk of req) { chunks.push(Buffer.from(chunk)); if (Buffer.concat(chunks).length > 2_000_000) throw new Error('Request too large'); }
+  let size = 0;
+  // Track the running size instead of re-concatenating every chunk (which is
+  // quadratic for a body split across many chunks).
+  for await (const chunk of req) {
+    const buf = Buffer.from(chunk);
+    size += buf.length;
+    if (size > MAX_BODY_BYTES) throw new Error('Request too large');
+    chunks.push(buf);
+  }
   const raw = Buffer.concat(chunks).toString('utf8');
   return raw ? JSON.parse(raw) : undefined;
 }
@@ -60,9 +69,19 @@ export async function runHttp(): Promise<void> {
   const port = Number(process.env.FREEBUFF_MCP_PORT ?? 8788);
   if (!isLoopback(host) && process.env.FREEBUFF_MCP_ALLOW_REMOTE !== '1') throw new Error('Refusing non-loopback HTTP host; set FREEBUFF_MCP_ALLOW_REMOTE=1 only behind trusted HTTPS and authentication.');
   const recent = new Map<string, { at: number; count: number }>();
+  const RATE_WINDOW_MS = 60_000;
+  const RATE_LIMIT = 120;
+  /**
+   * Bound the limiter's own memory: without pruning, one bucket per source
+   * address accumulates for the lifetime of the process.
+   */
+  const pruneRecent = (now: number): void => {
+    if (recent.size <= 1_024) return;
+    for (const [key, bucket] of recent) if (now - bucket.at >= RATE_WINDOW_MS) recent.delete(key);
+  };
   const server = createHttpServer(async (req, res) => {
     if (!validOrigin(req)) { res.writeHead(403, {'content-type':'application/json'}); res.end(JSON.stringify({error:'invalid_origin'})); return; }
-    const address = req.socket.remoteAddress ?? 'unknown'; const now = Date.now(); const bucket = recent.get(address); if (!bucket || now - bucket.at >= 60_000) recent.set(address, {at:now,count:1}); else { bucket.count++; if (bucket.count > 120) { res.writeHead(429, {'content-type':'application/json','retry-after':'60'}); res.end(JSON.stringify({error:'rate_limited'})); return; } }
+    const address = req.socket.remoteAddress ?? 'unknown'; const now = Date.now(); pruneRecent(now); const bucket = recent.get(address); if (!bucket || now - bucket.at >= RATE_WINDOW_MS) recent.set(address, {at:now,count:1}); else { bucket.count++; if (bucket.count > RATE_LIMIT) { res.writeHead(429, {'content-type':'application/json','retry-after':'60'}); res.end(JSON.stringify({error:'rate_limited'})); return; } }
     if (req.url === '/healthz' && req.method === 'GET') { if (!isLoopback(host) && !authorized(req)) { res.writeHead(401, {'www-authenticate':'Bearer'}); res.end(JSON.stringify({error:'unauthorized'})); return; } res.writeHead(200, {'content-type':'application/json'}); res.end(JSON.stringify({ok:true,readOnly:(await runtime.capabilities()).readOnly})); return; }
     if (req.url !== '/mcp' || req.method !== 'POST') { res.writeHead(404, {'content-type':'application/json'}); res.end(JSON.stringify({error:'not_found'})); return; }
     if (!authorized(req)) { res.writeHead(401, {'www-authenticate':'Bearer'}); res.end(JSON.stringify({error:'unauthorized'})); return; }
