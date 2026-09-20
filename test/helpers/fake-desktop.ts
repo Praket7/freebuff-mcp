@@ -15,9 +15,11 @@ import type { AddressInfo } from 'node:net';
  *  - `GET  /api/projects`                -> { projects: [{ path, threads: [...] }] }
  *  - `GET  /api/thread/:id`              -> { thread, messages, items }
  *  - `POST /api/threads`                 -> the created thread object
- *  - `POST /api/thread/:id/message`      -> { ok, itemId } (turn continues asynchronously)
+ *  - `POST /api/thread/:id/message`      -> { ok, queued } (turn continues asynchronously)
  *  - `POST /api/thread/:id/stop`         -> { ok: true }
- *  - `POST /api/thread/:id/agent|effort` -> { ok: true, ... }
+ *  - `POST /api/thread/:id/resume`       -> { ok: true } (resumes the QUEUE, not a turn)
+ *  - `POST /api/thread/:id/agent`        -> { ok, model }
+ *  - `POST /api/thread/:id/effort`       -> { ok, thread }
  *  - `GET  /api/thread/:id/changes`      -> { scope, branch, files, totals }
  *  - `GET  /api/thread/:id/changes/diff` -> { patch } | 400 { error }
  *  - `GET  /api/events`                  -> SSE `{"type":"state","snapshot":{threads:[...]}}`
@@ -187,7 +189,10 @@ export async function startFakeDesktop(options: FakeDesktopOptions = {}): Promis
           const text = typeof body?.text === 'string' ? body.text : '';
           if (!text.trim()) return json(response, { error: 'text or attachments required' }, 400);
           runTurn(id);
-          return json(response, { ok: true, itemId: 'item-1' });
+          // The Desktop acknowledges a submission with `queued` (whether the
+          // message joined the queue instead of running immediately). It does
+          // NOT return a turn id, so the bridge must not invent one.
+          return json(response, { ok: true, queued: false });
         }
         if (method === 'POST' && suffix === '/stop') {
           thread.turnState = 'idle';
@@ -195,7 +200,13 @@ export async function startFakeDesktop(options: FakeDesktopOptions = {}): Promis
           sendSse();
           return json(response, { ok: true });
         }
-        if (method === 'POST' && (suffix === '/agent' || suffix === '/effort')) return json(response, { ok: true, model: thread.model });
+        if (method === 'POST' && suffix === '/agent') {
+          const requested = typeof body?.model === 'string' ? body.model : thread.model;
+          if (typeof requested === 'string' && requested.includes('invalid')) return json(response, { error: 'invalid model' }, 400);
+          thread.model = requested;
+          return json(response, { ok: true, model: requested });
+        }
+        if (method === 'POST' && suffix === '/effort') return json(response, { ok: true, thread });
         return json(response, { error: 'unknown action' }, 400);
       }
 

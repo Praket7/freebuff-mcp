@@ -424,6 +424,9 @@ export class DesktopBackend implements FreebuffBackend {
     try {
       const before = await this.readThreadState(threadId).catch((): ThreadTurnState => ({ turnState: 'idle' }));
       const response = await this.request<unknown>('POST', `/api/thread/${encodeURIComponent(threadId)}/message`, { text });
+      // The Desktop acknowledges a submission with `{ ok, queued }` and returns
+      // no turn id, so `backendTurnId` stays unset here: the bridge never
+      // invents a backend identity it was not given.
       const submitted = { threadId, type: 'phase' as const, state: 'submitted' };
       this.emit(submitted);
       if (onEvent) void onEvent(submitted);

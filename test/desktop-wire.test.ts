@@ -116,7 +116,7 @@ function mockDesktop(overrides: Record<string, (req: Captured) => Response | und
     if (url.pathname === `/api/thread/${THREAD_ID}/changes`) return json(REAL_CHANGES);
     if (url.pathname === `/api/thread/${THREAD_ID}/changes/diff`) return json(REAL_DIFF);
     if (url.pathname === '/api/threads') return json({ id: 'new-thread-id', projectId: PROJECT_PATH, projectPath: PROJECT_PATH, title: 'New thread', draft: true });
-    if (url.pathname.endsWith('/message')) return json({ ok: true, itemId: 'item-1' });
+    if (url.pathname.endsWith('/message')) return json({ ok: true, queued: false });
     return json({ error: 'not found' }, 404);
   };
   return {

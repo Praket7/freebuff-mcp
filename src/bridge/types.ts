@@ -7,6 +7,10 @@
 //   example the Desktop thread id or the CLI conversation id). They are never
 //   assumed to equal the bridge id, and bridge ids are never passed to Freebuff
 //   as conversation ids unless they have been verified to be real ones.
+// - Both are set only when Freebuff actually supplies one. A backend that
+//   returns no turn identity (the Desktop acknowledges a submission with
+//   `{ ok, queued }` and nothing more) leaves backendTurnId unset rather than
+//   inventing one.
 
 export type BackendKind = 'desktop' | 'cli' | 'sdk';
 

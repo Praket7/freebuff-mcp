@@ -50,6 +50,7 @@ Every adapter's tests had used `fetch` stubs or scripted backends, so the bridge
 ### Verification you can rerun
 
 - Add a fake Desktop HTTP server (`test/helpers/fake-desktop.ts`) that serves the real contract, so CI — which has no Desktop — tests the actual wire protocol: status codes, payload wrappers, nested thread lists, SSE snapshot frames, and turn lifecycle.
+- Correct that fake against the bundled orchestrator. It had acknowledged a prompt with `{ ok, itemId }`, but the real Desktop returns `{ ok, queued }` and no turn id at all, so a test briefly pinned an identity the Desktop never sends. `backendTurnId` is now documented and tested as unset when Freebuff supplies no turn identity — the bridge does not invent one — and the `/agent` (`{ ok, model }`) and `/effort` (`{ ok, thread }`) responses match the orchestrator too.
 - Add `test/desktop-wire.test.ts` pinning the real payload shapes (captured from a live Desktop) plus `test/desktop-http-integration.test.ts` driving real sockets, including that a turn is awaited and that cancellation/failure are reported correctly.
 - Add `test/http-transport.test.ts` (bearer auth, `Origin` validation, 404s, malformed/oversized bodies, 429 rate limiting, full MCP handshake) and `test/acp-wire.test.ts` (`initialize` capabilities, `session/new` creating a real thread, `session/prompt` → `end_turn`, `session/cancel` → `cancelled`) — both surfaces previously had **zero** wire-level coverage.
 

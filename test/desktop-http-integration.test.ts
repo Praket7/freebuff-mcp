@@ -169,6 +169,10 @@ test('http: run_turn over the canonical bridge waits for the real turn and maps 
     assert.notEqual(session.id, session.backendSessionId, 'bridge id differs from the Desktop thread id');
     const turn = await turns.startTurn(session.id, { text: 'run the real thing' });
     assert.equal(turn.state, 'completed');
+    // The Desktop acknowledges a submission with `{ ok, queued }` and returns
+    // no turn id, so the bridge must not invent one.
+    assert.equal(turn.backendTurnId, undefined, 'no backend identity is fabricated');
+    assert.deepEqual(turn.result, { ok: true, queued: false }, 'the real acknowledgement is passed through');
     // The Desktop received the prompt on the real action route, addressed to the
     // thread it created for this session (never a bridge-generated id).
     assert.ok(
