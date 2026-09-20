@@ -40,7 +40,7 @@
     "prepack": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
-    "test": "node --test --import tsx \"test/**/*.test.ts\" \"test/integration/**/*.test.ts\"",
+    "test": "node --test --import tsx test/*.test.ts test/integration/*.test.ts",
     "pack:check": "pnpm build && pnpm pack --pack-destination work"
   },
   "engines": {
