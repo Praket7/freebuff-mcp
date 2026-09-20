@@ -41,7 +41,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
     "pretest": "pnpm typecheck:test",
-    "test": "tsx --test $(ls test/*.test.ts test/integration/*.test.ts)",
+    "test": "node scripts/run-tests.mjs",
     "pack:check": "pnpm build && pnpm pack --pack-destination work"
   },
   "engines": {
