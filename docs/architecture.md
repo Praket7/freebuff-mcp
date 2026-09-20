@@ -54,6 +54,8 @@ The Desktop (or a fixture) writes a current-user-only JSON file:
 
 Validation covers presence, JSON shape, version, loopback URL, live PID, and expiry. The launch id is then challenged over HTTP (`/healthz` with `x-freebuff-launch-id`); only a passing challenge grants write capability. No process memory is read on any platform.
 
+That challenge is the single source of truth for the capability flags reported by `doctor` and `freebuff_status`: when it fails, the Desktop reports `connected_read_only` and does not advertise sends, stops, resumes, model or reasoning changes — or thread creation, which is itself a write. A capability is only ever advertised by a backend that actually implements it.
+
 ## Live events (`desktop/sse.ts`, `desktop/event-adapter.ts`)
 
 `SseClient` is a resilient SSE loop: LF/CRLF, comments, multiline `data:`, `event:`/`id:`/`retry:`, `Last-Event-ID` on reconnect, bounded backoff with 50–100% jitter, connection timeout, buffer caps, and cancellation. Untrusted payloads are mapped to structured bridge events (reasoning dropped, secrets redacted, phases classified structurally). `liveProgress: connected` reflects only the event stream's own health — never `/api/projects` success. This holds in every adapter, including legacy MCP v1 and HTTP.
