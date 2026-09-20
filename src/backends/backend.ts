@@ -116,17 +116,38 @@ export class CompositeBackend implements FreebuffBackend {
       );
     }
     const session = await backend.createSession(options);
-    this.sessions.set(session.id, { backend, session });
+    if (session.backend === 'cli' && session.backendSessionId) {
+      // Duck-typed: test doubles and older CLI-likes may not implement it.
+      (this.cli as unknown as { registerConversationRoot?: (id: string, cwd: string) => void }).registerConversationRoot?.(session.backendSessionId, options.cwd);
+    }
+    this.rememberSession(session, backend);
     return session;
+  }
+
+  /** Maximum routed sessions retained; long-lived processes must not accumulate them. */
+  private static readonly MAX_ROUTED_SESSIONS = 5_000;
+
+  private rememberSession(session: BackendSession, backend: FreebuffBackend): void {
+    this.sessions.set(session.id, { backend, session });
+    while (this.sessions.size > CompositeBackend.MAX_ROUTED_SESSIONS) {
+      const oldest = this.sessions.keys().next();
+      if (oldest.done) break;
+      this.sessions.delete(oldest.value);
+    }
   }
 
   /**
    * Wrap an existing real backend identity (never a bridge-generated guess) by
-   * its own handle: Desktop thread id or CLI conversation id.
+   * its own handle: Desktop thread id or CLI conversation id. CLI identities
+   * also register their owning project root so later reads route to the right
+   * chat store instead of the CLI backend's constructor root.
    */
   useExisting(kind: 'desktop' | 'cli', backendSessionId: string, cwd: string): BackendSession {
     const session: BackendSession = { id: backendSessionId, backend: kind, backendSessionId, cwd };
-    this.sessions.set(session.id, { backend: this.backendFor(kind), session });
+    if (kind === 'cli') {
+      (this.cli as unknown as { registerConversationRoot?: (id: string, cwd: string) => void }).registerConversationRoot?.(backendSessionId, cwd);
+    }
+    this.rememberSession(session, this.backendFor(kind));
     return session;
   }
 

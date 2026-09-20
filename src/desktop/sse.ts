@@ -30,7 +30,9 @@ export function parseSseFrame(frame: string): SseFrame | null {
     else if (field === 'id') id = value.slice(0, 200);
     else if (field === 'retry') { const n = Number(value); if (Number.isFinite(n) && n >= 0) retryMs = n; }
   }
-  if (!data.length && event === undefined) return null;
+  // id-only and retry-only frames carry no data but still move recovery state
+  // (Last-Event-ID, server backoff); only a pure comment/empty frame is nothing.
+  if (!data.length && event === undefined && id === undefined && retryMs === undefined) return null;
   return { ...(event !== undefined ? { event } : {}), data: data.join('\n'), ...(id !== undefined ? { id } : {}), ...(retryMs !== undefined ? { retryMs } : {}) };
 }
 
@@ -71,6 +73,13 @@ export interface SseClientOptions {
   connectionTimeoutMs?: number;
   /** Guard against pathological memory growth from a broken upstream. */
   maxBufferBytes?: number;
+  /**
+   * Called after this many CONSECUTIVE connection failures so the owner can
+   * rediscover (for example, the Desktop restarted on a new port) instead of
+   * retrying one dead URL forever.
+   */
+  onPersistentFailure?: () => void;
+  maxConsecutiveFailures?: number;
 }
 
 /**
@@ -115,11 +124,14 @@ export class SseClient {
   private delay(): number {
     const base = this.options.baseDelayMs ?? 500;
     const max = this.options.maxDelayMs ?? 15_000;
-    const server = this.serverRetryMs ?? 0;
+    // A rogue `retry:` must never push the backoff past the configured max.
+    const server = Math.min(this.serverRetryMs ?? 0, max);
     const backoff = Math.min(base * 2 ** this.attempt, max);
     const jitter = backoff * (0.5 + Math.random() * 0.5); // 50-100% jitter
     return Math.max(server, Math.min(jitter, max));
   }
+
+  private consecutiveFailures = 0;
 
   private async loop(): Promise<void> {
     while (!this.disposed) {
@@ -127,11 +139,15 @@ export class SseClient {
       const signal = this.controller.signal;
       const timeout = setTimeout(() => this.controller?.abort(), this.options.connectionTimeoutMs ?? 20_000);
       try {
+        // Seed resume state from the owner's callback: a recreated client must
+        // not forget the Last-Event-ID the previous one learned.
+        this.lastId ??= this.options.lastEventId?.();
         const headers = { accept: 'text/event-stream', ...(this.options.headers?.() ?? {}), ...(this.lastId ? { 'last-event-id': this.lastId } : {}) };
         const response = await fetch(this.options.url(), { headers, signal });
         clearTimeout(timeout);
         if (!response.ok || !response.body) throw new Error(`SSE HTTP ${response.status}`);
         this.attempt = 0;
+        this.consecutiveFailures = 0;
         this.setConnected(true);
         await this.consume(response.body, signal);
         // A clean end-of-stream (the server closed the connection, e.g. a
@@ -141,6 +157,11 @@ export class SseClient {
       } catch {
         clearTimeout(timeout);
         this.setConnected(false);
+        this.consecutiveFailures += 1;
+        if (this.consecutiveFailures >= (this.options.maxConsecutiveFailures ?? 5)) {
+          this.consecutiveFailures = 0;
+          try { this.options.onPersistentFailure?.(); } catch { /* owner handles it */ }
+        }
       } finally {
         this.controller = undefined;
       }
@@ -167,8 +188,11 @@ export class SseClient {
         buffer = rest;
         for (const frame of frames) this.handleFrame(frame);
       }
-      // Partial final frame: process it if it is complete enough (ends without trailing blank line still counts as dropped).
-      if (buffer.trim()) this.handleFrame(buffer); // treat trailing data as a frame; partial fields degrade to defaults
+      // A trailing buffer without its blank-line terminator is an incomplete
+      // frame, not an event: processing it would deliver half a payload as if
+      // it were whole. Drop it; the server resends anything unacknowledged on
+      // reconnect (Last-Event-ID), so nothing confirmed is lost.
+      void buffer;
     } finally {
       reader.releaseLock();
     }

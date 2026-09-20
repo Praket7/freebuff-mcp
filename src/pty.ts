@@ -75,6 +75,39 @@ export async function findChatDir(cwd: string, conversationId: string): Promise<
 }
 
 /**
+ * Extract the CLI's turn state as a plain string, or undefined when the store
+ * does not actually say. An object (for example the whole `mainAgentState`)
+ * is never a turn state and must not be written into `turnState`.
+ */
+export function cliTurnStateString(state: Record<string, unknown>): string | undefined {
+  const sessionState = asRecord(state.sessionState);
+  const mainAgentState = asRecord(state.mainAgentState) ?? asRecord(sessionState?.mainAgentState);
+  const candidates: unknown[] = [
+    mainAgentState?.turnState,
+    mainAgentState?.status,
+    mainAgentState?.state,
+    sessionState?.turnState,
+    sessionState?.status,
+    state.turnState,
+    state.status,
+    sessionState?.mainAgentState,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate) return candidate;
+  }
+  return undefined;
+}
+
+/** Read and parse a conversation's run-state.json; {} when absent/unreadable. */
+export async function readCliRunState(dir: string): Promise<Record<string, unknown>> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(path.join(dir, 'run-state.json'), 'utf8'));
+    if (asRecord(parsed)) return parsed as Record<string, unknown>;
+  } catch { /* no run state yet */ }
+  return {};
+}
+
+/**
  * Read what the CLI store actually knows about one conversation. Never invents
  * a field: summary-grade data comes from chat-meta.json and run-state.json
  * verbatim, and no turn state is claimed unless the store says so.
@@ -83,16 +116,15 @@ export async function readCliConversationSnapshot(cwd: string, conversationId: s
   const dir = await findChatDir(cwd, conversationId);
   if (!dir) return {};
   const meta = JSON.parse(await fs.readFile(path.join(dir, 'chat-meta.json'), 'utf8').catch(() => '{}')) as Record<string, unknown>;
-  let state: Record<string, unknown> = {};
-  try { const parsed = JSON.parse(await fs.readFile(path.join(dir, 'run-state.json'), 'utf8')); if (asRecord(parsed)) state = parsed as Record<string, unknown>; } catch { /* no run state yet */ }
+  const state = await readCliRunState(dir);
   const sessionState = asRecord(state.sessionState);
-  const mainAgentState = asRecord(state.mainAgentState) ?? asRecord(sessionState?.mainAgentState);
+  const turnState = cliTurnStateString(state);
   const messageCount = typeof meta.messageCount === 'number' ? meta.messageCount : undefined;
   return {
     id: assertSafeId(conversationId),
     ...(typeof meta.firstPrompt === 'string' ? { title: meta.firstPrompt.slice(0, 200), firstPrompt: meta.firstPrompt.slice(0, 2000) } : {}),
     ...(messageCount !== undefined ? { messageCount } : {}),
-    ...(mainAgentState ? { turnState: mainAgentState } : typeof sessionState?.mainAgentState === 'string' ? { turnState: sessionState.mainAgentState } : {}),
+    ...(turnState ? { turnState } : {}),
     ...(sessionState ? { sessionState } : Object.keys(state).length ? { runState: state } : {}),
   };
 }
@@ -124,58 +156,110 @@ export async function readCliConversationMessages(cwd: string, conversationId: s
   return messages.slice(-500);
 }
 
+/** Pre-turn markers for one CLI conversation, so completion requires post-submit proof. */
+export interface CliTurnMarkers {
+  messageCount: number;
+  runStateMtimeMs: number;
+  logBytes: number;
+}
+
+const NO_MARKERS: CliTurnMarkers = { messageCount: 0, runStateMtimeMs: 0, logBytes: 0 };
+
+/** Snapshot the conversation store BEFORE submitting, so only later transitions count. */
+export async function readCliTurnMarkers(cwd: string, conversationId: string): Promise<CliTurnMarkers> {
+  const dir = await findChatDir(cwd, conversationId);
+  if (!dir) return { ...NO_MARKERS };
+  const [runState, log, messages] = await Promise.all([
+    fs.stat(path.join(dir, 'run-state.json')).catch(() => null),
+    fs.stat(path.join(dir, 'log.jsonl')).catch(() => null),
+    readCliConversationMessages(cwd, conversationId).catch(() => [] as unknown[]),
+  ]);
+  return {
+    messageCount: messages.length,
+    runStateMtimeMs: runState?.mtimeMs ?? 0,
+    logBytes: log?.size ?? 0,
+  };
+}
+
+export interface CliTurnEnd {
+  state: 'completed' | 'failed' | 'waiting_for_user' | 'cancelled';
+  /** True only when a post-submit terminal transition was actually observed. */
+  proven: boolean;
+  error?: string;
+}
+
+const CLI_ACTIVE_STATES = new Set(['running', 'active', 'busy', 'working', 'thinking']);
+const CLI_FAILED_STATES = new Set(['error', 'failed']);
+const CLI_WAITING_STATES = new Set(['waiting_for_user', 'waiting', 'waiting_for_input', 'input_required']);
+const CLI_DONE_STATES = new Set(['idle', 'completed', 'done', 'cancelled', 'closed']);
+
+async function sleepInterruptible(ms: number, signal?: AbortSignal): Promise<void> {
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const wake = () => { if (!settled) { settled = true; clearTimeout(timer); resolve(); } };
+    const timer = setTimeout(wake, ms);
+    timer.unref?.();
+    signal?.addEventListener('abort', wake, { once: true });
+  });
+}
+
 /**
- * Poll the CLI chat store for turn completion proof (run-state.json and message log)
- * so sendMessage never claims completed without terminal proof.
+ * Poll the CLI chat store for turn completion PROOF (run-state.json and message
+ * log) so sendMessage never claims completed without a post-submit terminal
+ * transition.
+ *
+ * - Completion requires a terminal store state reached AFTER `baseline`
+ *   (message/log/run-state movement, or an observed active→terminal flip).
+ * - Timeout returns unproven `waiting_for_user`, never `completed`.
+ * - Abort returns `cancelled`, never `completed`.
  */
 export async function waitForCliTurnEnd(
   cwd: string,
   conversationId: string,
-  startedAt: number,
+  baseline: CliTurnMarkers,
   signal?: AbortSignal,
   timeoutMs = 15 * 60_000
-): Promise<{ state: 'completed' | 'failed' | 'waiting_for_user'; error?: string }> {
-  const deadline = Date.now() + timeoutMs;
-  let sawRunning = false;
-  while (!signal?.aborted && Date.now() < deadline) {
+): Promise<CliTurnEnd> {
+  const deadline = Date.now() + Math.max(1_000, timeoutMs);
+  let sawActive = false;
+  for (;;) {
+    if (signal?.aborted) return { state: 'cancelled', proven: true };
+    if (Date.now() >= deadline) {
+      return {
+        state: 'waiting_for_user',
+        proven: false,
+        error: 'The CLI turn outcome is unconfirmed: no terminal store transition was observed before the timeout. Poll get_thread/get_turn for the final state instead of assuming completion.',
+      };
+    }
     const dir = await findChatDir(cwd, conversationId);
     if (!dir) {
-      await new Promise((r) => setTimeout(r, 500));
+      await sleepInterruptible(500, signal);
       continue;
     }
-    let state: Record<string, unknown> = {};
-    try {
-      const raw = await fs.readFile(path.join(dir, 'run-state.json'), 'utf8');
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) state = parsed as Record<string, unknown>;
-    } catch { /* not written yet */ }
-    const sessionState = asRecord(state.sessionState);
-    const mainAgentState = asRecord(state.mainAgentState) ?? asRecord(sessionState?.mainAgentState);
-    const turnState = typeof mainAgentState?.turnState === 'string' ? mainAgentState.turnState
-      : typeof sessionState?.turnState === 'string' ? sessionState.turnState
-      : typeof state.turnState === 'string' ? state.turnState
-      : undefined;
-
-    if (turnState === 'running' || turnState === 'active') {
-      sawRunning = true;
-    } else if (sawRunning && (turnState === 'idle' || turnState === 'completed' || turnState === 'waiting_for_user')) {
-      return { state: turnState === 'waiting_for_user' ? 'waiting_for_user' : 'completed' };
-    } else if (turnState === 'error' || turnState === 'failed') {
-      return { state: 'failed', error: 'The Freebuff CLI reported a failure outcome.' };
-    } else if (!sawRunning && Date.now() - startedAt > 8_000) {
-      const messages = await readCliConversationMessages(cwd, conversationId);
-      if (messages.length > 0) return { state: 'completed' };
+    const state = await readCliRunState(dir);
+    const turnState = cliTurnStateString(state)?.toLowerCase();
+    const [runStateStat, logStat, messages] = await Promise.all([
+      fs.stat(path.join(dir, 'run-state.json')).catch(() => null),
+      fs.stat(path.join(dir, 'log.jsonl')).catch(() => null),
+      readCliConversationMessages(cwd, conversationId).catch(() => [] as unknown[]),
+    ]);
+    // Post-submit movement: anything the turn itself wrote after our markers.
+    const progressed =
+      messages.length > baseline.messageCount ||
+      (logStat?.size ?? 0) > baseline.logBytes ||
+      (runStateStat?.mtimeMs ?? 0) > baseline.runStateMtimeMs;
+    if (turnState && CLI_ACTIVE_STATES.has(turnState)) sawActive = true;
+    if (turnState && CLI_FAILED_STATES.has(turnState) && (progressed || sawActive)) {
+      return { state: 'failed', proven: true, error: 'The Freebuff CLI reported a failure outcome.' };
     }
-    await new Promise((r) => {
-      let settled = false;
-      const wake = () => { if (!settled) { settled = true; clearTimeout(timer); r(undefined); } };
-      const timer = setTimeout(wake, 1_000);
-      timer.unref?.();
-      signal?.addEventListener('abort', wake, { once: true });
-    });
+    if (turnState && CLI_WAITING_STATES.has(turnState) && (progressed || sawActive)) {
+      return { state: 'waiting_for_user', proven: true };
+    }
+    if (turnState && CLI_DONE_STATES.has(turnState) && (progressed || sawActive)) {
+      return { state: 'completed', proven: true };
+    }
+    await sleepInterruptible(1_000, signal);
   }
-  if (signal?.aborted) return { state: 'completed' };
-  return { state: 'completed' };
 }
 
 export class CliPtyManager {
@@ -215,7 +299,10 @@ export class CliPtyManager {
     const state = this.sessions.get(assertSafeId(id));
     if (!state || state.exited) throw new Error('FREEBUFF_CLI_SESSION_EXITED');
     await new Promise<void>((resolve) => setTimeout(resolve, 300));
-    const clean = text.replace(/[\u0000-\u001f\u007f\u001b]/g, ' ').replace(/[\r\n]+/g, ' ').replace(/\x1b\[201~/g, ' ');
+    // Multiline prompts are pasted inside a bracketed-paste envelope, where a
+    // bare LF is literal text (only CR would submit early). Preserve newlines;
+    // strip only CR and unsafe terminal controls.
+    const clean = text.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u001B]/g, '').replace(/\x1b\[201~/g, ' ');
     state.term.write('\x15');
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
     state.term.write(`\x1b[200~${clean}\x1b[201~`);

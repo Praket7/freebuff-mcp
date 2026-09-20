@@ -145,7 +145,14 @@ async function main(): Promise<void> {
   const flags = argv.slice(1);
   if (command === 'install') {
     const write = flags.includes('--write');
-    const target = (flags.find((f) => !f.startsWith('--')) ?? 'codex') as 'codex' | 'claude';
+    const target = flags.find((f) => !f.startsWith('--')) ?? 'codex';
+    // An unknown target must fail loudly: silently falling through to Codex
+    // would write configuration for the wrong product.
+    if (target !== 'codex' && target !== 'claude') {
+      console.error(`Unknown install target '${target}'. Expected 'codex' or 'claude'.\n\n${USAGE}`);
+      process.exitCode = 2;
+      return;
+    }
     if (target === 'claude') {
       const scope = flags.includes('--project') ? 'project' : 'user';
       console.log(await installClaude(write, scope));
@@ -163,6 +170,9 @@ async function main(): Promise<void> {
     case 'version': console.log(VERSION); return;
     case 'doctor': {
       const report = await collectDoctor();
+      // Failure exit codes must not depend on the output format: scripts
+      // parsing --json need the same signal as humans reading text.
+      if (!report.ok) process.exitCode = 1;
       if (flags.includes('--json')) console.log(JSON.stringify(report, null, 2));
       else {
         console.log(`freebuff-mcp ${report.version}`);

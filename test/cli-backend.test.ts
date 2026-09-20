@@ -14,11 +14,16 @@ test('cli backend: create-session with an unknown id fails with a structured err
   );
 });
 
-test('cli backend: probe reports cli_not_authenticated when no CLI binary is present', async () => {
+test('cli backend: probe distinguishes a missing binary from authentication', async () => {
   const backend = new CliBackend('/tmp/definitely-not-a-project');
   const caps = await backend.probe();
-  // probe() never throws: without a binary it reports the degraded state.
-  assert.ok(['cli_ready', 'cli_not_authenticated'].includes(caps.connection));
+  // probe() never throws: without a binary it reports not_installed (never
+  // "not authenticated", which would send users down the wrong recovery path).
+  assert.ok(['cli_ready', 'not_installed'].includes(caps.connection));
+  if (caps.connection === 'not_installed') {
+    assert.equal(caps.authorization, 'none');
+    assert.equal(caps.canSendMessage, false);
+  }
   assert.equal(caps.liveProgress, 'unavailable');
 });
 

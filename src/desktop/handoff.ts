@@ -30,15 +30,47 @@ export function processIsAlive(pid: number | undefined): boolean {
 }
 
 /**
- * Read and validate a Desktop handoff file. Validation covers: file presence,
- * JSON shape, format version, loopback URL, live PID, and freshness. The file
- * itself is written by the Desktop (or a test fixture) into the current user's
- * own config directory; it never contains credentials, only a loopback URL and
- * a short-lived launch id that the Desktop will challenge over HTTP.
+ * Platform-default handoff locations the stock Desktop writes. `readHandoff`
+ * consults these when no explicit path (or env var) is configured, so handoff
+ * discovery is automatic; `writeHandoff` defaults to the current platform's
+ * entry. The file carries only a loopback URL plus a short-lived launch id
+ * that the Desktop challenges over HTTP — never credentials.
+ */
+export function defaultHandoffPaths(): string[] {
+  const home = os.homedir();
+  const defaults: string[] = [];
+  if (process.platform === 'win32') {
+    if (process.env.APPDATA) defaults.push(path.join(process.env.APPDATA, 'Freebuff', 'mcp-handoff.json'));
+  } else if (process.platform === 'darwin') {
+    defaults.push(path.join(home, 'Library', 'Application Support', 'Freebuff', 'mcp-handoff.json'));
+    defaults.push(path.join(home, '.config', 'freebuff-desktop', 'mcp-handoff.json'));
+  } else {
+    defaults.push(path.join(home, '.config', 'freebuff-desktop', 'mcp-handoff.json'));
+  }
+  return defaults;
+}
+
+/**
+ * Read and validate a Desktop handoff file. An explicit path (or the env var)
+ * wins; otherwise the platform-default locations are tried in order, so a
+ * stock Desktop installation is discovered with zero configuration.
+ * Validation covers: file presence, JSON shape, format version, loopback URL,
+ * live PID, and freshness. The file itself is written by the Desktop (or a
+ * test fixture) into the current user's own config directory; it never
+ * contains credentials, only a loopback URL and a short-lived launch id that
+ * the Desktop will challenge over HTTP.
  */
 export async function readHandoff(explicitPath?: string): Promise<HandoffValidation> {
-  const handoffPath = explicitPath ?? process.env[HANDOFF_ENV];
-  if (!handoffPath) return { valid: false, reason: 'no_handoff_configured' };
+  const configured = explicitPath ?? process.env[HANDOFF_ENV];
+  if (configured) return validateHandoffFile(configured);
+  for (const fallback of defaultHandoffPaths()) {
+    try { await fs.stat(fallback); } catch { continue; }
+    return validateHandoffFile(fallback);
+  }
+  return { valid: false, reason: 'no_handoff_configured' };
+}
+
+async function validateHandoffFile(handoffPath: string): Promise<HandoffValidation> {
   let raw: string;
   try { raw = await fs.readFile(handoffPath, 'utf8'); } catch { return { valid: false, reason: 'handoff_missing', path: handoffPath }; }
   let value: unknown;
@@ -68,7 +100,7 @@ export async function readHandoff(explicitPath?: string): Promise<HandoffValidat
  * user boundaries.
  */
 export async function writeHandoff(handoff: Omit<DesktopHandoff, 'version'> & { version?: number }, explicitPath?: string): Promise<string> {
-  const target = explicitPath ?? process.env[HANDOFF_ENV] ?? path.join(os.homedir(), '.config', 'freebuff-desktop', 'mcp-handoff.json');
+  const target = explicitPath ?? process.env[HANDOFF_ENV] ?? defaultHandoffPaths()[0] ?? path.join(os.homedir(), '.config', 'freebuff-desktop', 'mcp-handoff.json');
   await fs.mkdir(path.dirname(target), { recursive: true });
   await fs.writeFile(target, JSON.stringify({ version: HANDOFF_VERSION, ...handoff }, null, 2), 'utf8');
   return target;

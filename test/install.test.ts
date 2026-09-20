@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { installCodex } from '../src/install/codex.js';
 import { installClaude } from '../src/install/claude.js';
-import { codexConfigPath, claudeConfigPaths } from '../src/install/common.js';
+import { codexConfigPath, claudeConfigPaths, tomlQuote } from '../src/install/common.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -102,4 +102,58 @@ test('codex config path is platform-appropriate', () => {
   const configPath = codexConfigPath();
   if (process.platform === 'win32') assert.match(configPath, /\\.codex\\config\.toml$/);
   else assert.match(configPath, /\.codex\/config\.toml$/);
+});
+
+test('codex installer: TOML uses basic strings so Windows paths survive', () => {
+  // A literal string would let a trailing backslash escape the closing quote
+  // and would double meaning; basic strings carry explicit escapes instead.
+  assert.equal(tomlQuote('C:\\tools\\freebuff-mcp\\'), '"C:\\\\tools\\\\freebuff-mcp\\\\"');
+  assert.equal(tomlQuote('say "hi"'), '"say \\"hi\\""');
+  assert.ok(!tomlQuote('/usr/bin/node').startsWith("'"), 'basic strings, not literal strings');
+});
+
+test('claude installer: printed config carries a long-turn timeout', async () => {
+  const output = await installClaude(false, 'user');
+  assert.match(output, /"timeout": 3600000/);
+});
+
+test('doctor --json sets the failure exit code exactly like human mode', async () => {
+  const { spawn } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'freebuff-doctor-home-'));
+  const bin = await fs.mkdtemp(path.join(os.tmpdir(), 'freebuff-doctor-bin-'));
+  try {
+    // Isolate completely: no CLI on PATH, no Desktop artifacts under HOME, no
+    // Freebuff env vars — the report must be a failure either way it prints.
+    const env: Record<string, string> = { PATH: bin, HOME: home };
+    if (process.env.SystemRoot) env.SystemRoot = process.env.SystemRoot;
+    const child = spawn(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'doctor', '--json'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    child.stdout?.on('data', (chunk) => { stdout += chunk.toString(); });
+    const exitCode = await new Promise<number>((resolve) => child.once('exit', resolve));
+    const report = JSON.parse(stdout) as { ok: boolean };
+    assert.equal(report.ok, false, 'isolated machine detects nothing');
+    assert.equal(exitCode, 1, 'machine output fails with the same exit code as human output');
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+    await fs.rm(bin, { recursive: true, force: true });
+  }
+});
+
+test('claude installer: write refuses malformed JSON instead of overwriting it', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'freebuff-claude-bad-'));
+  const originalHome = os.homedir;
+  (os as unknown as { homedir: () => string }).homedir = () => dir;
+  try {
+    const { user } = claudeConfigPaths();
+    await fs.mkdir(path.dirname(user), { recursive: true });
+    await fs.writeFile(user, '{not json', 'utf8');
+    const message = await installClaude(true, 'user');
+    assert.match(message, /malformed|Refusing/);
+    assert.equal(await fs.readFile(user, 'utf8'), '{not json', 'malformed file untouched');
+  } finally {
+    (os as unknown as { homedir: () => string }).homedir = originalHome;
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });

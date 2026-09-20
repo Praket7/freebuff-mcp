@@ -111,6 +111,24 @@ test('http transport: healthz, authentication, origin, and MCP handshake', async
     const names = (tools.result?.result?.tools ?? []).map((t: { name: string }) => t.name);
     assert.ok(names.length > 0, 'tools/list returned tools');
     assert.ok(names.includes('freebuff_status'));
+    // HTTP serves the canonical v2 surface, not the legacy runtime catalog.
+    for (const v2 of ['start_thread', 'run_turn', 'stop_turn', 'get_turn']) {
+      assert.ok(names.includes(v2), `v2 tool ${v2} served over HTTP`);
+    }
+  } finally {
+    await server.stop();
+    await desktop.close();
+  }
+});
+
+test('http transport: modern protocol versions negotiate over the v2 surface', async () => {
+  const desktop = await startFakeDesktop();
+  const server = await startHttpServer(desktop);
+  try {
+    const init = await rpc(server.port, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'http-test', version: '1' } } });
+    assert.equal(init.status, 200);
+    assert.ok(init.result?.result?.serverInfo, `modern initialize returned a server description: ${init.text.slice(0, 200)}`);
+    assert.equal(init.result?.result?.protocolVersion, '2025-11-25');
   } finally {
     await server.stop();
     await desktop.close();

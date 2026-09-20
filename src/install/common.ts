@@ -24,8 +24,21 @@ export function executableCommand(): { command: string; args: string[] } {
   return { command: process.execPath, args: [executable, 'serve'] };
 }
 
-function tomlQuote(value: string): string {
-  return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+/**
+ * TOML basic-string quoting: literal strings cannot represent every value
+ * (notably Windows paths, where a trailing backslash escapes the closing
+ * quote and doubles meaning). Basic strings with \\ and \" escapes do.
+ */
+export function tomlQuote(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t')}"`;
+}
+
+/** Write atomically (temp file + rename) so a crash never leaves half a config. */
+async function atomicWriteFile(target: string, content: string): Promise<void> {
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
+  await fs.writeFile(tmp, content, 'utf8');
+  await fs.rename(tmp, target);
 }
 
 export function codexConfigText(): string {
@@ -42,7 +55,9 @@ enabled = true
 
 export function claudeConfigJson(): string {
   const { command, args } = executableCommand();
-  return JSON.stringify({ freebuff: { type: 'stdio', command, args, env: {} } }, null, 2);
+  // Per-server timeout in ms: run_turn can legitimately wait out a long
+  // Freebuff turn, so the default must cover it rather than killing the server.
+  return JSON.stringify({ freebuff: { type: 'stdio', command, args, env: {}, timeout: 3_600_000 } }, null, 2);
 }
 
 export function codexConfigPath(): string {
@@ -77,9 +92,8 @@ export async function writeCodexConfig(plan: InstallPlan): Promise<{ written: bo
   if (/^\[mcp_servers\.freebuff\]/m.test(existing)) {
     return { written: false, message: `An [mcp_servers.freebuff] entry already exists in ${plan.configPath}; no changes made.` };
   }
-  await fs.mkdir(path.dirname(plan.configPath), { recursive: true });
   const prefix = existing && !existing.endsWith('\n') ? '\n\n' : '';
-  await fs.appendFile(plan.configPath, `${prefix}${plan.display}`, 'utf8');
+  await atomicWriteFile(plan.configPath, `${existing}${prefix}${plan.display}`);
   return { written: true, message: `Added Freebuff configuration to ${plan.configPath}.` };
 }
 
@@ -89,10 +103,21 @@ export async function writeCodexConfig(plan: InstallPlan): Promise<{ written: bo
  */
 export async function writeClaudeConfig(plan: InstallPlan): Promise<{ written: boolean; message: string }> {
   let existing: Record<string, unknown> = {};
+  let hadFile = false;
   try {
     const raw = await fs.readFile(plan.configPath, 'utf8');
-    existing = JSON.parse(raw) as Record<string, unknown>;
-  } catch { /* create below */ }
+    hadFile = true;
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { written: false, message: `Refusing to overwrite the malformed JSON in ${plan.configPath}; fix or remove it first. No changes made.` };
+    }
+    existing = parsed as Record<string, unknown>;
+  } catch (error) {
+    // A malformed existing file must never be silently replaced: that would
+    // destroy the user's unrelated configuration.
+    if (hadFile) return { written: false, message: `Refusing to overwrite the malformed JSON in ${plan.configPath} (${error instanceof Error ? error.message : 'parse error'}); fix or remove it first. No changes made.` };
+    /* create below */
+  }
   const mcpServers = (existing.mcpServers && typeof existing.mcpServers === 'object' && !Array.isArray(existing.mcpServers) ? existing.mcpServers : {}) as Record<string, unknown>;
   const parsed = JSON.parse(plan.display) as Record<string, unknown>;
   if (mcpServers.freebuff) {
@@ -103,7 +128,6 @@ export async function writeClaudeConfig(plan: InstallPlan): Promise<{ written: b
   }
   mcpServers.freebuff = parsed.freebuff;
   existing.mcpServers = mcpServers;
-  await fs.mkdir(path.dirname(plan.configPath), { recursive: true });
-  await fs.writeFile(plan.configPath, `${JSON.stringify(existing, null, 2)}\n`, 'utf8');
+  await atomicWriteFile(plan.configPath, `${JSON.stringify(existing, null, 2)}\n`);
   return { written: true, message: `Added the freebuff MCP server to ${plan.configPath}.` };
 }

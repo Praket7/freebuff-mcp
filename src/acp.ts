@@ -18,6 +18,28 @@ interface AcpSession {
   threadId: string;
   cwd: string;
   controller: AbortController;
+  createdAt: number;
+}
+
+/** Abandoned ACP sessions (never closed) must not accumulate forever. */
+const ACP_SESSION_TTL_MS = 24 * 60 * 60_000;
+const ACP_SESSION_MAX = 500;
+
+function pruneAcpSessions(acpSessions: Map<string, AcpSession>): void {
+  const now = Date.now();
+  for (const [id, session] of acpSessions) {
+    if (now - session.createdAt > ACP_SESSION_TTL_MS) {
+      session.controller.abort();
+      acpSessions.delete(id);
+    }
+  }
+  // Insertion-ordered: evict the oldest first.
+  while (acpSessions.size > ACP_SESSION_MAX) {
+    const oldest = acpSessions.keys().next();
+    if (oldest.done) break;
+    acpSessions.get(oldest.value)?.controller.abort();
+    acpSessions.delete(oldest.value);
+  }
 }
 
 /**
@@ -55,14 +77,20 @@ export async function runAcp(): Promise<void> {
       // conversation). Bridge identity differs from backend identity.
       const session = await sessions.createSession({ cwd: params.cwd });
       const sessionId = randomUUID();
-      acpSessions.set(sessionId, { bridgeSessionId: session.id, threadId: session.backendSessionId ?? session.id, cwd: params.cwd, controller: new AbortController() });
+      pruneAcpSessions(acpSessions);
+      acpSessions.set(sessionId, { bridgeSessionId: session.id, threadId: session.backendSessionId ?? session.id, cwd: params.cwd, controller: new AbortController(), createdAt: Date.now() });
       return { sessionId };
     })
     .onNotification(methods.agent.session.cancel, async ({ params }: SessionIdContext) => {
       const session = acpSessions.get(params.sessionId);
       if (!session) return;
       session.controller.abort();
-      await turns.cancelTurn(session.bridgeSessionId).catch(() => undefined);
+      const outcome = await turns.cancelTurn(session.bridgeSessionId).catch(() => undefined);
+      // A cancel notification carries no response channel, so an unconfirmed
+      // backend stop is surfaced as a process diagnostic instead of silence.
+      if (outcome?.aborted && !outcome.stopped && outcome.stopError) {
+        console.error(`freebuff-mcp: ACP cancel aborted the turn but the backend stop failed (${outcome.stopError}); the work may still be running.`);
+      }
     })
     .onRequest(methods.agent.session.close, async ({ params }: SessionIdContext) => {
       const session = acpSessions.get(params.sessionId);

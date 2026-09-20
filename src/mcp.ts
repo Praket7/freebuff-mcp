@@ -5,6 +5,7 @@ import { createServer as createHttpServer, IncomingMessage, ServerResponse } fro
 import { timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { detectRuntime, Runtime } from './runtime.js';
+import { createDefaultAdapter, createV2ServerFromAdapter } from './mcp-v2.js';
 import { VERSION } from './version.js';
 
 function writeNames(caps: Awaited<ReturnType<Runtime['capabilities']>>): Set<string> { const map={sendMessage:'send_message',stop:'stop_thread',resume:'resume_thread',setModel:'set_model',setReasoning:'set_reasoning'}; return new Set(Object.entries(caps.actions??{sendMessage:!caps.readOnly,stop:!caps.readOnly,resume:!caps.readOnly,setModel:!caps.readOnly,setReasoning:!caps.readOnly}).filter(([,v])=>v).map(([k])=>map[k as keyof typeof map])); }
@@ -64,7 +65,11 @@ async function body(req: IncomingMessage): Promise<unknown> {
   return raw ? JSON.parse(raw) : undefined;
 }
 export async function runHttp(): Promise<void> {
-  const runtime = await detectRuntime();
+  // HTTP serves the SAME canonical v2 surface as stdio (CompositeBackend +
+  // SessionManager + TurnManager), not the legacy v1 runtime, so HTTP behavior
+  // cannot drift from MCP v2/ACP semantics. The transport itself stays
+  // StreamableHTTPServerTransport for compatibility with deployed MCP clients.
+  const adapter = createDefaultAdapter();
   const host = process.env.FREEBUFF_MCP_HOST ?? '127.0.0.1';
   const port = Number(process.env.FREEBUFF_MCP_PORT ?? 8788);
   if (!isLoopback(host) && process.env.FREEBUFF_MCP_ALLOW_REMOTE !== '1') throw new Error('Refusing non-loopback HTTP host; set FREEBUFF_MCP_ALLOW_REMOTE=1 only behind trusted HTTPS and authentication.');
@@ -82,21 +87,20 @@ export async function runHttp(): Promise<void> {
   const server = createHttpServer(async (req, res) => {
     if (!validOrigin(req)) { res.writeHead(403, {'content-type':'application/json'}); res.end(JSON.stringify({error:'invalid_origin'})); return; }
     const address = req.socket.remoteAddress ?? 'unknown'; const now = Date.now(); pruneRecent(now); const bucket = recent.get(address); if (!bucket || now - bucket.at >= RATE_WINDOW_MS) recent.set(address, {at:now,count:1}); else { bucket.count++; if (bucket.count > RATE_LIMIT) { res.writeHead(429, {'content-type':'application/json','retry-after':'60'}); res.end(JSON.stringify({error:'rate_limited'})); return; } }
-    if (req.url === '/healthz' && req.method === 'GET') { if (!isLoopback(host) && !authorized(req)) { res.writeHead(401, {'www-authenticate':'Bearer'}); res.end(JSON.stringify({error:'unauthorized'})); return; } res.writeHead(200, {'content-type':'application/json'}); res.end(JSON.stringify({ok:true,readOnly:(await runtime.capabilities()).readOnly})); return; }
+    if (req.url === '/healthz' && req.method === 'GET') { if (!isLoopback(host) && !authorized(req)) { res.writeHead(401, {'www-authenticate':'Bearer'}); res.end(JSON.stringify({error:'unauthorized'})); return; } res.writeHead(200, {'content-type':'application/json'}); res.end(JSON.stringify({ok:true,readOnly:!(await adapter.backend.probe().catch(() => null))?.canSendMessage})); return; }
     if (req.url !== '/mcp' || req.method !== 'POST') { res.writeHead(404, {'content-type':'application/json'}); res.end(JSON.stringify({error:'not_found'})); return; }
     if (!authorized(req)) { res.writeHead(401, {'www-authenticate':'Bearer'}); res.end(JSON.stringify({error:'unauthorized'})); return; }
     try {
-      const caps = await runtime.capabilities();
-      const mcp = createServer(runtime, !caps.readOnly, writeNames(caps));
+      const mcp = createV2ServerFromAdapter(adapter);
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       await mcp.connect(transport);
       await transport.handleRequest(req, res, await body(req));
-      res.on('close', () => { void transport.close(); void mcp.close(); });
+      res.on('close', () => { void transport.close(); void (mcp as unknown as { close: () => unknown }).close(); });
     } catch (error) {
       if (!res.headersSent) { res.writeHead(400, {'content-type':'application/json'}); res.end(JSON.stringify({error: error instanceof Error ? error.message : 'invalid_request'})); }
     }
   });
-  const cleanup=()=>runtime.dispose?.(); server.once('close',cleanup); process.once('SIGINT',()=>{cleanup();server.close()}); process.once('SIGTERM',()=>{cleanup();server.close()}); process.once('exit',cleanup);
+  const cleanup=()=>adapter.dispose(); server.once('close',cleanup); process.once('SIGINT',()=>{cleanup();server.close()}); process.once('SIGTERM',()=>{cleanup();server.close()}); process.once('exit',cleanup);
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, host, () => resolve()); });
   console.error(`freebuff-mcp HTTP listening on http://${host}:${port}/mcp`);
 }

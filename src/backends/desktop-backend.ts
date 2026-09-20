@@ -51,6 +51,10 @@ export interface DesktopBackendOptions {
   /** Explicit base URL (disables broad discovery). */
   baseUrl?: string;
   explicitLaunchId?: string;
+  /** Bound for proving a turn started; unproven turns report waiting after it. */
+  turnStartGraceMs?: number;
+  /** Consecutive SSE failures before outer rediscovery (default 5). */
+  streamFailureThreshold?: number;
 }
 
 interface ConnectionState {
@@ -182,15 +186,44 @@ export class DesktopBackend implements FreebuffBackend {
     return { 'content-type': 'application/json', accept: 'application/json', ...(this.connection?.launchId ? { 'x-freebuff-launch-id': this.connection.launchId } : {}) };
   }
 
+  /**
+   * Non-idempotent mutations: replaying them after an ambiguous failure (a
+   * dropped socket, a timeout, a 5xx) can execute the same prompt or thread
+   * creation twice. Only these paths are withheld from automatic replay.
+   */
+  private isMutation(method: string, pathname: string): boolean {
+    return method === 'POST' && (/\/message$/.test(pathname) || /\/api\/threads$/.test(pathname));
+  }
+
+  private ambiguousMutationError(method: string, pathname: string, detail: string): BridgeError {
+    return new BridgeError(
+      ErrorCodes.BACKEND_UNAVAILABLE,
+      `Freebuff Desktop ${method} ${pathname} failed ambiguously (${detail}): it is unknown whether the mutation executed, so it was NOT retried.`,
+      'Reconcile with list_threads/get_thread first — retrying blindly could submit the same prompt or create the same thread twice.',
+    );
+  }
+
   private async request<T>(method: string, pathname: string, body?: unknown, allowReconnect = true): Promise<T> {
     await this.connect();
     if (!this.connection) throw new BridgeError(ErrorCodes.DESKTOP_NOT_FOUND, 'Freebuff Desktop is not connected.');
+    const mutation = this.isMutation(method, pathname);
     try {
       const response = await fetch(new URL(pathname, this.connection.base), { method, headers: this.headers(), ...(body !== undefined ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
       if (!response.ok) {
-        const retriable = [401, 403, 404].includes(response.status) || response.status >= 500;
-        if (retriable && allowReconnect) {
+        // 401/403/404 are rejections, not ambiguity: the Desktop answered, so
+        // re-authenticating (or rediscovering) and retrying once is safe.
+        const rejected = [401, 403, 404].includes(response.status);
+        if (rejected && allowReconnect) {
           // Authorization rotation or Desktop restart: rediscover and retry once.
+          this.connection = undefined;
+          this.setSseConnected(false);
+          await this.connect(true);
+          return await this.request<T>(method, pathname, body, false);
+        }
+        // A 5xx after a mutation may mean "executed, then failed to answer":
+        // never replay it.
+        if (response.status >= 500 && mutation) throw this.ambiguousMutationError(method, pathname, `HTTP ${response.status}`);
+        if (response.status >= 500 && allowReconnect) {
           this.connection = undefined;
           this.setSseConnected(false);
           await this.connect(true);
@@ -209,6 +242,10 @@ export class DesktopBackend implements FreebuffBackend {
       return await response.json() as T;
     } catch (error) {
       if (error instanceof BridgeError) throw error;
+      // A dropped socket/timeout after a mutation is the textbook ambiguous
+      // case ("the server committed, the socket dropped"): reconnecting and
+      // replaying would submit the prompt twice. Report unknown instead.
+      if (RECOVERABLE.test(String(error)) && mutation) throw this.ambiguousMutationError(method, pathname, String(error).slice(0, 120));
       if (RECOVERABLE.test(String(error)) && allowReconnect) {
         this.connection = undefined;
         this.setSseConnected(false);
@@ -233,9 +270,34 @@ export class DesktopBackend implements FreebuffBackend {
         if (event.id) this.lastUpstreamId = event.id;
         this.dispatch(event);
       },
+      // A stream that keeps failing against one URL is not a transient blip —
+      // the Desktop likely restarted on a new port. Rediscover (bounded) so a
+      // rotation alone recovers the stream instead of retrying forever.
+      onPersistentFailure: () => this.rediscoverStream(),
+      maxConsecutiveFailures: this.options.streamFailureThreshold ?? 5,
     });
     this.sse = client;
     client.start();
+  }
+
+  /** Guard so concurrent stream failures trigger at most one rediscovery. */
+  private rediscoverPending = false;
+
+  private rediscoverStream(): void {
+    if (this.rediscoverPending) return;
+    this.rediscoverPending = true;
+    void (async () => {
+      try {
+        if (this.options.baseUrl) { this.startEventStream(); return; }
+        invalidateDiscoveryCache();
+        const found = await discoverDesktop({ force: true });
+        if (found.candidate) {
+          this.connection = { base: new URL(found.candidate.url), ...(found.candidate.launchId ? { launchId: found.candidate.launchId } : {}), ...(found.candidate.pid ? { pid: found.candidate.pid } : {}), source: found.candidate.source };
+          this.healthCheckedAt = 0;
+        }
+        this.startEventStream();
+      } catch { /* the stream's own retry loop continues */ } finally { this.rediscoverPending = false; }
+    })();
   }
 
   private dispatch(event: SseEvent): void {
@@ -267,6 +329,9 @@ export class DesktopBackend implements FreebuffBackend {
     for (const listener of this.eventListeners) listener(event);
   }
 
+  /** Maximum tracked threads; long-lived processes must not accumulate them. */
+  private static readonly MAX_TRACKED_THREADS = 500;
+
   private recordThreadState(threadId: string, source: Record<string, unknown>): void {
     const turnState = typeof source.turnState === 'string' ? source.turnState : undefined;
     if (!turnState) return;
@@ -276,46 +341,66 @@ export class DesktopBackend implements FreebuffBackend {
       ...(typeof source.lastTurnOutcome === 'string' ? { lastTurnOutcome: source.lastTurnOutcome } : previous?.lastTurnOutcome ? { lastTurnOutcome: previous.lastTurnOutcome } : {}),
       ...(typeof source.lastTurnFinishedAt === 'number' ? { lastTurnFinishedAt: source.lastTurnFinishedAt } : previous?.lastTurnFinishedAt !== undefined ? { lastTurnFinishedAt: previous.lastTurnFinishedAt } : {}),
     });
+    while (this.threadStates.size > DesktopBackend.MAX_TRACKED_THREADS) {
+      const oldest = this.threadStates.keys().next();
+      if (oldest.done) break;
+      this.threadStates.delete(oldest.value);
+    }
     if (previous?.turnState !== turnState) for (const wake of this.stateWaiters) wake();
   }
 
-  /** Read the latest known turn state, falling back to a direct thread read. */
-  private async readThreadState(threadId: string): Promise<ThreadTurnState> {
+  /**
+   * Read the latest known turn state. Cached SSE state is only a shortcut when
+   * the stream is healthy; while the stream is down (or completion is still
+   * unproven) polling must do a fresh HTTP read, otherwise it can inspect the
+   * same stale snapshot forever and "prove" completion from it.
+   */
+  private async readThreadState(threadId: string, options: { fresh?: boolean } = {}): Promise<ThreadTurnState> {
     const cached = this.threadStates.get(threadId);
-    if (cached) return cached;
-    const thread = asRecord(await this.request<unknown>('GET', `/api/thread/${encodeURIComponent(threadId)}`));
-    const inner = asRecord(thread?.thread) ?? thread ?? {};
-    return {
-      turnState: typeof inner.turnState === 'string' ? inner.turnState : 'idle',
-      ...(typeof inner.lastTurnOutcome === 'string' ? { lastTurnOutcome: inner.lastTurnOutcome } : {}),
-      ...(typeof inner.lastTurnFinishedAt === 'number' ? { lastTurnFinishedAt: inner.lastTurnFinishedAt } : {}),
-    };
+    if (cached && !options.fresh) return cached;
+    try {
+      const thread = asRecord(await this.request<unknown>('GET', `/api/thread/${encodeURIComponent(threadId)}`));
+      const inner = asRecord(thread?.thread) ?? thread ?? {};
+      const fresh: ThreadTurnState = {
+        turnState: typeof inner.turnState === 'string' ? inner.turnState : 'idle',
+        ...(typeof inner.lastTurnOutcome === 'string' ? { lastTurnOutcome: inner.lastTurnOutcome } : {}),
+        ...(typeof inner.lastTurnFinishedAt === 'number' ? { lastTurnFinishedAt: inner.lastTurnFinishedAt } : {}),
+      };
+      if (typeof inner.turnState === 'string') this.recordThreadState(threadId, inner);
+      return fresh;
+    } catch {
+      if (cached) return cached;
+      throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, `Freebuff Desktop could not read thread ${threadId}.`, 'Verify the thread id, or check that Freebuff Desktop is still running.');
+    }
   }
 
   /**
    * Wait until the thread's turn reaches a terminal state.
    *
-   * The Desktop reports `turnState: "running" | "idle"` and records the outcome
-   * of the last turn in `lastTurnOutcome` / `lastTurnFinishedAt`. A turn is done
-   * when it has left `running` (or when `lastTurnFinishedAt` advances).
-   * Returns `undefined` on timeout so the caller can report a non-terminal state
-   * instead of inventing a result.
+   * Completion requires PROOF: a `lastTurnFinishedAt` advance, or an observed
+   * `running → non-running` transition. A cached `idle` that was never seen
+   * running (a discarded prompt, a stale snapshot) proves nothing — after the
+   * start grace it returns `undefined` so the caller reports waiting instead
+   * of inventing completion.
+   *
+   * Polling reads fresh HTTP state while completion is unproven (the SSE cache
+   * may be the same stale frame forever during an outage).
    */
   private async waitForTurnEnd(threadId: string, before: ThreadTurnState, signal?: AbortSignal): Promise<ThreadTurnState | undefined> {
     const deadline = Date.now() + TURN_DEADLINE_MS;
     // If the turn never visibly starts (an instant turn, or a prompt the Desktop
-    // discarded), don't hold the request open for the full deadline.
-    const startDeadline = Math.min(deadline, Date.now() + TURN_START_GRACE_MS);
+    // discarded), don't hold the request open for the full deadline — but do
+    // NOT treat the unproven idle state as completion either.
+    const startDeadline = Math.min(deadline, Date.now() + (this.options.turnStartGraceMs ?? TURN_START_GRACE_MS));
     let sawRunning = false;
     for (;;) {
       if (signal?.aborted) return this.threadStates.get(threadId);
       let current: ThreadTurnState;
-      try { current = await this.readThreadState(threadId); } catch { current = this.threadStates.get(threadId) ?? { turnState: 'running' }; }
+      try { current = await this.readThreadState(threadId, { fresh: true }); } catch { current = this.threadStates.get(threadId) ?? { turnState: 'running' }; }
       const finished = current.lastTurnFinishedAt !== undefined && (before.lastTurnFinishedAt ?? 0) < current.lastTurnFinishedAt;
       if (current.turnState === 'running') sawRunning = true;
       if (finished || (sawRunning && current.turnState !== 'running')) return current;
-      if (!sawRunning && Date.now() >= startDeadline) return current;
-      if (Date.now() >= deadline) return undefined;
+      if ((!sawRunning && Date.now() >= startDeadline) || Date.now() >= deadline) return undefined;
       await new Promise<void>((resolve) => {
         let settled = false;
         const wake = () => { if (!settled) { settled = true; this.stateWaiters.delete(wake); clearTimeout(timer); resolve(); } };
@@ -329,9 +414,9 @@ export class DesktopBackend implements FreebuffBackend {
 
   private mapTurnOutcome(state: ThreadTurnState | undefined, aborted: boolean): { state: BridgeTurnState; error?: string } {
     if (aborted) return { state: 'cancelled' };
-    if (!state) return { state: 'waiting_for_user', error: undefined };
+    if (!state) return { state: 'waiting_for_user', error: 'The Desktop did not confirm the turn outcome: no turn start and no finish timestamp were observed.' };
     if (state.lastTurnOutcome === 'error') return { state: 'failed', error: 'The Freebuff turn reported an error outcome.' };
-    if (state.turnState === 'running') return { state: 'waiting_for_user' };
+    if (state.turnState === 'running') return { state: 'waiting_for_user', error: 'The turn was still running when the wait ended.' };
     return { state: 'completed' };
   }
 
@@ -480,7 +565,10 @@ export class DesktopBackend implements FreebuffBackend {
     const onAbort = () => controller.abort();
     if (signal) { if (signal.aborted) controller.abort(); else signal.addEventListener('abort', onAbort, { once: true }); }
     try {
-      const before = await this.readThreadState(threadId).catch((): ThreadTurnState => ({ turnState: 'idle' }));
+      // The `before` snapshot anchors the finish-timestamp comparison, so it
+      // must be a fresh read: a stale cache could predate the turn and make a
+      // no-op look like a finished turn.
+      const before = await this.readThreadState(threadId, { fresh: true }).catch((): ThreadTurnState => ({ turnState: 'idle' }));
       const response = await this.request<unknown>('POST', `/api/thread/${encodeURIComponent(threadId)}/message`, { text });
       // The Desktop acknowledges a submission with `{ ok, queued }` and returns
       // no turn id, so `backendTurnId` stays unset here: the bridge never

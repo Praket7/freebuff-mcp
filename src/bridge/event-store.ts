@@ -75,11 +75,14 @@ export class EventStore {
   private connected = false;
   private gapSuspected = false;
   /**
-   * Turn-scoped liveness per thread (CLI/PTY backends, which have no persistent
-   * stream): a thread is `live` only while one of its turns is running, and the
-   * flag must never bleed across threads the way a global flag would.
+   * Turn-scoped liveness per thread (sessions whose owner has no persistent
+   * stream, e.g. CLI/PTY): a thread is `live` only while one of its turns is
+   * running, and the flag must never bleed across threads the way a global
+   * flag would. Explicit `false` (a finished CLI turn) overrides even a
+   * healthy global stream: the Desktop stream says nothing about a CLI thread.
    */
   private threadLive = new Map<string, boolean>();
+  private threadLiveAt = new Map<string, number>();
 
   subscribe(listener: (threadId: string) => void): () => void {
     this.listeners.add(listener);
@@ -94,23 +97,38 @@ export class EventStore {
     this.gapSuspected = value;
   }
 
-  /** Attribute liveness to a specific thread (turn-scoped); deleting marks the thread no longer live. */
+  /** Attribute liveness to a specific thread (turn-scoped), true or false. */
   setThreadLive(threadId: string, value: boolean): void {
-    if (value) this.threadLive.set(threadId, true);
-    else this.threadLive.delete(threadId);
+    this.threadLive.set(threadId, value);
+    this.threadLiveAt.set(threadId, Date.now());
+    this.evictStaleLiveness();
+  }
+
+  /** Drop liveness markers older than the event TTL so they cannot accumulate. */
+  private evictStaleLiveness(now = Date.now()): void {
+    if (this.threadLive.size <= 64) return;
+    for (const [threadId, at] of this.threadLiveAt) {
+      if (now - at > TTL_MS) {
+        this.threadLive.delete(threadId);
+        this.threadLiveAt.delete(threadId);
+      }
+    }
   }
 
   get isConnected(): boolean { return this.connected; }
 
   append(input: EventStoreAppendInput): BridgeEvent {
     this.sequence += 1;
+    // Normalize timestamps on append: an invalid timestamp would poison every
+    // staleness calculation downstream with NaN math.
+    const timestamp = input.timestamp && !Number.isNaN(Date.parse(input.timestamp)) ? input.timestamp : new Date().toISOString();
     const event: BridgeEvent = {
       sequence: this.sequence,
       upstreamEventId: input.upstreamEventId,
       sessionId: input.sessionId,
       turnId: input.turnId,
       threadId: input.threadId,
-      timestamp: input.timestamp ?? new Date().toISOString(),
+      timestamp,
       type: input.type,
       ...(input.phase ? { phase: input.phase } : {}),
       ...(input.state ? { state: input.state } : {}),
@@ -139,6 +157,13 @@ export class EventStore {
   /** Notify turn state transitions; terminal states clear running state. */
   setTurnState(threadId: string, sessionId: string, turnId: string, state: BridgeTurnState, error?: string): void {
     this.turns.set(turnId, state);
+    // Bound turn-state memory for long-lived processes (insertion-ordered, so
+    // the oldest — overwhelmingly long-terminal — entries go first).
+    while (this.turns.size > 2_000) {
+      const oldest = this.turns.keys().next();
+      if (oldest.done) break;
+      this.turns.delete(oldest.value);
+    }
     const type: BridgeEventType = state === 'completed' ? 'completed' : state === 'failed' ? 'failed' : state === 'cancelled' ? 'cancelled' : state === 'waiting_for_user' ? 'waiting_for_user' : 'turn_started';
     this.append({ sessionId, turnId, threadId, type, state, ...(error ? { error } : {}) });
   }
@@ -200,9 +225,10 @@ export class EventStore {
       events,
       nextSequence: this.lastSequenceFor({ threadId }),
       // A thread explicitly marked live (a running CLI/PTY turn) is connected
-      // regardless of the global flag; every other thread falls back to the
-      // backend stream's global state. Never a single global leak across
-      // sessions.
+      // regardless of the global flag; an explicitly finished one is not,
+      // even when some other backend's stream is healthy. Every other thread
+      // falls back to the backend stream's global state. Never a single
+      // global leak across sessions.
       connected: this.threadLive.get(threadId) ?? this.connected,
       stale: !(this.threadLive.get(threadId) ?? this.connected) || (latest ? Date.now() - Date.parse(latest.timestamp) > STALE_MS : entries.length === 0),
       latestEventAt: latest?.timestamp,

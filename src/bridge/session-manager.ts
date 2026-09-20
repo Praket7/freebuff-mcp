@@ -28,7 +28,11 @@ export interface CancelTurnResult {
    * when the stop request failed — cancellation is never claimed silently.
    */
   stopped: boolean;
+  /** Why the backend stop failed, when it did: the work may still be running. */
+  stopError?: string;
 }
+
+interface StopOutcome { stopped: boolean; error?: string }
 
 /**
  * Canonical bridge session manager. Protocol adapters depend on this class,
@@ -156,16 +160,20 @@ export class SessionManager {
       if (extra?.backendTurnId) turn.backendTurnId = extra.backendTurnId;
       turn.lastSequence = this.events.lastSequenceFor({ turnId: turn.id });
       session.updatedAt = new Date().toISOString();
-      // A backend with no persistent stream is only "live" while a turn is
-      // running, so liveness follows the turn lifecycle there rather than
-      // leaving `connected` permanently false. It is attributed per thread —
-      // another session's turn (or silence) must never refresh this one.
-      if (this.turnScopedLiveness) this.events.setThreadLive(session.backendSessionId ?? session.id, !isTerminalTurnState(state));
+      // A session whose owner has no persistent stream (CLI/PTY) is only
+      // "live" while one of its turns is running. This is per-backend-owner,
+      // not per facade: a composite that also fronts a streaming Desktop must
+      // still report turn-scoped liveness for its CLI-owned threads. It is
+      // attributed per thread — another session's turn (or silence) must never
+      // refresh this one.
+      if (this.turnScopedLiveness || session.backend === 'cli') this.events.setThreadLive(session.backendSessionId ?? session.id, !isTerminalTurnState(state));
       if (state === 'running') session.state = 'running';
       else if (state === 'waiting_for_user') session.state = 'waiting_for_user';
       else if (isTerminalTurnState(state)) {
         if (session.activeTurnId === turn.id) session.activeTurnId = undefined;
         session.state = 'ready';
+        turn.completedAt = new Date().toISOString();
+        this.pruneTerminalTurns();
       }
       if (isTerminalTurnState(state)) {
         this.events.setTurnState(session.backendSessionId ?? session.id, sessionId, turn.id, state, turn.error);
@@ -198,13 +206,15 @@ export class SessionManager {
       try {
         const backendSession = this.toBackendSession(session);
         const onAbort = () => {
-          if (!isTerminalTurnState(turn.state)) setState('cancelled');
           // Aborting the local wait is NOT stopping the backend. Ask the owner
           // to stop the turn too, otherwise a "cancelled" Desktop thread or CLI
-          // process keeps working with nobody reading its output.
+          // process keeps working with nobody reading its output. The terminal
+          // 'cancelled' state is recorded only after the stop settles (below),
+          // so cancellation is never reported before the backend was asked.
           if (this.backend.stop && !this.stopOutcomes.has(turn.id)) {
-            this.stopOutcomes.set(turn.id, (async (): Promise<boolean> => {
-              try { await this.backend.stop!(backendSession, turn.id); return true; } catch { return false; }
+            this.stopOutcomes.set(turn.id, (async (): Promise<StopOutcome> => {
+              try { await this.backend.stop!(backendSession, turn.id); return { stopped: true }; }
+              catch (error) { return { stopped: false, error: error instanceof Error ? error.message : String(error) }; }
             })());
           }
         };
@@ -212,7 +222,22 @@ export class SessionManager {
         const result = await this.backend.sendMessage({ session: backendSession, text: options.text, signal: controller.signal, onEvent });
         controller.signal.removeEventListener('abort', onAbort);
         if (controller.signal.aborted) {
-          setState('cancelled', { backendTurnId: result.backendTurnId });
+          // The wait was aborted: the turn is over locally, but only mark it
+          // terminal once the backend stop outcome is known, and record an
+          // unconfirmed stop loudly instead of implying the work stopped.
+          let stop = await this.stopOutcomes.get(turn.id)?.catch((): StopOutcome => ({ stopped: false, error: 'stop outcome unavailable' }));
+          if (!stop && this.backend.stop) {
+            // The abort landed after the listener was removed: the backend was
+            // never asked. Ask now rather than silently skipping the stop.
+            try { await this.backend.stop(backendSession, turn.id); stop = { stopped: true }; }
+            catch (error) { stop = { stopped: false, error: error instanceof Error ? error.message : String(error) }; }
+          }
+          setState('cancelled', {
+            backendTurnId: result.backendTurnId,
+            ...(stop && !stop.stopped && this.backend.stop
+              ? { error: `Turn cancelled locally, but the backend stop ${stop.error ? `failed (${stop.error})` : 'was not confirmed'} — the underlying work may still be running.` }
+              : {}),
+          });
         } else if (result.state === 'completed') {
           setState('completed', { result: result.result, backendTurnId: result.backendTurnId });
         } else if (result.state === 'cancelled') {
@@ -225,7 +250,16 @@ export class SessionManager {
       } catch (error) {
         const aborted = controller.signal.aborted;
         const message = error instanceof Error ? error.message : String(error);
-        setState(aborted ? 'cancelled' : 'failed', { error: aborted ? 'Turn cancelled.' : message });
+        if (aborted) {
+          let stop = await this.stopOutcomes.get(turn.id)?.catch((): StopOutcome => ({ stopped: false, error: 'stop outcome unavailable' }));
+          if (!stop && this.backend.stop) {
+            try { await this.backend.stop(this.toBackendSession(session), turn.id); stop = { stopped: true }; }
+            catch (stopError) { stop = { stopped: false, error: stopError instanceof Error ? stopError.message : String(stopError) }; }
+          }
+          setState('cancelled', { error: stop && !stop.stopped && this.backend.stop ? `Turn cancelled locally, but the backend stop ${stop.error ? `failed (${stop.error})` : 'was not confirmed'} — the underlying work may still be running.` : 'Turn cancelled.' });
+        } else {
+          setState('failed', { error: message });
+        }
       }
       return turn;
       } finally {
@@ -255,13 +289,24 @@ export class SessionManager {
     // backend stop; capture that promise before awaiting so we report real truth.
     if (!controller.signal.aborted) controller.abort();
     const stopping = this.stopOutcomes.get(target);
-    const stopped = stopping ? await stopping.catch(() => false) : false;
-    return { aborted: true, stopped };
+    const outcome = stopping ? await stopping.catch((): StopOutcome => ({ stopped: false, error: 'stop outcome unavailable' })) : undefined;
+    return { aborted: true, stopped: outcome?.stopped ?? false, ...(outcome?.error ? { stopError: outcome.error } : {}) };
+  }
+
+  /** Drop old terminal turns so long-lived processes cannot accumulate them. */
+  private pruneTerminalTurns(maxTurns = 500): void {
+    if (this.turns.size <= maxTurns) return;
+    const terminal = [...this.turns.values()]
+      .filter((t) => isTerminalTurnState(t.state))
+      .sort((a, b) => Date.parse(a.completedAt ?? a.createdAt) - Date.parse(b.completedAt ?? b.createdAt));
+    for (const turn of terminal.slice(0, this.turns.size - maxTurns)) {
+      this.turns.delete(turn.id);
+    }
   }
 
   private controllers = new Map<string, AbortController>();
   /** Backend stop requests issued when a turn is aborted, keyed by turn id. */
-  private stopOutcomes = new Map<string, Promise<boolean>>();
+  private stopOutcomes = new Map<string, Promise<StopOutcome>>();
   /** Register a controller so cancelTurn can abort a running turn. */
   registerController(turnId: string, controller: AbortController): void { this.controllers.set(turnId, controller); }
   unregisterController(turnId: string): void { this.controllers.delete(turnId); }

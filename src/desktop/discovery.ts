@@ -12,7 +12,7 @@ export interface DesktopCandidate {
   launchId?: string;
   pid?: number;
   /** Where this candidate came from (used for diagnostics and ordering). */
-  source: 'handoff' | 'explicit' | 'readiness' | 'process' | 'log' | 'listener';
+  source: 'handoff' | 'explicit' | 'readiness' | 'log' | 'listener';
 }
 
 export interface DiscoveryResult {
@@ -21,6 +21,20 @@ export interface DiscoveryResult {
   considered: DesktopCandidate[];
   /** Why discovery failed, when it failed. */
   reason?: string;
+}
+
+/**
+ * Loopback gate: a candidate URL must be loopback BEFORE any request is made
+ * to it — especially before the launch-id header is attached. A non-loopback
+ * explicit URL or readiness file is skipped, never probed.
+ */
+export function isLoopbackCandidateUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'http:' && (parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost' || parsed.hostname === '::1' || parsed.hostname === '[::1]');
+  } catch {
+    return false;
+  }
 }
 
 const DISCOVERY_TTL_MS = 10_000;
@@ -34,8 +48,8 @@ function readinessFiles(): string[] {
     ...(process.env.FREEBUFF_READINESS_FILE ? [process.env.FREEBUFF_READINESS_FILE] : []),
     path.join(home, '.config', 'freebuff-desktop', 'orchestrator.json'),
     path.join(home, '.config', 'freebuff-desktop', 'readiness.json'),
-    path.join(process.env.APPDATA ?? '', 'Freebuff', 'orchestrator.json'),
-    path.join(process.env.APPDATA ?? '', 'Freebuff', 'readiness.json'),
+    ...(process.env.APPDATA ? [path.join(process.env.APPDATA, 'Freebuff', 'orchestrator.json')] : []),
+    ...(process.env.APPDATA ? [path.join(process.env.APPDATA, 'Freebuff', 'readiness.json')] : []),
     path.join(home, 'Library', 'Application Support', 'Freebuff', 'orchestrator.json'),
     path.join(home, 'Library', 'Application Support', 'Freebuff', 'readiness.json'),
     path.join(home, '.config', 'Freebuff', 'orchestrator.json'),
@@ -46,7 +60,7 @@ function readinessFiles(): string[] {
 function logFiles(): string[] {
   const home = os.homedir();
   return [
-    path.join(process.env.APPDATA ?? '', 'Freebuff', 'logs', 'orchestrator-stderr.log'),
+    ...(process.env.APPDATA ? [path.join(process.env.APPDATA, 'Freebuff', 'logs', 'orchestrator-stderr.log')] : []),
     path.join(home, 'Library', 'Application Support', 'Freebuff', 'logs', 'orchestrator-stderr.log'),
     path.join(home, 'Library', 'Logs', 'Freebuff', 'orchestrator-stderr.log'),
     path.join(home, '.config', 'Freebuff', 'logs', 'orchestrator-stderr.log'),
@@ -56,12 +70,12 @@ function logFiles(): string[] {
 
 /**
  * Ordered, minimized Desktop discovery:
- * 1. explicit handoff file (FREEBUFF_MCP_HANDOFF_FILE)
- * 2. explicit configured URL (FREEBUFF_ORCHESTRATOR_URL)
- * 3. readiness metadata files
- * 4. running orchestrator process environment (macOS/Linux only, current user)
- * 5. log-file port hints
- * 6. narrow listener fallback ONLY when nothing else matched
+ * 1. explicit handoff file (FREEBUFF_MCP_HANDOFF_FILE), else platform-default
+ *    handoff locations
+ * 2. explicit configured URL (FREEBUFF_ORCHESTRATOR_URL, loopback-gated)
+ * 3. readiness metadata files (loopback-gated)
+ * 4. log-file port hints
+ * 5. narrow listener fallback ONLY when nothing else matched
  *
  * Results are cached briefly so normal tool calls never re-scan.
  */
@@ -80,18 +94,21 @@ export async function discoverDesktopCandidates(): Promise<{ candidates: Desktop
     push({ url: handoff.handoff.url, launchId: handoff.handoff.launchId, pid: handoff.handoff.pid, source: 'handoff' });
   }
 
-  // 2. Explicit configured URL.
+  // 2. Explicit configured URL (loopback-gated: never fetch a non-loopback URL
+  // and never send it the launch-id header).
   if (process.env.FREEBUFF_ORCHESTRATOR_URL) {
-    push({ url: process.env.FREEBUFF_ORCHESTRATOR_URL, launchId: process.env.FREEBUFF_LAUNCH_ID, source: 'explicit' });
+    if (isLoopbackCandidateUrl(process.env.FREEBUFF_ORCHESTRATOR_URL)) {
+      push({ url: process.env.FREEBUFF_ORCHESTRATOR_URL, launchId: process.env.FREEBUFF_LAUNCH_ID, source: 'explicit' });
+    }
   }
 
-  // 3. Readiness metadata (freshness + live pid required).
+  // 3. Readiness metadata (freshness + live pid required, loopback-gated).
   for (const file of readinessFiles()) {
     try {
       const value = JSON.parse(await fs.readFile(file, 'utf8')) as Record<string, unknown>;
       const port = typeof value.port === 'number' || typeof value.port === 'string' ? Number(value.port) : undefined;
       const url = asString(value.url) ?? (port && port > 0 && port < 65536 ? `http://127.0.0.1:${port}` : undefined);
-      if (!url) continue;
+      if (!url || !isLoopbackCandidateUrl(url)) continue;
       const launchId = asString(value.launchId) ?? asString(value['launch-id']) ?? asString(value.launch_id);
       const pidValue = Number(value.pid ?? value.processId ?? value.process_id);
       const pid = Number.isInteger(pidValue) && pidValue > 0 ? pidValue : undefined;
@@ -103,27 +120,11 @@ export async function discoverDesktopCandidates(): Promise<{ candidates: Desktop
     } catch { /* optional metadata */ }
   }
 
-  // 4. Live orchestrator process (macOS/Linux, current user only).
-  if (process.platform === 'darwin' || process.platform === 'linux') {
-    try {
-      const { stdout } = await execFileAsync('ps', ['eww', '-Ao', 'pid,command'], { timeout: 2000 });
-      for (const line of stdout.split('\n')) {
-        if (!line.includes('orchestrator.js')) continue;
-        const pid = Number(line.match(/^\s*(\d+)/)?.[1]);
-        const launchId = line.match(/FREEBUFF_LAUNCH_ID=([^\s]+)/)?.[1];
-        let port = Number(line.match(/FREEBUFF_ORCHESTRATOR_PORT=(\d+)/)?.[1]);
-        if (!port) {
-          try {
-            const { stdout: sockets } = await execFileAsync('lsof', ['-nP', '-a', '-p', String(pid), '-iTCP', '-sTCP:LISTEN'], { timeout: 2000 });
-            port = Number(sockets.match(/TCP\s+127\.0\.0\.1:(\d+)\s+\(LISTEN\)/)?.[1]);
-          } catch { /* lsof unavailable */ }
-        }
-        if (Number.isInteger(pid) && pid > 0 && launchId && Number.isInteger(port) && port > 0 && port < 65536) {
-          push({ url: `http://127.0.0.1:${port}`, launchId, pid, source: 'process' });
-        }
-      }
-    } catch { /* best effort */ }
-  }
+  // 4. Live orchestrator process scraping REMOVED: reading another process's
+  // environment via `ps eww` is not an explicitly supported Freebuff contract,
+  // and launch ids must come from the handoff/readiness files the Desktop
+  // itself writes. Discovery continues with log hints and the listener
+  // fallback below.
 
   // 5. Log-file port hints.
   const logUrls: string[] = [];

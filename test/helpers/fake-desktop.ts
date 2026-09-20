@@ -54,6 +54,10 @@ export interface FakeDesktopOptions {
   failTurn?: boolean;
   /** Launch id the Desktop expects on writes. */
   launchId?: string;
+  /** Accept prompts but never run them: no `running` state, no finish stamp. */
+  neverRunTurn?: boolean;
+  /** Commit the prompt, then destroy the socket without answering (ambiguous failure). */
+  dropMessageResponse?: boolean;
 }
 
 const JSON_HEADERS = { 'content-type': 'application/json' };
@@ -188,7 +192,14 @@ export async function startFakeDesktop(options: FakeDesktopOptions = {}): Promis
         if (method === 'POST' && suffix === '/message') {
           const text = typeof body?.text === 'string' ? body.text : '';
           if (!text.trim()) return json(response, { error: 'text or attachments required' }, 400);
-          runTurn(id);
+          if (options.dropMessageResponse) {
+            // Fault injection: the server commits the prompt, then the socket
+            // dies before the answer. The bridge must NOT replay the mutation.
+            runTurn(id);
+            try { request.socket.destroy(); } catch { /* already gone */ }
+            return undefined;
+          }
+          if (!options.neverRunTurn) runTurn(id);
           // The Desktop acknowledges a submission with `queued` (whether the
           // message joined the queue instead of running immediately). It does
           // NOT return a turn id, so the bridge must not invent one.

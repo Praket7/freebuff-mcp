@@ -12,8 +12,19 @@ import { VERSION } from './version.js';
 
 const json = (value: unknown): Json => value as Json;
 
-/** Helper: structured tool result. */
-const result = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }], structuredContent: json(value) });
+/**
+ * Helper: structured tool result. Model-visible failures (`{ ok: false }`)
+ * are marked `isError: true` so MCP clients surface them as errors instead of
+ * silently treating a failure payload as a successful answer.
+ */
+const result = (value: unknown) => {
+  const failed = !!value && typeof value === 'object' && !Array.isArray(value) && (value as Record<string, unknown>).ok === false;
+  return {
+    content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }],
+    structuredContent: json(value),
+    ...(failed ? { isError: true as const } : {}),
+  };
+};
 const id = z.string().min(1).max(200);
 
 const asObject = (value: unknown): Record<string, unknown> | undefined =>
@@ -120,10 +131,16 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
   read('read_project_file', 'Read one safe project file.', { projectId: id, path: z.string() }, (args) => shapeError(async () => (adapter.backend.desktop as unknown as { readFile(root: string, relative: string): Promise<{ path: string; content: string }> }).readFile(args.projectId, args.path)));
   read('list_thread_attachments', 'List safe attachment metadata for a thread.', { threadId: id }, (args) => shapeError(() => adapter.backend.desktop.listAttachments(assertSafeId(args.threadId))));
   read('list_models', 'List available model information.', {}, () => shapeError(async () => {
-    await requireSessions();
-    const thread = await adapter.backend.getThread('');
-    void thread;
-    return { note: 'Model catalog comes from the Desktop event snapshot; use get_thread to read the current model and set_model to change it.' };
+    // The Desktop exposes no model-catalog route, and getThread('') is an
+    // invalid id that must never be called. Report honestly what is known.
+    const caps = await requireSessions();
+    return {
+      ok: true,
+      catalogAvailable: false,
+      backend: caps.backend,
+      connection: caps.connection,
+      note: 'The installed Freebuff Desktop exposes no standalone model-catalog route. Use get_thread to read the current thread model and set_model to change it.',
+    };
   }));
   read('search_history', 'Search visible Freebuff history.', { query: z.string().min(1).max(200) }, (args) => shapeError(async () => {
     await requireSessions();
@@ -189,27 +206,36 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
       ok: true,
       cancelled: result.aborted,
       stopped: result.stopped,
+      ...(result.stopError ? { stopError: result.stopError } : {}),
       note: !result.aborted
         ? 'No active turn matched; the turn may have already finished.'
         : result.stopped
-          ? 'The active turn was aborted and the owning backend was asked to stop it.'
-          : 'The active turn was aborted locally; the backend exposes no stop operation to confirm.',
+          ? 'The active turn was aborted and the owning backend confirmed the stop.'
+          : result.stopError
+            ? `The active turn was aborted locally, but the backend stop failed (${result.stopError}) — the underlying work may still be running.`
+            : 'The active turn was aborted locally; the backend exposes no stop operation to confirm.',
     };
   }));
 
   write('stop_thread', 'Stop a running Freebuff turn.', { threadId: id, sessionId: id.optional() }, async (args) => shapeError(async () => {
-    const session = args.sessionId ? adapter.sessions.getSession(assertSafeId(args.sessionId)) : adapter.sessions.listSessions().find((s) => s.backendSessionId === assertSafeId(args.threadId));
+    // Resolve ownership exactly like set_model does: a bare thread id is
+    // wrapped through registerExisting/resolveExisting so CLI conversations
+    // stop on the CLI instead of being forced onto the Desktop.
+    const session = args.sessionId
+      ? adapter.sessions.getSession(assertSafeId(args.sessionId))
+      : await findSessionByBackendId(adapter, assertSafeId(args.threadId));
     if (session) { await adapter.backend.stop(adapter.sessions.toBackendSession(session)); return { ok: true }; }
     throw new BridgeError(ErrorCodes.SESSION_NOT_FOUND, 'Stopping requires a bridge session created through start_thread.', 'Call start_thread with the conversation id, then stop_turn.');
   }));
 
   write('resume_thread', 'Resume a paused Freebuff thread.', { threadId: id, sessionId: id.optional() }, async (args) => shapeError(async () => {
     const threadId = assertSafeId(args.threadId);
-    // `threadId` is the required argument, so honour it: fall back to matching
-    // a known session by its real Freebuff identity, like stop_thread does.
+    // `threadId` is the required argument: resolve ownership through the same
+    // registerExisting/resolveExisting path as set_model, so a CLI
+    // conversation id resumes on the CLI instead of defaulting to Desktop.
     const session = args.sessionId
       ? adapter.sessions.getSession(assertSafeId(args.sessionId))
-      : adapter.sessions.listSessions().find((s) => s.backendSessionId === threadId);
+      : await findSessionByBackendId(adapter, threadId);
     const backendSession: BackendSession = session ? adapter.sessions.toBackendSession(session) : { id: threadId, backend: 'desktop' as const, backendSessionId: threadId, cwd: process.cwd() };
     // Resuming is backend-specific. The Desktop unpauses the thread's queue
     // through its own route (`POST /api/thread/:id/resume`), which needs only
@@ -227,9 +253,15 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
   write('set_model', 'Set the model for an existing thread.', { threadId: id, model: z.string().min(1).max(200), harnessId: z.string().optional() }, async (args) => shapeError(async () => {
     const session = await findSessionByBackendId(adapter, assertSafeId(args.threadId));
     if (!session) throw new BridgeError(ErrorCodes.SESSION_NOT_FOUND, 'set_model requires a bridge session for this thread.', 'Call start_thread first.');
-    const caps = await adapter.backend.probe();
-    if (!caps.canSetModel) throw new BridgeError(ErrorCodes.DESKTOP_AUTH_REQUIRED, 'Model changes require write authorization.');
     const backendSession = adapter.sessions.toBackendSession(session);
+    // Capability checks route through the SESSION OWNER, not the global
+    // facade: a read-only Desktop plus a writable CLI session must still allow
+    // model changes on the CLI-owned thread. The owner's own method returns
+    // the real error when it genuinely cannot comply.
+    if (session.backend !== 'cli') {
+      const caps = await adapter.backend.probe();
+      if (!caps.canSetModel) throw new BridgeError(ErrorCodes.DESKTOP_AUTH_REQUIRED, 'Model changes require write authorization.');
+    }
     if (typeof adapter.backend.setModel !== 'function') throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, `The ${session.backend} backend cannot change models.`);
     await adapter.backend.setModel(backendSession, args.model, args.harnessId);
     return { ok: true };
@@ -238,9 +270,11 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
   write('set_reasoning', 'Set reasoning effort for an existing thread.', { threadId: id, effort: z.string().nullable() }, async (args) => shapeError(async () => {
     const session = await findSessionByBackendId(adapter, assertSafeId(args.threadId));
     if (!session) throw new BridgeError(ErrorCodes.SESSION_NOT_FOUND, 'set_reasoning requires a bridge session for this thread.', 'Call start_thread first.');
-    const caps = await adapter.backend.probe();
-    if (!caps.canSetReasoning) throw new BridgeError(ErrorCodes.DESKTOP_AUTH_REQUIRED, 'Reasoning changes require write authorization.');
     const backendSession = adapter.sessions.toBackendSession(session);
+    if (session.backend !== 'cli') {
+      const caps = await adapter.backend.probe();
+      if (!caps.canSetReasoning) throw new BridgeError(ErrorCodes.DESKTOP_AUTH_REQUIRED, 'Reasoning changes require write authorization.');
+    }
     if (typeof adapter.backend.setReasoning !== 'function') throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, `The ${session.backend} backend cannot change reasoning effort.`);
     await adapter.backend.setReasoning(backendSession, args.effort);
     return { ok: true };
@@ -315,12 +349,32 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
   // Throttled resource updates: coalesce per thread, at most one update per
   // 2 seconds per thread, never per token.
   const pendingUpdates = new Map<string, NodeJS.Timeout>();
-  adapter.sessions.events.subscribe((threadId) => {
+  const unsubscribeUpdates = adapter.sessions.events.subscribe((threadId) => {
     if (pendingUpdates.has(threadId)) return;
     const timer = setTimeout(() => { pendingUpdates.delete(threadId); void server.server.sendResourceUpdated({ uri: `freebuff://thread/${encodeURIComponent(threadId)}/progress` }).catch(() => undefined); }, 2_000);
     timer.unref?.();
     pendingUpdates.set(threadId, timer);
   });
+
+  // Explicit disposal: when the server closes, drop the subscription and all
+  // pending update timers instead of leaking them for the process lifetime.
+  // Both paths are covered: the transport-driven onclose AND an explicit
+  // close() call (either one may fire without the other).
+  const disposeUpdates = (): void => {
+    unsubscribeUpdates();
+    for (const timer of pendingUpdates.values()) clearTimeout(timer);
+    pendingUpdates.clear();
+  };
+  const inner = server.server as unknown as { onclose?: () => void };
+  const previousOnClose = inner.onclose;
+  inner.onclose = () => {
+    try { previousOnClose?.(); } finally { disposeUpdates(); }
+  };
+  const typed = server as unknown as { close: () => Promise<void> };
+  const originalClose = typed.close.bind(server);
+  typed.close = async (): Promise<void> => {
+    try { await originalClose(); } finally { disposeUpdates(); }
+  };
 
   return server;
 }
