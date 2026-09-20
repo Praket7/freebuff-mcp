@@ -10,6 +10,8 @@ interface FakeOptions {
   events?: BackendEventInput[];
   onSend?: (session: BackendSession, text: string, signal?: AbortSignal) => void;
   refusalDelayMs?: number;
+  /** Emulate a backend with a persistent stream (Desktop-like). */
+  streamHealth?: boolean;
 }
 
 function fakeBackend(options: FakeOptions = {}): FreebuffBackend & { callCount: number } {
@@ -38,6 +40,12 @@ function fakeBackend(options: FakeOptions = {}): FreebuffBackend & { callCount: 
       return { state: 'completed', result: { echoed: text } };
     },
     async stop() { /* not used directly here */ },
+    ...(options.streamHealth === undefined ? {} : {
+      onStreamHealth(listener: (connected: boolean) => void) {
+        listener(Boolean(options.streamHealth));
+        return () => undefined;
+      },
+    }),
     dispose() { /* nothing */ },
   };
   return backend as unknown as FreebuffBackend & { callCount: number };
@@ -132,6 +140,27 @@ test('session manager: two sessions in the same project are independent with no 
   const idsA = new Set(eventsA.map((e) => e.turnId));
   const idsB = new Set(eventsB.map((e) => e.turnId));
   for (const id of idsA) assert.ok(!idsB.has(id), 'no shared turn ids across sessions');
+});
+
+test('session manager: backend stream health reaches the canonical event store, not just the legacy runtime', () => {
+  // Regression: `connected` was only ever set by the legacy runtime, so the
+  // canonical layer (MCP v2 / HTTP / ACP) reported connected:false and
+  // stale:true even while progress events were flowing.
+  const healthy = new SessionManager(fakeBackend({ streamHealth: true }));
+  const healthySnapshot = healthy.events.progress('any-thread', 0, 1);
+  assert.equal(healthySnapshot.connected, true, 'a connected backend reports connected');
+
+  const down = new SessionManager(fakeBackend({ streamHealth: false }));
+  assert.equal(down.events.progress('any-thread', 0, 1).connected, false, 'a disconnected backend reports disconnected');
+});
+
+test('session manager: a backend with no persistent stream tracks turn-scoped liveness', async () => {
+  const manager = new SessionManager(fakeBackend());
+  const session = await manager.createSession({ cwd: '/tmp/project' });
+  const started = manager.startTurn(session.id, { text: 'work' });
+  assert.equal(manager.events.isConnected, true, 'live while a turn runs');
+  await started.done;
+  assert.equal(manager.events.isConnected, false, 'no longer live once the turn is terminal');
 });
 
 test('session manager: unknown session and unknown turn produce structured errors', async () => {

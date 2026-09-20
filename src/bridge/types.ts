@@ -249,5 +249,12 @@ export interface FreebuffBackend {
   listThreads?(): Promise<unknown>;
   getThread?(backendSessionId: string): Promise<unknown>;
   getMessages?(backendSessionId: string): Promise<unknown>;
+  /**
+   * Optional live event-stream health, so adapters report progress honestly
+   * instead of guessing. Backends with a persistent stream (Desktop) implement
+   * this and invoke `listener` with the current value on subscribe. Backends
+   * that stream only while a turn runs (CLI/PTY) omit it.
+   */
+  onStreamHealth?(listener: (connected: boolean) => void): () => void;
   dispose(): Promise<void> | void;
 }

@@ -58,6 +58,10 @@ Validation covers presence, JSON shape, version, loopback URL, live PID, and exp
 
 `SseClient` is a resilient SSE loop: LF/CRLF, comments, multiline `data:`, `event:`/`id:`/`retry:`, `Last-Event-ID` on reconnect, bounded backoff with 50–100% jitter, connection timeout, buffer caps, and cancellation. Untrusted payloads are mapped to structured bridge events (reasoning dropped, secrets redacted, phases classified structurally). `liveProgress: connected` reflects only the event stream's own health — never `/api/projects` success. This holds in every adapter, including legacy MCP v1 and HTTP.
 
+The stream has **no heartbeat**: it bursts snapshot frames on connect and then stays silent while the project is idle (measured against a live Desktop). Silence is therefore not evidence of a dead stream, and `lastEventAt` freshness must not gate `liveProgress` — only the client's own connection state may.
+
+That same connection state is fed to the event store: the Desktop backend exposes it through the optional `onStreamHealth`, the composite backend delegates to the backend that owns the stream, and `SessionManager` subscribes so every adapter's progress snapshots report `connected`/`stale` truthfully. Backends with no persistent stream (CLI/PTY) report turn-scoped liveness instead.
+
 ## Event store (`bridge/event-store.ts`)
 
 Global monotonic sequence; per-thread bounded retention (500 events / 1 MB / 30 min TTL); per-thread (never global) staleness; terminal turn states recorded and surfaced; waiters woken per thread without lost wakeups; cursors are incremental (`afterSequence` → `nextSequence`), verified past 100 events.

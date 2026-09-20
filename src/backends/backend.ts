@@ -120,6 +120,17 @@ export class CompositeBackend implements FreebuffBackend {
   async getThread(backendSessionId: string): Promise<Json> { return sanitizeFreebuff(await this.desktop.getThread(backendSessionId)) as Json; }
   async getMessages(backendSessionId: string): Promise<Json> { return sanitizeFreebuff(await this.desktop.getMessages(backendSessionId)) as Json; }
 
+  /**
+   * Stream health belongs to the backend that actually holds a stream: the
+   * Desktop (persistent SSE) or the CLI when it is explicitly forced. The CLI
+   * has no persistent stream, so it reports nothing and the canonical layer
+   * falls back to turn-scoped liveness.
+   */
+  onStreamHealth(listener: (connected: boolean) => void): () => void {
+    const backend: FreebuffBackend = this.forced === 'cli' ? this.cli : this.desktop;
+    return backend.onStreamHealth?.(listener) ?? (() => undefined);
+  }
+
   dispose(): void {
     this.desktop.dispose();
     this.cli.dispose();

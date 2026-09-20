@@ -33,7 +33,19 @@ export class SessionManager {
   private turns = new Map<string, BridgeTurn>();
   private resolvers = new Map<string, () => void>();
 
-  constructor(private backend: FreebuffBackend) {}
+  private streamHealthUnsubscribe?: () => void;
+  /** True when the backend exposes no persistent stream (CLI/PTY). */
+  private readonly turnScopedLiveness: boolean;
+
+  constructor(private backend: FreebuffBackend) {
+    // The event store's `connected` flag drives `stale` in every progress
+    // snapshot, so it must reflect real stream health. Without this, adapters
+    // that use the canonical layer (MCP v2, HTTP, ACP) reported
+    // `connected: false, stale: true` even while progress events were actively
+    // flowing, because only the legacy runtime ever set it.
+    this.turnScopedLiveness = typeof this.backend.onStreamHealth !== 'function';
+    this.streamHealthUnsubscribe = this.backend.onStreamHealth?.((connected) => this.events.setConnected(connected));
+  }
 
   get backendKind(): FreebuffBackend['kind'] { return this.backend.kind; }
 
@@ -109,6 +121,10 @@ export class SessionManager {
       if (extra?.backendTurnId) turn.backendTurnId = extra.backendTurnId;
       turn.lastSequence = this.events.lastSequenceFor({ turnId: turn.id });
       session.updatedAt = new Date().toISOString();
+      // A backend with no persistent stream is only "live" while a turn is
+      // running, so liveness follows the turn lifecycle there rather than
+      // leaving `connected` permanently false.
+      if (this.turnScopedLiveness) this.events.setConnected(!isTerminalTurnState(state));
       if (state === 'running') session.state = 'running';
       else if (state === 'waiting_for_user') session.state = 'waiting_for_user';
       else if (isTerminalTurnState(state)) {
@@ -194,6 +210,8 @@ export class SessionManager {
   unregisterController(turnId: string): void { this.controllers.delete(turnId); }
 
   dispose(): void {
+    this.streamHealthUnsubscribe?.();
+    this.streamHealthUnsubscribe = undefined;
     for (const controller of this.controllers.values()) controller.abort();
     this.controllers.clear();
     void this.backend.dispose?.();

@@ -62,6 +62,7 @@ export class DesktopBackend implements FreebuffBackend {
   private sseConnected = false;
   private lastEventAt?: number;
   private eventListeners = new Set<(event: BackendEventInput) => void>();
+  private streamListeners = new Set<(connected: boolean) => void>();
   private lastUpstreamId?: string;
   /** Latest turn state per thread, kept current from the event stream. */
   private readonly threadStates = new Map<string, ThreadTurnState>();
@@ -72,6 +73,25 @@ export class DesktopBackend implements FreebuffBackend {
   onBackendEvent(listener: (event: BackendEventInput) => void): () => void {
     this.eventListeners.add(listener);
     return () => { this.eventListeners.delete(listener); };
+  }
+
+  /**
+   * Live SSE connection truth. Adapters (SessionManager -> EventStore) use this
+   * so `get_thread_progress_summary`/`watch_turn` cannot report a healthy
+   * stream as disconnected, or vice versa. The current value is delivered
+   * immediately on subscribe.
+   */
+  onStreamHealth(listener: (connected: boolean) => void): () => void {
+    this.streamListeners.add(listener);
+    listener(this.sseConnected);
+    return () => { this.streamListeners.delete(listener); };
+  }
+
+  /** Single writer for `sseConnected`, so every transition is observable. */
+  private setSseConnected(value: boolean): void {
+    if (this.sseConnected === value) return;
+    this.sseConnected = value;
+    for (const listener of this.streamListeners) listener(value);
   }
 
   private async connect(force = false): Promise<void> {
@@ -105,7 +125,7 @@ export class DesktopBackend implements FreebuffBackend {
         if (retriable && allowReconnect) {
           // Authorization rotation or Desktop restart: rediscover and retry once.
           this.connection = undefined;
-          this.sseConnected = false;
+          this.setSseConnected(false);
           await this.connect(true);
           return await this.request<T>(method, pathname, body, false);
         }
@@ -116,7 +136,7 @@ export class DesktopBackend implements FreebuffBackend {
       if (error instanceof BridgeError) throw error;
       if (RECOVERABLE.test(String(error)) && allowReconnect) {
         this.connection = undefined;
-        this.sseConnected = false;
+        this.setSseConnected(false);
         await this.connect(true);
         return await this.request<T>(method, pathname, body, false);
       }
@@ -132,7 +152,7 @@ export class DesktopBackend implements FreebuffBackend {
       url: () => new URL('/api/events', connection.base),
       headers: (): Record<string, string> => (connection.launchId ? { 'x-freebuff-launch-id': connection.launchId } : {}),
       lastEventId: () => this.lastUpstreamId,
-      onConnectionChange: (connected) => { this.sseConnected = connected; if (connected) this.lastEventAt = Date.now(); },
+      onConnectionChange: (connected) => { this.setSseConnected(connected); if (connected) this.lastEventAt = Date.now(); },
       onEvent: (event: SseEvent) => {
         this.lastEventAt = Date.now();
         if (event.id) this.lastUpstreamId = event.id;
@@ -468,7 +488,7 @@ export class DesktopBackend implements FreebuffBackend {
   dispose(): void {
     this.sse?.dispose();
     this.sse = undefined;
-    this.sseConnected = false;
+    this.setSseConnected(false);
     this.connection = undefined;
   }
 }

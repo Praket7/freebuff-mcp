@@ -144,6 +144,12 @@ test('http: run_turn over the canonical bridge waits for the real turn and maps 
       desktop.calls.some((c) => c.method === 'POST' && c.path === `/api/thread/${session.backendSessionId}/message`),
       `expected a POST to /api/thread/${session.backendSessionId}/message, saw: ${desktop.calls.map((c) => `${c.method} ${c.path}`).join(', ')}`,
     );
+    // The canonical store must reflect the REAL stream's health: a healthy
+    // Desktop must never be reported as disconnected/stale mid-turn.
+    const snapshot = sessions.events.progress(session.backendSessionId!, 0, 5);
+    assert.equal(snapshot.connected, true, 'live stream health reaches the canonical event store');
+    assert.equal(snapshot.stale, false, 'fresh progress is not stale');
+    assert.ok(snapshot.events.length > 0, 'progress events were captured for the real thread');
   } finally {
     sessions.dispose();
     restoreEnv();
