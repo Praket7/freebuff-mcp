@@ -195,19 +195,24 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
   }));
 
   write('resume_thread', 'Resume a paused Freebuff thread.', { threadId: id, sessionId: id.optional() }, async (args) => shapeError(async () => {
-    const session = args.sessionId ? adapter.sessions.getSession(assertSafeId(args.sessionId)) : undefined;
-    if (!session) throw new BridgeError(ErrorCodes.SESSION_NOT_FOUND, 'resume_thread requires a bridge sessionId created through start_thread.', 'Call start_thread with continueConversationId, then resume_thread.');
-    const backendSession: BackendSession = { id: session.id, backend: session.backend, ...(session.backendSessionId ? { backendSessionId: session.backendSessionId } : {}), cwd: session.projectRoot };
+    const threadId = assertSafeId(args.threadId);
+    // `threadId` is the required argument, so honour it: fall back to matching
+    // a known session by its real Freebuff identity, like stop_thread does.
+    const session = args.sessionId
+      ? adapter.sessions.getSession(assertSafeId(args.sessionId))
+      : adapter.sessions.listSessions().find((s) => s.backendSessionId === threadId);
+    const backendSession: BackendSession = { id: session?.id ?? threadId, backend: session?.backend ?? 'desktop', backendSessionId: threadId, cwd: session?.projectRoot ?? process.cwd() };
     // Resuming is backend-specific. The Desktop unpauses the thread's queue
-    // through its own route (`POST /api/thread/:id/resume`); only the CLI
-    // harness takes `/resume` as a command. Submitting `/resume` as Desktop
-    // prompt text would start a turn with that literal text instead.
-    if (session.backend !== 'cli') {
-      await (adapter.backend.desktop as unknown as { resume(session: BackendSession): Promise<unknown> }).resume(backendSession);
-      return { ok: true };
+    // through its own route (`POST /api/thread/:id/resume`), which needs only
+    // the thread id; only the CLI harness takes `/resume` as a command.
+    // Submitting `/resume` as Desktop prompt text would start a turn with that
+    // literal text instead.
+    if (backendSession.backend === 'cli') {
+      const result = await adapter.backend.sendMessage({ session: backendSession, text: '/resume' });
+      return { ok: true, ...result } as Json;
     }
-    const result = await adapter.backend.sendMessage({ session: backendSession, text: '/resume' });
-    return { ok: true, ...result } as Json;
+    await (adapter.backend.desktop as unknown as { resume(session: BackendSession): Promise<unknown> }).resume(backendSession);
+    return { ok: true };
   }));
 
   write('set_model', 'Set the model for an existing thread.', { threadId: id, model: z.string().min(1).max(200), harnessId: z.string().optional() }, async (args) => shapeError(async () => {
