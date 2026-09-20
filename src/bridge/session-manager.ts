@@ -72,6 +72,39 @@ export class SessionManager {
 
   getSession(id: string): BridgeSession | undefined { return this.sessions.get(id); }
 
+  /** Maximum retained sessions; inactive ones are evicted oldest-first. */
+  private static readonly MAX_SESSIONS = 1_000;
+  /** Pruning runs only past cap + slack, so steady-state calls stay O(1). */
+  private static readonly SESSION_PRUNE_SLACK = 100;
+  /** Inactive sessions older than this are evicted during a prune. */
+  private static readonly SESSION_TTL_MS = 24 * 60 * 60_000;
+
+  /**
+   * Evict inactive sessions (no live turn) so the map cannot grow without
+   * bound. Sessions with a non-terminal active turn are never evicted.
+   */
+  private pruneSessions(now = Date.now()): void {
+  // Amortized past cap + slack so steady-state session creation stays O(1);
+  // TTL stragglers between prunes are bounded and harmless.
+  if (this.sessions.size <= SessionManager.MAX_SESSIONS + SessionManager.SESSION_PRUNE_SLACK) return;
+  this.pruneCounter += 1;
+  if (this.pruneCounter % SessionManager.SESSION_PRUNE_SLACK !== 0) return;
+    for (const [id, session] of this.sessions) {
+      const active = session.activeTurnId ? this.turns.get(session.activeTurnId) : undefined;
+      if (!active && now - Date.parse(session.updatedAt) > SessionManager.SESSION_TTL_MS) this.sessions.delete(id);
+    }
+    if (this.sessions.size <= SessionManager.MAX_SESSIONS) return;
+    const inactive = [...this.sessions.values()]
+      .filter((s) => {
+        const active = s.activeTurnId ? this.turns.get(s.activeTurnId) : undefined;
+        return !active || isTerminalTurnState(active.state);
+      })
+      .sort((a, b) => Date.parse(a.updatedAt) - Date.parse(b.updatedAt));
+    for (const session of inactive.slice(0, this.sessions.size - SessionManager.MAX_SESSIONS)) {
+      this.sessions.delete(session.id);
+    }
+  }
+
   getTurn(turnId: string): BridgeTurn | undefined { return this.turns.get(turnId); }
 
   async createSession(options: { cwd: string; continueBackendId?: string; /** pre-verified backend session id */ backendSessionId?: string }): Promise<BridgeSession> {
@@ -115,6 +148,7 @@ export class SessionManager {
       state: 'ready',
     };
     this.sessions.set(session.id, session);
+    this.pruneSessions();
     return session;
   }
 
@@ -303,6 +337,9 @@ export class SessionManager {
       this.turns.delete(turn.id);
     }
   }
+
+  /** Amortization counter for session pruning. */
+  private pruneCounter = 0;
 
   private controllers = new Map<string, AbortController>();
   /** Backend stop requests issued when a turn is aborted, keyed by turn id. */

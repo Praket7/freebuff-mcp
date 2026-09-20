@@ -187,12 +187,18 @@ export class DesktopBackend implements FreebuffBackend {
   }
 
   /**
-   * Non-idempotent mutations: replaying them after an ambiguous failure (a
-   * dropped socket, a timeout, a 5xx) can execute the same prompt or thread
-   * creation twice. Only these paths are withheld from automatic replay.
+   * Idempotent requests are safe to replay after an ambiguous failure; every
+   * other POST defaults to NO automatic replay. Replaying a mutation after a
+   * dropped socket, a timeout, or a 5xx can execute the same prompt, thread
+   * creation, or setting twice — so the allowlist is explicit and narrow:
+   * reads plus the control routes whose repeat has no additional effect.
    */
-  private isMutation(method: string, pathname: string): boolean {
-    return method === 'POST' && (/\/message$/.test(pathname) || /\/api\/threads$/.test(pathname));
+  private static readonly IDEMPOTENT_POST_SUFFIXES = ['/stop', '/resume', '/agent', '/effort'];
+
+  private isIdempotentRequest(method: string, pathname: string): boolean {
+    if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return true;
+    if (method !== 'POST') return false;
+    return DesktopBackend.IDEMPOTENT_POST_SUFFIXES.some((suffix) => pathname === suffix || pathname.endsWith(suffix));
   }
 
   private ambiguousMutationError(method: string, pathname: string, detail: string): BridgeError {
@@ -206,7 +212,7 @@ export class DesktopBackend implements FreebuffBackend {
   private async request<T>(method: string, pathname: string, body?: unknown, allowReconnect = true): Promise<T> {
     await this.connect();
     if (!this.connection) throw new BridgeError(ErrorCodes.DESKTOP_NOT_FOUND, 'Freebuff Desktop is not connected.');
-    const mutation = this.isMutation(method, pathname);
+    const idempotent = this.isIdempotentRequest(method, pathname);
     try {
       const response = await fetch(new URL(pathname, this.connection.base), { method, headers: this.headers(), ...(body !== undefined ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
       if (!response.ok) {
@@ -220,9 +226,9 @@ export class DesktopBackend implements FreebuffBackend {
           await this.connect(true);
           return await this.request<T>(method, pathname, body, false);
         }
-        // A 5xx after a mutation may mean "executed, then failed to answer":
-        // never replay it.
-        if (response.status >= 500 && mutation) throw this.ambiguousMutationError(method, pathname, `HTTP ${response.status}`);
+        // A 5xx after a non-idempotent mutation may mean "executed, then
+        // failed to answer": never replay it.
+        if (response.status >= 500 && !idempotent) throw this.ambiguousMutationError(method, pathname, `HTTP ${response.status}`);
         if (response.status >= 500 && allowReconnect) {
           this.connection = undefined;
           this.setSseConnected(false);
@@ -242,10 +248,11 @@ export class DesktopBackend implements FreebuffBackend {
       return await response.json() as T;
     } catch (error) {
       if (error instanceof BridgeError) throw error;
-      // A dropped socket/timeout after a mutation is the textbook ambiguous
-      // case ("the server committed, the socket dropped"): reconnecting and
-      // replaying would submit the prompt twice. Report unknown instead.
-      if (RECOVERABLE.test(String(error)) && mutation) throw this.ambiguousMutationError(method, pathname, String(error).slice(0, 120));
+      // A dropped socket/timeout after a non-idempotent mutation is the
+      // textbook ambiguous case ("the server committed, the socket dropped"):
+      // reconnecting and replaying could submit the prompt twice. Report
+      // unknown instead.
+      if (RECOVERABLE.test(String(error)) && !idempotent) throw this.ambiguousMutationError(method, pathname, String(error).slice(0, 120));
       if (RECOVERABLE.test(String(error)) && allowReconnect) {
         this.connection = undefined;
         this.setSseConnected(false);
@@ -401,13 +408,23 @@ export class DesktopBackend implements FreebuffBackend {
       if (current.turnState === 'running') sawRunning = true;
       if (finished || (sawRunning && current.turnState !== 'running')) return current;
       if ((!sawRunning && Date.now() >= startDeadline) || Date.now() >= deadline) return undefined;
+      // No unref(): this timer IS the completion wait. An unref'd timeout may
+      // never fire on a quiet event loop, ending the wait early.
       await new Promise<void>((resolve) => {
         let settled = false;
-        const wake = () => { if (!settled) { settled = true; this.stateWaiters.delete(wake); clearTimeout(timer); resolve(); } };
+        const wake = () => {
+          if (!settled) {
+            settled = true;
+            this.stateWaiters.delete(wake);
+            clearTimeout(timer);
+            signal?.removeEventListener('abort', wake);
+            resolve();
+          }
+        };
         const timer = setTimeout(wake, TURN_POLL_MS);
-        timer.unref?.();
         this.stateWaiters.add(wake);
-        signal?.addEventListener('abort', wake, { once: true });
+        if (signal?.aborted) wake();
+        else signal?.addEventListener('abort', wake, { once: true });
       });
     }
   }

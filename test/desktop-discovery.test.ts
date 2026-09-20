@@ -182,3 +182,23 @@ test('handoff: writeHandoff round-trips through readHandoff', async () => {
     await fs.unlink(file).catch(() => undefined);
   }
 });
+
+test('handoff: written files are owner-only (0600 on POSIX)', async () => {
+  const { defaultHandoffPaths } = await import('../src/desktop/handoff.js');
+  const file = path.join(os.tmpdir(), `freebuff-perm-handoff-${Date.now()}.json`);
+  try {
+    await writeHandoff({ url: 'http://127.0.0.1:55398', launchId: 'lid', pid: process.pid, expiresAt: new Date(Date.now() + 60_000).toISOString() }, file);
+    if (process.platform !== 'win32') {
+      const stat = await fs.stat(file);
+      assert.equal(stat.mode & 0o777, 0o600, 'handoff file must be owner-only');
+      assert.equal(stat.uid, process.getuid?.(), 'handoff file must be owned by us');
+    } else {
+      // Windows protects via user-profile ACLs; the producer contract keeps
+      // the default inside the current user's profile.
+      const profile = process.env.APPDATA ?? process.env.USERPROFILE ?? '';
+      assert.ok((defaultHandoffPaths()[0] ?? '').startsWith(profile), 'default handoff lives under the user profile');
+    }
+  } finally {
+    await fs.unlink(file).catch(() => undefined);
+  }
+});

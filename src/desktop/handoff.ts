@@ -71,6 +71,18 @@ export async function readHandoff(explicitPath?: string): Promise<HandoffValidat
 }
 
 async function validateHandoffFile(handoffPath: string): Promise<HandoffValidation> {
+  // Ownership first: a file planted by another uid is untrusted no matter
+  // what its contents say. A missing file is still "missing", not untrusted.
+  try {
+    await fs.stat(handoffPath);
+  } catch {
+    return { valid: false, reason: 'handoff_missing', path: handoffPath };
+  }
+  try {
+    await verifyHandoffOwnership(handoffPath);
+  } catch {
+    return { valid: false, reason: 'handoff_untrusted_owner', path: handoffPath };
+  }
   let raw: string;
   try { raw = await fs.readFile(handoffPath, 'utf8'); } catch { return { valid: false, reason: 'handoff_missing', path: handoffPath }; }
   let value: unknown;
@@ -102,6 +114,22 @@ async function validateHandoffFile(handoffPath: string): Promise<HandoffValidati
 export async function writeHandoff(handoff: Omit<DesktopHandoff, 'version'> & { version?: number }, explicitPath?: string): Promise<string> {
   const target = explicitPath ?? process.env[HANDOFF_ENV] ?? defaultHandoffPaths()[0] ?? path.join(os.homedir(), '.config', 'freebuff-desktop', 'mcp-handoff.json');
   await fs.mkdir(path.dirname(target), { recursive: true });
-  await fs.writeFile(target, JSON.stringify({ version: HANDOFF_VERSION, ...handoff }, null, 2), 'utf8');
+  // The handoff carries a live launch id: owner-only permissions on POSIX so
+  // other local users cannot steal it. (Windows relies on the user-profile
+  // ACL: see docs/compatibility.md for the producer contract.)
+  await fs.writeFile(target, JSON.stringify({ version: HANDOFF_VERSION, ...handoff }, null, 2), { encoding: 'utf8', mode: 0o600 });
+  await verifyHandoffOwnership(target);
   return target;
+}
+
+/**
+ * Confirm a handoff file is owned by the current user. A file planted by
+ * another uid must never be trusted, even if its contents validate.
+ */
+export async function verifyHandoffOwnership(handoffPath: string): Promise<void> {
+  if (process.platform === 'win32' || typeof process.getuid !== 'function') return;
+  const stat = await fs.stat(handoffPath);
+  if (stat.uid !== process.getuid?.()) {
+    throw new Error(`Refusing handoff file owned by uid ${stat.uid}, expected ${process.getuid?.()} (${handoffPath}).`);
+  }
 }

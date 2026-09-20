@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { CliBackend } from '../src/backends/cli-backend.js';
 import { verifyConversationIdShape } from '../src/pty.js';
 import { BridgeError, ErrorCodes } from '../src/bridge/types.js';
@@ -23,8 +26,36 @@ test('cli backend: probe distinguishes a missing binary from authentication', as
   if (caps.connection === 'not_installed') {
     assert.equal(caps.authorization, 'none');
     assert.equal(caps.canSendMessage, false);
+  } else {
+    // A present binary is NOT proof of login: authorization stays unknown
+    // until a PTY session actually succeeds.
+    assert.equal(caps.authorization, 'unknown');
   }
   assert.equal(caps.liveProgress, 'unavailable');
+});
+
+test('cli backend: writes are authorized only after a PTY session succeeds', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'freebuff-cli-bin-'));
+  const bin = path.join(dir, process.platform === 'win32' ? 'freebuff.exe' : 'freebuff');
+  await fs.writeFile(bin, '#!/bin/sh\nexit 0\n');
+  if (process.platform !== 'win32') await fs.chmod(bin, 0o755);
+  const previous = process.env.FREEBUFF_CLI_PATH;
+  process.env.FREEBUFF_CLI_PATH = bin;
+  try {
+    const backend = new CliBackend('/tmp/project');
+    assert.equal((await backend.probe()).authorization, 'unknown', 'binary present but no session yet');
+    (backend as unknown as { manager: unknown }).manager = {
+      start: async (id: string) => ({ id, pid: 1, output: 'Enter a coding task', exited: false }),
+      send: async (id: string) => ({ id, pid: 1, output: 'ok', exited: false }),
+      snapshot: (id: string) => ({ id, pid: 1, output: '', exited: false }),
+      dispose: () => undefined,
+    };
+    await backend.createSession({ cwd: '/tmp/project' });
+    assert.equal((await backend.probe()).authorization, 'write_authorized', 'a successful PTY start proves login');
+  } finally {
+    if (previous === undefined) delete process.env.FREEBUFF_CLI_PATH; else process.env.FREEBUFF_CLI_PATH = previous;
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });
 
 interface StubCall { id: string; text: string; cwd: string; conversationId?: string }

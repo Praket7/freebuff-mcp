@@ -58,6 +58,12 @@ export interface FakeDesktopOptions {
   neverRunTurn?: boolean;
   /** Commit the prompt, then destroy the socket without answering (ambiguous failure). */
   dropMessageResponse?: boolean;
+  /**
+   * Fault injection: for POSTs whose path ends with one of these suffixes,
+   * apply the state change, then destroy the socket without answering. The
+   * bridge must replay idempotent routes and must NOT replay other mutations.
+   */
+  dropAfterCommitSuffixes?: string[];
 }
 
 const JSON_HEADERS = { 'content-type': 'application/json' };
@@ -71,6 +77,7 @@ export async function startFakeDesktop(options: FakeDesktopOptions = {}): Promis
   const changedFiles = new Map<string, Array<{ path: string; adds: number; dels: number }>>();
   const sseResponses = new Set<ServerResponse>();
   const timers = new Set<NodeJS.Timeout>();
+  const droppedRoutes = new Set<string>();
 
   const now = (): number => Date.now();
   const threads = new Map<string, Record<string, unknown>>([
@@ -159,12 +166,27 @@ export async function startFakeDesktop(options: FakeDesktopOptions = {}): Promis
         return json(response, { projects: [{ path: projectPath, threads: [...threads.values()] }] });
       }
 
+      /** Destroy the socket mid-action when this route is under fault injection. */
+      const dropAfterCommit = (suffix: string): boolean => {
+        // Fire once per route: the fault is a single ambiguous failure, after
+        // which the server recovers — otherwise even safe retries could never
+        // succeed and the test would prove nothing about retry semantics.
+        if (droppedRoutes.has(suffix)) return false;
+        if (method === 'POST' && (options.dropAfterCommitSuffixes ?? []).some((s) => suffix === s || suffix.endsWith(s))) {
+          droppedRoutes.add(suffix);
+          try { request.socket.destroy(); } catch { /* already gone */ }
+          return true;
+        }
+        return false;
+      };
+
       if (path === '/api/threads' && method === 'POST') {
         const id = `created-${threads.size + 1}`;
         const created = { id, projectId: projectPath, projectPath, title: 'New thread', status: 'open', harnessId: 'codebuff', model: 'fixture-model', turnState: 'idle', draft: true, createdAt: now(), updatedAt: now() };
         threads.set(id, created);
         messages.set(id, []);
         sendSse();
+        if (dropAfterCommit('/api/threads')) return undefined;
         return json(response, created);
       }
 
@@ -209,15 +231,24 @@ export async function startFakeDesktop(options: FakeDesktopOptions = {}): Promis
           thread.turnState = 'idle';
           thread.lastTurnFinishedAt = now();
           sendSse();
+          if (dropAfterCommit('/stop')) return undefined;
+          return json(response, { ok: true });
+        }
+        if (method === 'POST' && suffix === '/resume') {
+          if (dropAfterCommit('/resume')) return undefined;
           return json(response, { ok: true });
         }
         if (method === 'POST' && suffix === '/agent') {
           const requested = typeof body?.model === 'string' ? body.model : thread.model;
           if (typeof requested === 'string' && requested.includes('invalid')) return json(response, { error: 'invalid model' }, 400);
           thread.model = requested;
+          if (dropAfterCommit('/agent')) return undefined;
           return json(response, { ok: true, model: requested });
         }
-        if (method === 'POST' && suffix === '/effort') return json(response, { ok: true, thread });
+        if (method === 'POST' && suffix === '/effort') {
+          if (dropAfterCommit('/effort')) return undefined;
+          return json(response, { ok: true, thread });
+        }
         return json(response, { error: 'unknown action' }, 400);
       }
 

@@ -4,6 +4,8 @@ const MAX_EVENTS_PER_THREAD = 500;
 const MAX_BYTES_PER_THREAD = 1_000_000;
 const TTL_MS = 30 * 60_000;
 const STALE_MS = 90_000;
+/** Maximum retained per-thread buckets; one key per historical thread otherwise. */
+const MAX_THREADS = 5_000;
 
 export interface EventQuery {
   sessionId?: string;
@@ -149,9 +151,57 @@ export class EventStore {
       size -= removed?.bytes ?? 0;
     }
     this.threads.set(key, entries);
+    this.pruneThreads();
     for (const wake of this.waiters.get(key) ?? []) wake(event.sequence);
     for (const listener of this.listeners) listener(key);
     return event;
+  }
+
+  /**
+   * Bound the thread map: drop fully-expired (empty after TTL filtering)
+   * buckets first, then the stalest buckets when still over the cap. Buckets
+   * with a non-terminal active turn are never evicted.
+   */
+  /** Amortization counter for thread pruning. */
+  private pruneCounter = 0;
+
+  private pruneThreads(now = Date.now()): void {
+    // Amortized: steady-state appends skip pruning entirely; expiry sweeps
+    // run near the cap and full trims only past cap + slack, at most once
+    // every 500 appends while over the cap.
+    if (this.threads.size <= MAX_THREADS + 500) {
+      if (this.threads.size > MAX_THREADS) this.dropExpiredBuckets(now);
+      return;
+    }
+    this.pruneCounter += 1;
+    if (this.pruneCounter % 500 !== 0) return;
+    this.dropExpiredBuckets(now);
+    if (this.threads.size <= MAX_THREADS) return;
+    const byAge = [...this.threads.entries()]
+      .filter(([, entries]) => {
+        const turn = this.turns.get(entries.at(-1)?.event.turnId ?? '');
+        return !turn || isTerminalTurnState(turn);
+      })
+      .sort(([, a], [, b]) => Date.parse(a.at(-1)?.event.timestamp ?? '') - Date.parse(b.at(-1)?.event.timestamp ?? ''));
+    for (const [threadId] of byAge.slice(0, this.threads.size - MAX_THREADS)) {
+      this.threads.delete(threadId);
+      this.threadLive.delete(threadId);
+      this.threadLiveAt.delete(threadId);
+    }
+  }
+
+  /** Remove buckets whose every event expired; expiry is TTL-filtered on read. */
+  private dropExpiredBuckets(now = Date.now()): void {
+    for (const [threadId, entries] of this.threads) {
+      const live = entries.filter((x) => now - Date.parse(x.event.timestamp) <= TTL_MS);
+      if (!live.length) {
+        this.threads.delete(threadId);
+        this.threadLive.delete(threadId);
+        this.threadLiveAt.delete(threadId);
+      } else if (live.length !== entries.length) {
+        this.threads.set(threadId, live);
+      }
+    }
   }
 
   /** Notify turn state transitions; terminal states clear running state. */

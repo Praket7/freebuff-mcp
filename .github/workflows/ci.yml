@@ -33,6 +33,13 @@ jobs:
           TGZ=$(ls freebuff-mcp-*.tgz | head -1)
           npm install --no-save --prefix "$PWD/smoke" "$PWD/$TGZ"
           node "$PWD/smoke/node_modules/freebuff-mcp/dist/src/cli.js" version
-          node "$PWD/smoke/node_modules/freebuff-mcp/dist/src/cli.js" doctor --json > /dev/null
+          # doctor exits 1 when no Freebuff installation exists (as in CI), so
+          # capture the status instead of tripping `set -e`, then verify the
+          # exit code matches the machine-readable report exactly.
+          set +e
+          node "$PWD/smoke/node_modules/freebuff-mcp/dist/src/cli.js" doctor --json > doctor.json
+          DOCTOR_STATUS=$?
+          set -e
+          DOCTOR_STATUS="$DOCTOR_STATUS" node -e "const r = require('./doctor.json'); if (typeof r.ok !== 'boolean') { console.error('doctor --json did not parse'); process.exit(2); } if (r.ok && Number(process.env.DOCTOR_STATUS) !== 0) { console.error('expected exit 0 with ok:true'); process.exit(2); } if (!r.ok && Number(process.env.DOCTOR_STATUS) !== 1) { console.error('expected exit 1 with ok:false'); process.exit(2); } console.log('doctor smoke ok:', JSON.stringify({ ok: r.ok, status: Number(process.env.DOCTOR_STATUS) }));"
           node "$PWD/smoke/node_modules/freebuff-mcp/dist/src/cli.js" install codex | head -3
           node "$PWD/smoke/node_modules/freebuff-mcp/dist/src/cli.js" install claude | head -3

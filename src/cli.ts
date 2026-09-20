@@ -14,7 +14,7 @@ const USAGE = `freebuff-mcp — MCP bridge for locally installed Freebuff Deskto
 
 Usage:
   freebuff-mcp serve              Run the MCP v2 server over stdio (default)
-  freebuff-mcp serve-v1           Run the legacy MCP v1 server over stdio
+  freebuff-mcp serve-v1           Run the legacy MCP v1 server over stdio (DEPRECATED: frozen, excluded from the 0.2 stability promise)
   freebuff-mcp serve-acp          Run the experimental ACP adapter over stdio
   freebuff-mcp serve-http         Run the authenticated MCP HTTP server
   freebuff-mcp doctor [--json]    Print structured diagnostics (add --json for machine output)
@@ -164,7 +164,10 @@ async function main(): Promise<void> {
   }
   switch (command) {
     case 'serve': await runStdioV2(); return;
-    case 'serve-v1': await runStdio(); return;
+    case 'serve-v1':
+      console.error('warning: serve-v1 is deprecated and frozen; it is excluded from the 0.2 stability promise. Use `serve` instead.');
+      await runStdio();
+      return;
     case 'serve-acp': await runAcp(); return;
     case 'serve-http': await runHttp(); return;
     case 'version': console.log(VERSION); return;

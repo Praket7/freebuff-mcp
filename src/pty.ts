@@ -191,15 +191,26 @@ export interface CliTurnEnd {
 const CLI_ACTIVE_STATES = new Set(['running', 'active', 'busy', 'working', 'thinking']);
 const CLI_FAILED_STATES = new Set(['error', 'failed']);
 const CLI_WAITING_STATES = new Set(['waiting_for_user', 'waiting', 'waiting_for_input', 'input_required']);
-const CLI_DONE_STATES = new Set(['idle', 'completed', 'done', 'cancelled', 'closed']);
+const CLI_CANCELLED_STATES = new Set(['cancelled', 'canceled']);
+const CLI_DONE_STATES = new Set(['idle', 'completed', 'done', 'closed']);
 
 async function sleepInterruptible(ms: number, signal?: AbortSignal): Promise<void> {
+  // No unref(): this timer IS the wait (completion/cancellation proof). An
+  // unref'd timeout may never fire when nothing else keeps the event loop
+  // alive, which would end the wait early on quiet machines.
   await new Promise<void>((resolve) => {
     let settled = false;
-    const wake = () => { if (!settled) { settled = true; clearTimeout(timer); resolve(); } };
+    const wake = () => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', wake);
+        resolve();
+      }
+    };
     const timer = setTimeout(wake, ms);
-    timer.unref?.();
-    signal?.addEventListener('abort', wake, { once: true });
+    if (signal?.aborted) wake();
+    else signal?.addEventListener('abort', wake, { once: true });
   });
 }
 
@@ -251,6 +262,10 @@ export async function waitForCliTurnEnd(
     if (turnState && CLI_ACTIVE_STATES.has(turnState)) sawActive = true;
     if (turnState && CLI_FAILED_STATES.has(turnState) && (progressed || sawActive)) {
       return { state: 'failed', proven: true, error: 'The Freebuff CLI reported a failure outcome.' };
+    }
+    // A natively cancelled turn is cancelled — never folded into completed.
+    if (turnState && CLI_CANCELLED_STATES.has(turnState) && (progressed || sawActive)) {
+      return { state: 'cancelled', proven: true };
     }
     if (turnState && CLI_WAITING_STATES.has(turnState) && (progressed || sawActive)) {
       return { state: 'waiting_for_user', proven: true };

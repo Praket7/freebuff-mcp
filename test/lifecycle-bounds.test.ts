@@ -1,0 +1,73 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { SessionManager } from '../src/bridge/session-manager.js';
+import { EventStore } from '../src/bridge/event-store.js';
+import { FreebuffBackend } from '../src/bridge/types.js';
+
+/** Item 10: lifecycle maps stay bounded under stress; active state survives. */
+
+function stressBackend(): FreebuffBackend {
+  let n = 0;
+  return {
+    kind: 'desktop',
+    probe: async () => ({}),
+    createSession: async ({ cwd }: { cwd: string }) => {
+      n += 1;
+      return { id: `h${n}`, backend: 'desktop' as const, backendSessionId: `t${n}`, cwd };
+    },
+    sendMessage: async () => ({ state: 'completed' as const, result: {} }),
+    dispose: () => undefined,
+  } as unknown as FreebuffBackend;
+}
+
+test('bounds: 10k sessions stay capped and the newest active session survives', async () => {
+  const manager = new SessionManager(stressBackend());
+  for (let i = 0; i < 10_000; i++) {
+    await manager.createSession({ cwd: '/tmp/p' });
+  }
+  const size = manager.listSessions().length;
+  assert.ok(size <= 1_100, `sessions bounded (got ${size})`);
+
+  // A session with a live turn is never evicted, even past the cap.
+  const hanging = new SessionManager({
+    kind: 'desktop',
+    probe: async () => ({}),
+    createSession: async ({ cwd }: { cwd: string }) => ({ id: 'h', backend: 'desktop' as const, backendSessionId: 't', cwd }),
+    sendMessage: async () => new Promise(() => { /* hang */ }),
+    dispose: () => undefined,
+  } as unknown as FreebuffBackend);
+  const live = await hanging.createSession({ cwd: '/tmp/p' });
+  const handle = hanging.startTurn(live.id, { text: 'long' });
+  await new Promise((r) => setTimeout(r, 10));
+  for (let i = 0; i < 1_500; i++) {
+    await hanging.createSession({ cwd: '/tmp/p' });
+  }
+  assert.ok(hanging.getSession(live.id), 'the session with the live turn was retained');
+  // Cap + slack + the one protected live session (never evictable): bounded,
+  // not the 1501 an unbounded map would hold.
+  assert.ok(hanging.listSessions().length <= 1_200, `still bounded with a live turn present (got ${hanging.listSessions().length})`);
+  // A backend that ignores abort never settles `done`; cancellation still
+  // reports the truth without hanging the test.
+  const outcome = await hanging.cancelTurn(live.id, handle.turn.id);
+  assert.equal(outcome.aborted, true);
+  assert.equal(outcome.stopped, false, 'no stop operation exists on this backend');
+});
+
+test('bounds: 10k thread buckets stay capped, newest readable, expired dropped', () => {
+  const store = new EventStore();
+  for (let i = 0; i < 10_000; i++) {
+    store.append({ sessionId: 's', turnId: `turn-${i}`, threadId: `thread-${i}`, type: 'phase', message: `m${i}` });
+  }
+  const size = (store as unknown as { threads: Map<string, unknown> }).threads.size;
+  assert.ok(size <= 5_500, `thread buckets bounded (got ${size})`);
+  assert.equal(store.progress('thread-9999', 0, 10).events.length, 1, 'newest thread readable');
+  assert.equal(store.progress('thread-0', 0, 10).events.length, 0, 'oldest bucket evicted');
+
+  // Fully-expired buckets are dropped by the sweep.
+  const old = new Date(Date.now() - 60 * 60_000).toISOString();
+  for (let i = 0; i < 3_000; i++) {
+    store.append({ sessionId: 's', turnId: `old-${i}`, threadId: `old-${i}`, type: 'phase', timestamp: old });
+  }
+  store.append({ sessionId: 's', turnId: 'fresh', threadId: 'fresh', type: 'phase' });
+  assert.equal(store.progress('old-0', 0, 10).events.length, 0, 'expired buckets swept');
+});

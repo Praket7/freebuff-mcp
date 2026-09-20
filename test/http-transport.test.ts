@@ -135,6 +135,76 @@ test('http transport: modern protocol versions negotiate over the v2 surface', a
   }
 });
 
+/** Collect every SSE data payload from a response (progress + result frames). */
+async function rpcSse(port: number, body: unknown): Promise<{ status: number; messages: any[] }> {
+  const response = await fetch(`http://127.0.0.1:${port}/mcp`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  const messages: any[] = [];
+  for (const line of text.split('\n')) {
+    const trimmed = line.startsWith(':') ? '' : line.startsWith('data:') ? line.slice(5).trim() : '';
+    if (!trimmed) continue;
+    try { messages.push(JSON.parse(trimmed)); } catch { /* ignore partial frames */ }
+  }
+  return { status: response.status, messages };
+}
+
+test('http transport: real 2026-07-28 request, progress, and cancellation', async () => {
+  const desktop = await startFakeDesktop({ turnDelayMs: 400 });
+  const server = await startHttpServer(desktop);
+  try {
+    // A 2026-07-28 initialize is answered with the server's best supported
+    // revision (2025-11-25 in the vendored SDK) — a clean negotiation, never
+    // a crash or a silent downgrade without serverInfo.
+    const init = await rpc(server.port, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'http-test', version: '1' } } });
+    assert.equal(init.status, 200);
+    assert.ok(init.result?.result?.serverInfo, `2026-07-28 initialize answered: ${init.text.slice(0, 200)}`);
+    assert.equal(init.result?.result?.protocolVersion, '2025-11-25');
+
+    const started = await rpc(server.port, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'start_thread', arguments: {} } });
+    const sessionId = started.result?.result?.structuredContent?.sessionId as string;
+    assert.ok(sessionId, `start_thread returned a session: ${started.text.slice(0, 200)}`);
+
+    // Progress: run_turn with a progress token streams notifications/progress
+    // frames before the final result on the same response.
+    const run = await rpcSse(server.port, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'run_turn', arguments: { sessionId, text: 'do it' }, _meta: { progressToken: 'p1' } } });
+    const progress = run.messages.filter((m) => m.method === 'notifications/progress');
+    assert.ok(progress.length > 0, `progress notifications streamed (${run.messages.length} frames)`);
+    const final = run.messages.find((m) => m.id === 3);
+    assert.equal(final?.result?.structuredContent?.state, 'completed');
+  } finally {
+    await server.stop();
+    await desktop.close();
+  }
+});
+
+test('http transport: stop_turn cancels a live turn over the wire', async () => {
+  const desktop = await startFakeDesktop({ turnDelayMs: 30_000 });
+  const server = await startHttpServer(desktop);
+  try {
+    const started = await rpc(server.port, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'start_thread', arguments: {} } });
+    const sessionId = started.result?.result?.structuredContent?.sessionId as string;
+    assert.ok(sessionId);
+
+    const sentPromise = rpc(server.port, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'send_message', arguments: { sessionId, text: 'long job' } } });
+    // Let the turn start, then cancel it through a second request.
+    await new Promise((r) => setTimeout(r, 300));
+    const stopped = await rpc(server.port, { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'stop_turn', arguments: { sessionId } } });
+    assert.equal(stopped.result?.result?.structuredContent?.cancelled, true);
+    assert.equal(stopped.result?.result?.structuredContent?.stopped, true, 'the backend stop was confirmed over HTTP');
+    const sent = await sentPromise;
+    const turnId = sent.result?.result?.structuredContent?.turnId as string;
+    const view = await rpc(server.port, { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'get_turn', arguments: { turnId } } });
+    assert.equal(view.result?.result?.structuredContent?.state, 'cancelled');
+  } finally {
+    await server.stop();
+    await desktop.close();
+  }
+});
+
 test('http transport: malformed and oversized request bodies are rejected', async () => {
   const desktop = await startFakeDesktop();
   const server = await startHttpServer(desktop);

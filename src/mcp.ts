@@ -1,6 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { createMcpHandler } from '@modelcontextprotocol/server';
 import { createServer as createHttpServer, IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
@@ -50,7 +50,8 @@ function validOrigin(req: IncomingMessage): boolean {
   try { const parsed = new URL(origin); return isLoopback(parsed.hostname); } catch { return false; }
 }
 const MAX_BODY_BYTES = 2_000_000;
-async function body(req: IncomingMessage): Promise<unknown> {
+/** Bounded raw body text; the MCP handler owns parsing (and its 400s). */
+async function rawBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
   let size = 0;
   // Track the running size instead of re-concatenating every chunk (which is
@@ -61,15 +62,18 @@ async function body(req: IncomingMessage): Promise<unknown> {
     if (size > MAX_BODY_BYTES) throw new Error('Request too large');
     chunks.push(buf);
   }
-  const raw = Buffer.concat(chunks).toString('utf8');
-  return raw ? JSON.parse(raw) : undefined;
+  return Buffer.concat(chunks).toString('utf8');
 }
 export async function runHttp(): Promise<void> {
   // HTTP serves the SAME canonical v2 surface as stdio (CompositeBackend +
-  // SessionManager + TurnManager), not the legacy v1 runtime, so HTTP behavior
-  // cannot drift from MCP v2/ACP semantics. The transport itself stays
-  // StreamableHTTPServerTransport for compatibility with deployed MCP clients.
+  // SessionManager + TurnManager) through the modern per-request handler
+  // (`createMcpHandler`), which negotiates every era the SDK supports —
+  // including 2026-07-28 requests, which it answers with the server's best
+  // supported revision. Only POST /mcp is served (a deliberate, tested
+  // retention: no standalone GET SSE stream), and the 2025-era fallback stays
+  // on intentionally for deployed clients.
   const adapter = createDefaultAdapter();
+  const mcpHandler = createMcpHandler(() => createV2ServerFromAdapter(adapter), { legacy: 'stateless' });
   const host = process.env.FREEBUFF_MCP_HOST ?? '127.0.0.1';
   const port = Number(process.env.FREEBUFF_MCP_PORT ?? 8788);
   if (!isLoopback(host) && process.env.FREEBUFF_MCP_ALLOW_REMOTE !== '1') throw new Error('Refusing non-loopback HTTP host; set FREEBUFF_MCP_ALLOW_REMOTE=1 only behind trusted HTTPS and authentication.');
@@ -90,17 +94,43 @@ export async function runHttp(): Promise<void> {
     if (req.url === '/healthz' && req.method === 'GET') { if (!isLoopback(host) && !authorized(req)) { res.writeHead(401, {'www-authenticate':'Bearer'}); res.end(JSON.stringify({error:'unauthorized'})); return; } res.writeHead(200, {'content-type':'application/json'}); res.end(JSON.stringify({ok:true,readOnly:!(await adapter.backend.probe().catch(() => null))?.canSendMessage})); return; }
     if (req.url !== '/mcp' || req.method !== 'POST') { res.writeHead(404, {'content-type':'application/json'}); res.end(JSON.stringify({error:'not_found'})); return; }
     if (!authorized(req)) { res.writeHead(401, {'www-authenticate':'Bearer'}); res.end(JSON.stringify({error:'unauthorized'})); return; }
+    let raw: string;
     try {
-      const mcp = createV2ServerFromAdapter(adapter);
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-      await mcp.connect(transport);
-      await transport.handleRequest(req, res, await body(req));
-      res.on('close', () => { void transport.close(); void (mcp as unknown as { close: () => unknown }).close(); });
+      raw = await rawBody(req);
+    } catch {
+      if (!res.headersSent) { res.writeHead(400, {'content-type':'application/json'}); res.end(JSON.stringify({error:'Request too large'})); }
+      return;
+    }
+    // Malformed JSON is rejected here with a plain 400 regardless of Accept
+    // headers, so the contract never depends on handler content negotiation.
+    if (raw.trim()) {
+      try { JSON.parse(raw); } catch {
+        res.writeHead(400, {'content-type':'application/json'}); res.end(JSON.stringify({error:'malformed JSON body'})); return;
+      }
+    }
+    try {
+      const url = new URL(req.url ?? '/mcp', 'http://127.0.0.1');
+      const headers = new Headers();
+      for (const [key, value] of Object.entries(req.headers)) {
+        if (value === undefined) continue;
+        if (Array.isArray(value)) { for (const item of value) headers.append(key, item); } else headers.append(key, value);
+      }
+      const response = await mcpHandler.fetch(new Request(url, { method: 'POST', headers, body: raw }));
+      const responseHeaders: Record<string, string> = {};
+      response.headers.forEach((value, key) => { responseHeaders[key] = value; });
+      res.writeHead(response.status, responseHeaders);
+      if (response.body) {
+        for await (const chunk of response.body) {
+          if (!res.write(chunk)) await new Promise<void>((resolve) => res.once('drain', resolve));
+        }
+      }
+      res.end();
     } catch (error) {
       if (!res.headersSent) { res.writeHead(400, {'content-type':'application/json'}); res.end(JSON.stringify({error: error instanceof Error ? error.message : 'invalid_request'})); }
+      else { try { res.end(); } catch { /* already closing */ } }
     }
   });
-  const cleanup=()=>adapter.dispose(); server.once('close',cleanup); process.once('SIGINT',()=>{cleanup();server.close()}); process.once('SIGTERM',()=>{cleanup();server.close()}); process.once('exit',cleanup);
+  const cleanup=()=>{ adapter.dispose(); void mcpHandler.close().catch(() => undefined); }; server.once('close',cleanup); process.once('SIGINT',()=>{cleanup();server.close()}); process.once('SIGTERM',()=>{cleanup();server.close()}); process.once('exit',cleanup);
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, host, () => resolve()); });
   console.error(`freebuff-mcp HTTP listening on http://${host}:${port}/mcp`);
 }

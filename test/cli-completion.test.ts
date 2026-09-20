@@ -110,6 +110,23 @@ test('cli completion: abort reads as cancelled, never completed', async () => {
   });
 });
 
+test('cli completion: a natively cancelled store transition reads as cancelled', async () => {
+  await withHome(async (home) => {
+    const cwd = path.join(home, 'proj');
+    const conv = 'conv-native-cancel-1';
+    await makeConv(home, cwd, conv, { runState: { mainAgentState: { turnState: 'running' } }, messages: [userMsg] });
+    const baseline = await readCliTurnMarkers(cwd, conv);
+    const waited = waitForCliTurnEnd(cwd, conv, baseline, undefined, 5_000);
+    await new Promise((r) => setTimeout(r, 250));
+    const dir = path.join(home, '.config', 'manicode', 'projects', projectKey(cwd), 'chats', conv);
+    await fs.writeFile(path.join(dir, 'run-state.json'), JSON.stringify({ mainAgentState: { turnState: 'cancelled' } }), 'utf8');
+    await fs.appendFile(path.join(dir, 'log.jsonl'), `${JSON.stringify(assistantMsg)}\n`, 'utf8');
+    const end = await waited;
+    assert.equal(end.state, 'cancelled', 'native cancellation must never map to completed');
+    assert.equal(end.proven, true);
+  });
+});
+
 test('cli completion: sendMessage without a conversation id is unconfirmed, not completed', async () => {
   const backend = new CliBackend('/tmp/project');
   (backend as unknown as { manager: unknown }).manager = {
@@ -173,6 +190,27 @@ test('cli snapshot: an object mainAgentState never becomes the turnState string'
     await makeConv(home, cwd, conv2, { runState: { mainAgentState: { nested: { deep: true } } }, messages: [userMsg] });
     const snapshot2 = await readCliConversationSnapshot(cwd, conv2);
     assert.ok(!('turnState' in snapshot2), 'no string state available means no turnState field at all');
+  });
+});
+
+test('cli listings: two simultaneous projects list and read the right conversations', async () => {
+  await withHome(async (home) => {
+    const cwdA = path.join(home, 'proja');
+    const cwdB = path.join(home, 'projb');
+    await makeConv(home, cwdA, 'conv-a', { runState: { turnState: 'idle' }, messages: [userMsg], meta: { firstPrompt: 'prompt A' } });
+    await makeConv(home, cwdB, 'conv-b', { runState: { turnState: 'idle' }, messages: [userMsg], meta: { firstPrompt: 'prompt B' } });
+    const backend = new CliBackend(cwdA);
+    backend.registerConversationRoot('conv-b', cwdB);
+
+    const projects = (await backend.listProjects()) as Array<{ id: string }>;
+    assert.ok(projects.some((p) => p.id === cwdA), 'constructor root listed');
+    assert.ok(projects.some((p) => p.id === cwdB), 'second served root listed');
+
+    const threads = (await backend.listThreads()) as Array<{ id: string; firstPrompt?: string }>;
+    const ids = threads.map((t) => t.id);
+    assert.ok(ids.includes('conv-a'), `conv-a listed: ${ids.join(',')}`);
+    assert.ok(ids.includes('conv-b'), `conv-b listed: ${ids.join(',')}`);
+    assert.equal(new Set(ids).size, ids.length, 'no duplicate conversations');
   });
 });
 

@@ -241,5 +241,6 @@ test('capabilities: BackendCapabilities covers CLI states without conflation', a
     assert.equal(caps.canSendMessage, false);
   } else {
     assert.equal(caps.canSendMessage, true);
+    assert.equal(caps.authorization, 'unknown', 'a binary alone never proves login');
   }
 });

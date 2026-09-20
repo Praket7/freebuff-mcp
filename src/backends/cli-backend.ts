@@ -28,8 +28,16 @@ export class CliBackend implements FreebuffBackend {
   private sessions = new Map<string, BackendSession & { conversationId?: string; pid: number; output: string; exited: boolean; startedAt: number }>();
   private createLocks = new Map<string, Promise<BackendSession>>();
   private pending = new Map<string, PendingTurn>();
+  /**
+   * True once a PTY session has actually started (readiness prompt observed,
+   * authentication challenges passed). A binary on disk proves installation,
+   * never login — so writes are reported `unknown` until this flips.
+   */
+  private authVerified = false;
 
-  constructor(private projectRoot: string = process.env.FREEBUFF_PROJECT_ROOT ?? process.cwd()) {}
+  constructor(private projectRoot: string = process.env.FREEBUFF_PROJECT_ROOT ?? process.cwd()) {
+    this.knownRoots.add(projectRoot);
+  }
 
   private projectKey(cwd: string): string {
     return `${path.basename(cwd)}--${createHash('sha256').update(path.resolve(cwd)).digest('hex').slice(0, 12)}`;
@@ -55,10 +63,11 @@ export class CliBackend implements FreebuffBackend {
         notes: ['Freebuff CLI not found on PATH or FREEBUFF_CLI_PATH.'],
       };
     }
+    const authorization = this.authVerified ? 'write_authorized' : 'unknown';
     return {
       backend: 'cli',
       connection: 'cli_ready',
-      authorization: 'write_authorized',
+      authorization,
       liveProgress: 'unavailable',
       canCreateSession: true,
       canSendMessage: true,
@@ -66,7 +75,12 @@ export class CliBackend implements FreebuffBackend {
       canResume: true,
       canSetModel: true,
       canSetReasoning: true,
-      notes: [`Freebuff CLI found (${path.basename(cli)}); PTY fallback available. Authentication is verified when a session starts.`],
+      notes: [
+        `Freebuff CLI found (${path.basename(cli)}); PTY fallback available.`,
+        this.authVerified
+          ? 'Write authorization verified by a successful authenticated PTY session.'
+          : 'Authentication is unverified: the binary exists but no signed-in PTY session has succeeded yet. An installed-but-signed-out CLI is never reported write-authorized.',
+      ],
     };
   }
 
@@ -85,12 +99,16 @@ export class CliBackend implements FreebuffBackend {
       }
       const bridgeId = randomUUID();
       const startedAt = Date.now();
+      this.knownRoots.add(cwd);
       await this.manager.start(bridgeId, cwd, continueBackendId);
       // After a managed start, correlate the created conversation. Because
       // creation is serialized per project, the newest chat directory is
       // unambiguous here.
       const conversationId = continueBackendId ?? (await findLatestCliConversationId(cwd, startedAt - 1000)) ?? undefined;
       if (conversationId) this.registerConversationRoot(conversationId, cwd);
+      // manager.start() returning means the readiness prompt was observed and
+      // the signed-in checks passed: authentication is now proven, not assumed.
+      this.authVerified = true;
       const snapshot = this.manager.snapshot(bridgeId);
       const session: BackendSession & { conversationId?: string; pid: number; output: string; exited: boolean; startedAt: number } = { id: bridgeId, backend: 'cli', ...(conversationId ? { backendSessionId: conversationId, conversationId } : {}), cwd, pid: snapshot.pid, output: '', exited: false, startedAt };
       this.sessions.set(bridgeId, session);
@@ -130,6 +148,9 @@ export class CliBackend implements FreebuffBackend {
     this.pending.set(turnKey, { text, startedAt, outputMarker: outputBefore, onEvent, signal });
     try {
       const snapshot = await this.manager.send(session.id, text, session.cwd, conversationId);
+      // A completed send proves the PTY is (or was) signed in: start() throws
+      // FREEBUFF_CLI_NOT_AUTHENTICATED before any send when it is not.
+      this.authVerified = true;
       const activeConvId = conversationId ?? snapshot.conversationId;
       // No conversation id means no completion proof is possible: report
       // unconfirmed, never completed.
@@ -205,6 +226,7 @@ export class CliBackend implements FreebuffBackend {
     const conversationId = session.backendSessionId;
     if (!conversationId) throw new BridgeError(ErrorCodes.INVALID_INPUT, 'Cannot resume: no verified conversation id for this session.');
     const snapshot = await this.manager.send(session.id, '/resume', session.cwd, conversationId);
+    this.authVerified = true;
     return { backendTurnId: conversationId, state: snapshot.exited ? 'failed' : 'completed', result: redact({ output: snapshot.output.slice(-20_000) }) };
   }
 
@@ -217,17 +239,21 @@ export class CliBackend implements FreebuffBackend {
     if (!model || model.length > 200) throw new BridgeError(ErrorCodes.INVALID_INPUT, 'Invalid model.');
     const snapshot = await this.manager.send(session.id, `/model ${model}`, session.cwd, session.backendSessionId);
     if (snapshot.exited) throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, 'The Freebuff CLI exited before the model could be set.');
+    this.authVerified = true;
     return redact({ model, output: snapshot.output.slice(-4_000) });
   }
 
   async setReasoning(session: BackendSession, effort: string | null): Promise<unknown> {
     const snapshot = await this.manager.send(session.id, `/reasoning ${effort ?? ''}`.trimEnd(), session.cwd, session.backendSessionId);
     if (snapshot.exited) throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, 'The Freebuff CLI exited before the reasoning effort could be set.');
+    this.authVerified = true;
     return redact({ effort, output: snapshot.output.slice(-4_000) });
   }
 
   /** Conversation id -> project root that owns it, so reads route to the right chat store. */
   private readonly conversationRoots = new Map<string, string>();
+  /** Every project root this backend has served, so listings cover them all. */
+  private readonly knownRoots = new Set<string>();
 
   /**
    * Record which project root owns a conversation. Sessions created through
@@ -236,9 +262,15 @@ export class CliBackend implements FreebuffBackend {
    */
   registerConversationRoot(conversationId: string, cwd: string): void {
     try { this.conversationRoots.set(assertSafeId(conversationId), cwd); } catch { /* invalid ids never route */ }
+    this.knownRoots.add(cwd);
     if (this.conversationRoots.size > 5_000) {
       const oldest = this.conversationRoots.keys().next();
       if (!oldest.done) this.conversationRoots.delete(oldest.value);
+    }
+    while (this.knownRoots.size > 100) {
+      const oldest = this.knownRoots.values().next();
+      if (oldest.done || oldest.value === this.projectRoot) break;
+      this.knownRoots.delete(oldest.value);
     }
   }
 
@@ -248,11 +280,29 @@ export class CliBackend implements FreebuffBackend {
     return owned && owned !== this.projectRoot ? [owned, this.projectRoot] : [this.projectRoot];
   }
 
-  listThreads(): Promise<unknown> { return this.manager.listConversations(this.projectRoot); }
+  /**
+   * List conversations across every project root this backend has served,
+   * deduplicated by conversation id. A composite serving two projects at once
+   * must see both — never just the constructor root.
+   */
+  async listThreads(): Promise<unknown> {
+    const seen = new Set<string>();
+    const out: unknown[] = [];
+    for (const root of this.knownRoots) {
+      const conversations = await this.manager.listConversations(root).catch(() => []);
+      for (const conversation of conversations) {
+        const record = conversation as { id?: unknown };
+        if (typeof record?.id !== 'string' || seen.has(record.id)) continue;
+        seen.add(record.id);
+        out.push(conversation);
+      }
+    }
+    return out;
+  }
 
-  /** The CLI works out of a single project root; report it without inventing others. */
+  /** Report every served project root without inventing others. */
   listProjects(): Promise<unknown> {
-    return Promise.resolve([{ id: this.projectRoot, path: this.projectRoot, name: path.basename(this.projectRoot) }]);
+    return Promise.resolve([...this.knownRoots].map((root) => ({ id: root, path: root, name: path.basename(root) })));
   }
 
   /** Read one conversation's summary from the CLI chat store — never a guess. */

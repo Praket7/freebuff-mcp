@@ -112,7 +112,7 @@ pnpm build
 pnpm pack:check
 ```
 
-The suite (158 tests) covers the event store (cursors past 100 events, retention, per-thread staleness), SSE parsing/reconnect/Last-Event-ID/retry, handoff validation matrix, Desktop restart recovery, session/turn lifecycle and cancellation, phase classification, live-progress honesty, redaction classes, installers on existing/missing configs, and MCP integration tests that drive the real server through the MCP SDK client for both the v2 (`serve`) and legacy v1 (`serve-v1`) surfaces.
+The suite (171 tests) covers the event store (cursors past 100 events, retention, per-thread staleness), SSE parsing/reconnect/Last-Event-ID/retry, handoff validation matrix, Desktop restart recovery, session/turn lifecycle and cancellation, phase classification, live-progress honesty, redaction classes, installers on existing/missing configs, and MCP integration tests that drive the real server through the MCP SDK client for both the v2 (`serve`) and legacy v1 (`serve-v1`) surfaces.
 
 Because CI has no Freebuff Desktop, `test/helpers/fake-desktop.ts` serves the Desktop HTTP contract (payload shapes first captured from a live installation): `test/desktop-wire.test.ts` pins the exact payload shapes, `test/desktop-http-integration.test.ts` drives real sockets including turn completion/cancellation, and `test/http-transport.test.ts` / `test/acp-wire.test.ts` spawn the real `serve-http` and `serve-acp` processes to verify auth, rate limiting, capability advertisement, and prompt semantics on the wire.
 

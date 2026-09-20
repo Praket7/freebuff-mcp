@@ -53,6 +53,51 @@ test('desktop: an ambiguous prompt submission is never replayed (one logical mut
   }
 });
 
+test('desktop: an ambiguous thread creation is never replayed (no duplicate thread)', async () => {
+  const desktop = await startFakeDesktop({ dropAfterCommitSuffixes: ['/api/threads'] });
+  const restoreEnv = withEnv(desktop.url, desktop.launchId);
+  const backend = new DesktopBackend();
+  try {
+    await assert.rejects(
+      () => backend.createSession({ cwd: desktop.projectPath }),
+      /NOT retried|unknown whether/i,
+      'ambiguity is reported, not hidden behind a replay',
+    );
+    const created = desktop.calls.filter((c) => c.method === 'POST' && c.path === '/api/threads').length;
+    assert.equal(created, 1, `thread creation reached the Desktop exactly once (saw ${created})`);
+    const threads = [...desktop.threads.keys()].filter((id) => id.startsWith('created-'));
+    assert.equal(threads.length, 1, 'exactly one thread was created');
+  } finally {
+    backend.dispose();
+    restoreEnv();
+    await desktop.close();
+  }
+});
+
+test('desktop: idempotent control routes retry safely after an ambiguous drop', async () => {
+  const desktop = await startFakeDesktop({ dropAfterCommitSuffixes: ['/stop', '/agent'] });
+  const restoreEnv = withEnv(desktop.url, desktop.launchId);
+  const backend = new DesktopBackend();
+  try {
+    const session = { id: 'bridge-1', backend: 'desktop' as const, backendSessionId: desktop.threadId, cwd: desktop.projectPath };
+    // /stop: first attempt commits then drops; the safe retry confirms it.
+    await backend.stop(session);
+    const stops = desktop.calls.filter((c) => c.method === 'POST' && c.path.endsWith('/stop')).length;
+    assert.equal(stops, 2, `idempotent stop retried once (saw ${stops})`);
+    assert.equal(desktop.threads.get(desktop.threadId)?.turnState, 'idle', 'stop took effect');
+
+    // /agent: same story — reapplying the same model has no extra effect.
+    await backend.setModel(session, 'fixture-model-2');
+    const agents = desktop.calls.filter((c) => c.method === 'POST' && c.path.endsWith('/agent')).length;
+    assert.equal(agents, 2, `idempotent setModel retried once (saw ${agents})`);
+    assert.equal(desktop.threads.get(desktop.threadId)?.model, 'fixture-model-2', 'model applied exactly');
+  } finally {
+    backend.dispose();
+    restoreEnv();
+    await desktop.close();
+  }
+});
+
 test('desktop: a real turn still completes with finish-timestamp proof', async () => {
   const desktop = await startFakeDesktop({ turnDelayMs: 30 });
   const restoreEnv = withEnv(desktop.url, desktop.launchId);

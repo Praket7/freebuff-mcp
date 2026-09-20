@@ -198,7 +198,12 @@ export type ConnectionTruth =
 export interface BackendCapabilities {
   backend: BackendKind;
   connection: ConnectionTruth;
-  authorization: 'none' | 'read_only' | 'write_authorized';
+  /**
+   * Write-authorization truth. `unknown` means the backend exists but nothing
+   * has proven authentication yet (a CLI binary on disk proves nothing about
+   * login); only a successful authenticated operation promotes it.
+   */
+  authorization: 'none' | 'read_only' | 'write_authorized' | 'unknown';
   /** True only when the live event stream itself is healthy — never inferred from other API success. */
   liveProgress: 'connected' | 'stale' | 'unavailable';
   /** Timestamp of the most recent live event received, when one has arrived. */

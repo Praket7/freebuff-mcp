@@ -7,7 +7,7 @@ Feature support by platform, client, and backend. All entries reflect tested beh
 | Capability | Windows | macOS | Linux |
 | --- | --- | --- | --- |
 | MCP v2 stdio | ✅ | ✅ | ✅ |
-| Desktop discovery (readiness/log/process) | readiness + log | + process env | + process env |
+| Desktop discovery (handoff/readiness/log/listener) | ✅ | ✅ | ✅ |
 | Desktop handoff file | ✅ | ✅ | ✅ |
 | Desktop writes (launch-ID health check) | ✅ | ✅ | ✅ |
 | SSE live progress | ✅ | ✅ | ✅ |
@@ -45,9 +45,22 @@ The programmatic Codebuff/Freebuff SDK backend (`sdk`) is **not enabled**: the c
 | Adapter | Command | Status |
 | --- | --- | --- |
 | MCP v2 | `serve` | Stable, primary |
-| MCP v1 | `serve-v1` | Legacy compatibility |
-| HTTP (Streamable) | `serve-http` | Supported, local-first |
+| MCP v1 | `serve-v1` | Deprecated: frozen, legacy compatibility only, excluded from the 0.2 stability promise |
+| HTTP (`createMcpHandler`) | `serve-http` | Supported, local-first; same v2 tool surface as `serve`; 2026-07-28 requests answered with the best supported revision |
 | ACP v1 | `serve-acp` | Experimental |
+
+## Desktop handoff producer contract (unverified upstream)
+
+Zero-config writable handoff depends on the stock Desktop writing this file;
+that producer behavior is **not yet verified against a real Desktop release**,
+so treat the writable path as provisional until real-Desktop smoke proves it:
+
+- Linux: `~/.config/freebuff-desktop/mcp-handoff.json`
+- macOS: `~/Library/Application Support/Freebuff/mcp-handoff.json`
+- Windows: `%APPDATA%\Freebuff\mcp-handoff.json` (user-profile ACLs apply)
+- Schema: `{ version: 1, url, launchId, pid, expiresAt }`, loopback URL only.
+- POSIX files must be mode `0600` and owned by the current uid; the bridge
+  writes them that way and rejects foreign-owned files on read.
 
 Every adapter runs on the same canonical discovery, SSE client, and bounded event store; none of them duplicate Desktop discovery or event handling. `serve-v1` exposes the legacy tool names (`get_thread_progress_summary`, `watch_active_threads`, …) on top of that shared layer, and `serve` additionally exposes `get_thread_progress_summary` and `get_diff`.
 
