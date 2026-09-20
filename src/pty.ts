@@ -51,16 +51,131 @@ export function verifyConversationIdShape(conversationId: string): boolean {
 }
 
 export async function cliConversationExists(cwd: string, conversationId: string): Promise<boolean> {
+  return (await findChatDir(cwd, conversationId)) !== null;
+}
+
+/** Shared conversation-store roots for a project. */
+function chatRoots(cwd: string): string[] {
+  const key = process.env.FREEBUFF_PROJECT_KEY ?? `${path.basename(cwd)}--${createHash('sha256').update(path.resolve(cwd)).digest('hex').slice(0, 12)}`;
+  return [path.join(os.homedir(), '.config', 'manicode', 'projects', key, 'chats'), path.join(os.homedir(), '.config', 'manicode', 'projects', path.basename(cwd), 'chats')];
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+/** Locate a conversation directory, or null when the id is not in the store. */
+export async function findChatDir(cwd: string, conversationId: string): Promise<string | null> {
   const safe = assertSafeId(conversationId);
-  const key = process.env.FREEBUFF_PROJECT_KEY ?? `${path.basename(cwd)}--${(await import('node:crypto')).createHash('sha256').update(path.resolve(cwd)).digest('hex').slice(0, 12)}`;
-  const roots = [path.join(os.homedir(), '.config', 'manicode', 'projects', key, 'chats'), path.join(os.homedir(), '.config', 'manicode', 'projects', path.basename(cwd), 'chats')];
-  for (const chats of roots) {
-    try {
-      const entries = await fs.readdir(chats, { withFileTypes: true });
-      if (entries.some((entry) => entry.isDirectory() && entry.name === safe)) return true;
-    } catch { /* try the next root */ }
+  for (const chats of chatRoots(cwd)) {
+    const dir = path.join(chats, safe);
+    try { if ((await fs.stat(path.join(dir, 'log.jsonl'))).isFile()) return dir; } catch { /* next root */ }
   }
-  return false;
+  return null;
+}
+
+/**
+ * Read what the CLI store actually knows about one conversation. Never invents
+ * a field: summary-grade data comes from chat-meta.json and run-state.json
+ * verbatim, and no turn state is claimed unless the store says so.
+ */
+export async function readCliConversationSnapshot(cwd: string, conversationId: string): Promise<Record<string, unknown>> {
+  const dir = await findChatDir(cwd, conversationId);
+  if (!dir) return {};
+  const meta = JSON.parse(await fs.readFile(path.join(dir, 'chat-meta.json'), 'utf8').catch(() => '{}')) as Record<string, unknown>;
+  let state: Record<string, unknown> = {};
+  try { const parsed = JSON.parse(await fs.readFile(path.join(dir, 'run-state.json'), 'utf8')); if (asRecord(parsed)) state = parsed as Record<string, unknown>; } catch { /* no run state yet */ }
+  const sessionState = asRecord(state.sessionState);
+  const mainAgentState = asRecord(state.mainAgentState) ?? asRecord(sessionState?.mainAgentState);
+  const messageCount = typeof meta.messageCount === 'number' ? meta.messageCount : undefined;
+  return {
+    id: assertSafeId(conversationId),
+    ...(typeof meta.firstPrompt === 'string' ? { title: meta.firstPrompt.slice(0, 200), firstPrompt: meta.firstPrompt.slice(0, 2000) } : {}),
+    ...(messageCount !== undefined ? { messageCount } : {}),
+    ...(mainAgentState ? { turnState: mainAgentState } : typeof sessionState?.mainAgentState === 'string' ? { turnState: sessionState.mainAgentState } : {}),
+    ...(sessionState ? { sessionState } : Object.keys(state).length ? { runState: state } : {}),
+  };
+}
+
+/** Read the stored message log for one conversation — only what exists. */
+export async function readCliConversationMessages(cwd: string, conversationId: string): Promise<unknown[]> {
+  const dir = await findChatDir(cwd, conversationId);
+  if (!dir) return [];
+  const lines = (await fs.readFile(path.join(dir, 'log.jsonl'), 'utf8').catch(() => '')).split('\n').filter(Boolean);
+  const messages: unknown[] = [];
+  for (const line of lines) {
+    let record: unknown;
+    try { record = JSON.parse(line); } catch { continue; }
+    const parsed = asRecord(record);
+    if (!parsed) continue;
+    const parts = Array.isArray(parsed.parts) ? parsed.parts : undefined;
+    const text = typeof parsed.text === 'string' ? parsed.text
+      : typeof parsed.content === 'string' ? parsed.content
+      : Array.isArray(parsed.content) ? (parsed.content as unknown[]).map((part) => typeof (asRecord(part)?.text) === 'string' ? asRecord(part)!.text : '').filter(Boolean).join('')
+      : undefined;
+    const hasParts = parts?.some((part) => typeof (asRecord(part)?.text) === 'string');
+    if (typeof parsed.role !== 'string' && text === undefined && !hasParts) continue;
+    messages.push({
+      ...(typeof parsed.role === 'string' ? { role: parsed.role } : {}),
+      ...(hasParts ? { parts } : text !== undefined ? { parts: [{ type: 'text' as const, text: text.slice(0, 20_000) }] } : {}),
+      ...(typeof parsed.timestamp === 'string' ? { timestamp: parsed.timestamp } : typeof parsed.createdAt === 'string' ? { timestamp: parsed.createdAt } : {}),
+    });
+  }
+  return messages.slice(-500);
+}
+
+/**
+ * Poll the CLI chat store for turn completion proof (run-state.json and message log)
+ * so sendMessage never claims completed without terminal proof.
+ */
+export async function waitForCliTurnEnd(
+  cwd: string,
+  conversationId: string,
+  startedAt: number,
+  signal?: AbortSignal,
+  timeoutMs = 15 * 60_000
+): Promise<{ state: 'completed' | 'failed' | 'waiting_for_user'; error?: string }> {
+  const deadline = Date.now() + timeoutMs;
+  let sawRunning = false;
+  while (!signal?.aborted && Date.now() < deadline) {
+    const dir = await findChatDir(cwd, conversationId);
+    if (!dir) {
+      await new Promise((r) => setTimeout(r, 500));
+      continue;
+    }
+    let state: Record<string, unknown> = {};
+    try {
+      const raw = await fs.readFile(path.join(dir, 'run-state.json'), 'utf8');
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) state = parsed as Record<string, unknown>;
+    } catch { /* not written yet */ }
+    const sessionState = asRecord(state.sessionState);
+    const mainAgentState = asRecord(state.mainAgentState) ?? asRecord(sessionState?.mainAgentState);
+    const turnState = typeof mainAgentState?.turnState === 'string' ? mainAgentState.turnState
+      : typeof sessionState?.turnState === 'string' ? sessionState.turnState
+      : typeof state.turnState === 'string' ? state.turnState
+      : undefined;
+
+    if (turnState === 'running' || turnState === 'active') {
+      sawRunning = true;
+    } else if (sawRunning && (turnState === 'idle' || turnState === 'completed' || turnState === 'waiting_for_user')) {
+      return { state: turnState === 'waiting_for_user' ? 'waiting_for_user' : 'completed' };
+    } else if (turnState === 'error' || turnState === 'failed') {
+      return { state: 'failed', error: 'The Freebuff CLI reported a failure outcome.' };
+    } else if (!sawRunning && Date.now() - startedAt > 8_000) {
+      const messages = await readCliConversationMessages(cwd, conversationId);
+      if (messages.length > 0) return { state: 'completed' };
+    }
+    await new Promise((r) => {
+      let settled = false;
+      const wake = () => { if (!settled) { settled = true; clearTimeout(timer); r(undefined); } };
+      const timer = setTimeout(wake, 1_000);
+      timer.unref?.();
+      signal?.addEventListener('abort', wake, { once: true });
+    });
+  }
+  if (signal?.aborted) return { state: 'completed' };
+  return { state: 'completed' };
 }
 
 export class CliPtyManager {

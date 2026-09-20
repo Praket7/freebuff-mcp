@@ -38,7 +38,7 @@ test('MCP v2: resume_thread uses the Desktop resume route instead of submitting 
   const sessions = new SessionManager(backend as unknown as FreebuffBackend);
   const adapter: V2Adapter = { backend, sessions, turns: new TurnManager(sessions) };
   const server = createV2ServerFromAdapter(adapter);
-  const session = sessions.registerExisting({ backendSessionId: 'thread-abc', cwd: '/tmp/project' });
+  const session = await sessions.registerExisting({ backendSessionId: 'thread-abc', cwd: '/tmp/project' });
 
   const ctx = { mcpReq: { _meta: {}, signal: new AbortController().signal, notify: async () => undefined } };
   const result = await toolOf(server, 'resume_thread').handler({ sessionId: session.id, threadId: 'thread-abc' }, ctx);

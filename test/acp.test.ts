@@ -92,7 +92,7 @@ test('acp: cancelled prompt reports cancelled, not a refusal', async () => {
   const sessions = new SessionManager(acpStyleBackend());
   const session = await sessions.createSession({ cwd: '/tmp/acp' });
   const handle = sessions.startTurn(session.id, { text: 'long' });
-  sessions.cancelTurn(session.id, handle.turn.id);
+  await sessions.cancelTurn(session.id, handle.turn.id);
   const turn = await handle.done;
   assert.equal(turn.state, 'cancelled');
 });

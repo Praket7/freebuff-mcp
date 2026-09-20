@@ -1,6 +1,5 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
 import { assertSafeId, redact, redactString, safeProjectPath, safeTextContent, sanitizeFreebuff } from '../security.js';
 import { blocked } from '../security.js';
 import { SseClient, SseEvent } from '../desktop/sse.js';
@@ -405,12 +404,13 @@ export class DesktopBackend implements FreebuffBackend {
       const thread = asRecord(await this.getThread(continueBackendId));
       const existingId = asString(thread?.id);
       if (!existingId) throw new BridgeError(ErrorCodes.DESKTOP_API_INCOMPATIBLE, `Freebuff Desktop could not read thread ${continueBackendId}.`, 'Verify the thread id, or open the project in Freebuff Desktop first.');
-      return { id: randomUUID(), backend: 'desktop', backendSessionId: existingId, cwd };
+      // The backend owns the session by the thread id, so that is its handle.
+      return { id: existingId, backend: 'desktop', backendSessionId: existingId, cwd };
     }
     const created = asRecord(await this.request<unknown>('POST', '/api/threads', { projectPath: cwd }));
     const id = asString(created?.id) ?? asString(asRecord(created?.thread)?.id);
     if (!id) throw new BridgeError(ErrorCodes.DESKTOP_API_INCOMPATIBLE, 'Freebuff Desktop did not return an id for the new thread.', 'Update Freebuff Desktop, or pass an existing threadId to run_turn.');
-    return { id: randomUUID(), backend: 'desktop', backendSessionId: id, cwd };
+    return { id, backend: 'desktop', backendSessionId: id, cwd };
   }
 
   /**

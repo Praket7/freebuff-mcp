@@ -1,12 +1,23 @@
-import { randomUUID } from 'node:crypto';
 import { BackendCapabilities, BackendSession, BackendStreamHealth, BackendTurnResult, BridgeError, ErrorCodes, FreebuffBackend, BackendEventInput } from '../bridge/types.js';
 import { DesktopBackend } from './desktop-backend.js';
 import { CliBackend } from './cli-backend.js';
-import { findFreebuffCli } from '../pty.js';
+import { findFreebuffCli, cliConversationExists } from '../pty.js';
 import { redact, sanitizeFreebuff } from '../security.js';
 import { Json } from '../types.js';
 
 export type SelectedBackendKind = 'desktop' | 'cli';
+
+/** What a backend is being asked to do, so a selection can answer honestly. */
+export type BackendOperation =
+  | 'createSession'
+  | 'sendMessage'
+  | 'stop'
+  | 'resume'
+  | 'setModel'
+  | 'setReasoning'
+  | 'read';
+
+const WRITE_OPERATIONS: ReadonlySet<BackendOperation> = new Set(['sendMessage', 'stop', 'resume', 'setModel', 'setReasoning']);
 
 /**
  * Deterministic backend selection:
@@ -44,13 +55,32 @@ export class CompositeBackend implements FreebuffBackend {
   }
 
   private async selected(): Promise<'desktop' | 'cli'> {
+    return this.selectFor('sendMessage');
+  }
+
+  /**
+   * Operation-aware backend selection. A read-only Desktop can still serve
+   * reads but cannot create threads or take writes, so those operations must
+   * fall through to the CLI instead of being denied or (worse) routed to a
+   * backend that cannot do them. Structured failures carry the recovery hint
+   * instead of a bare TypeError.
+   */
+  private async selectFor(operation: BackendOperation): Promise<'desktop' | 'cli'> {
     if (this.forced) return 'cli';
     await this.refreshProbe();
     const desktopWritable = this.desktopCaps?.connection === 'connected_writable';
     const desktopReadable = this.desktopCaps?.connection === 'connected_read_only';
-    if ((desktopWritable || desktopReadable) && this.cliAvailable) return 'desktop';
-    if (desktopWritable || desktopReadable) return 'desktop';
+    const desktopConnected = desktopWritable || desktopReadable;
+    if (operation === 'read') {
+      if (desktopConnected) return 'desktop';
+      if (this.cliAvailable) return 'cli';
+      throw new BridgeError(ErrorCodes.NOT_INSTALLED, 'No Freebuff Desktop or CLI installation was detected.', 'Install Freebuff Desktop or the Freebuff CLI, then run freebuff-mcp doctor.');
+    }
+    if (desktopWritable) return 'desktop';
     if (this.cliAvailable) return 'cli';
+    if (desktopReadable) {
+      throw new BridgeError(ErrorCodes.DESKTOP_AUTH_REQUIRED, 'Freebuff Desktop write authorization is unavailable and no Freebuff CLI fallback was detected.', 'Restart Freebuff Desktop or reopen the project so it can issue a fresh launch authorization, then retry.');
+    }
     throw new BridgeError(ErrorCodes.NOT_INSTALLED, 'No Freebuff Desktop or CLI installation was detected.', 'Install Freebuff Desktop or the Freebuff CLI, then run freebuff-mcp doctor.');
   }
 
@@ -74,7 +104,7 @@ export class CompositeBackend implements FreebuffBackend {
   }
 
   async createSession(options: { cwd: string; continueBackendId?: string }): Promise<BackendSession> {
-    const kind = await this.selected();
+    const kind = await this.selectFor('createSession');
     const backend = this.backendFor(kind);
     // Never assert: a backend that cannot create sessions must fail with a
     // structured, actionable error instead of a TypeError.
@@ -90,11 +120,25 @@ export class CompositeBackend implements FreebuffBackend {
     return session;
   }
 
-  /** Wrap an existing real backend identity (never a bridge-generated guess). */
+  /**
+   * Wrap an existing real backend identity (never a bridge-generated guess) by
+   * its own handle: Desktop thread id or CLI conversation id.
+   */
   useExisting(kind: 'desktop' | 'cli', backendSessionId: string, cwd: string): BackendSession {
-    const session: BackendSession = { id: randomUUID(), backend: kind, backendSessionId, cwd };
+    const session: BackendSession = { id: backendSessionId, backend: kind, backendSessionId, cwd };
     this.sessions.set(session.id, { backend: this.backendFor(kind), session });
     return session;
+  }
+
+  /**
+   * Resolve who owns an existing identity without guessing: a conversation id
+   * present in the CLI chat store belongs to the CLI; everything else is a
+   * Desktop thread id. Registration is by the real handle, so subsequent turns
+   * route to the exact owner.
+   */
+  async resolveExisting(backendSessionId: string, cwd: string): Promise<BackendSession> {
+    const isCliConversation = await cliConversationExists(cwd, backendSessionId).catch(() => false);
+    return isCliConversation ? this.useExisting('cli', backendSessionId, cwd) : this.useExisting('desktop', backendSessionId, cwd);
   }
 
   async sendMessage(options: { session: BackendSession; text: string; signal?: AbortSignal; onEvent?: (event: BackendEventInput) => void | Promise<void> }): Promise<BackendTurnResult> {
@@ -131,10 +175,24 @@ export class CompositeBackend implements FreebuffBackend {
     return backend.setReasoning(session, effort);
   }
 
-  async listProjects(): Promise<Json> { return sanitizeFreebuff(await this.desktop.listProjects()) as Json; }
-  async listThreads(): Promise<Json> { return sanitizeFreebuff(await this.desktop.listThreads()) as Json; }
-  async getThread(backendSessionId: string): Promise<Json> { return sanitizeFreebuff(await this.desktop.getThread(backendSessionId)) as Json; }
-  async getMessages(backendSessionId: string): Promise<Json> { return sanitizeFreebuff(await this.desktop.getMessages(backendSessionId)) as Json; }
+  /**
+   * Aggregate reads route to whichever backend can actually serve them: the
+   * Desktop when it is connected (even read-only), otherwise the CLI's chat
+   * store. Never a hardcoded Desktop call — that is how a read-only or absent
+   * Desktop silently emptied thread listings.
+   */
+  async listProjects(): Promise<Json> { return sanitizeFreebuff(await this.readVia('listProjects', () => [])) as Json; }
+  async listThreads(): Promise<Json> { return sanitizeFreebuff(await this.readVia('listThreads', () => [])) as Json; }
+  async getThread(backendSessionId: string): Promise<Json> { return sanitizeFreebuff(await this.readVia('getThread', () => { throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, 'No backend can read this thread.', 'Start Freebuff Desktop or pass a CLI conversation id that exists in the chat store.'); }, backendSessionId)) as Json; }
+  async getMessages(backendSessionId: string): Promise<Json> { return sanitizeFreebuff(await this.readVia('getMessages', () => [], backendSessionId)) as Json; }
+
+  private async readVia(method: 'listProjects' | 'listThreads' | 'getThread' | 'getMessages', whenMissing: () => unknown, ...args: string[]): Promise<unknown> {
+    const kind = await this.selectFor('read');
+    const backend = this.backendFor(kind);
+    const fn = (backend as unknown as Record<string, unknown>)[method] as ((...a: string[]) => Promise<unknown>) | undefined;
+    if (typeof fn !== 'function') return whenMissing();
+    return await fn(...args);
+  }
 
   /**
    * Stream health belongs to the backend that actually holds a stream: the

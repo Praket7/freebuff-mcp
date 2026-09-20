@@ -1,6 +1,6 @@
 import { BridgeError, ErrorCodes, BridgeTurn, BridgeTurnState, isTerminalTurnState } from './types.js';
 import { EventStore, ThreadProgressSnapshot } from './event-store.js';
-import { SessionManager } from './session-manager.js';
+import { SessionManager, CancelTurnResult } from './session-manager.js';
 
 export interface TurnProgressSnapshot extends ThreadProgressSnapshot {
   turnId: string;
@@ -46,7 +46,7 @@ export class TurnManager {
 
   turnState(turnId: string): BridgeTurnState | undefined { return this.manager.getTurn(turnId)?.state; }
 
-  async cancelTurn(sessionId: string, turnId?: string): Promise<boolean> { return this.manager.cancelTurn(sessionId, turnId); }
+  async cancelTurn(sessionId: string, turnId?: string): Promise<CancelTurnResult> { return this.manager.cancelTurn(sessionId, turnId); }
 
   progressForTurn(turnId: string, afterSequence = 0, limit = 50): TurnProgressSnapshot {
     const turn = this.getTurn(turnId);

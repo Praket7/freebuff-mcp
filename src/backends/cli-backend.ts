@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { CliPtyManager, findFreebuffCli, findLatestCliConversationId } from '../pty.js';
+import { CliPtyManager, findFreebuffCli, findLatestCliConversationId, readCliConversationMessages, readCliConversationSnapshot, waitForCliTurnEnd } from '../pty.js';
 import { assertSafeId, redact } from '../security.js';
 import { BackendCapabilities, BackendEventInput, BackendSession, BackendTurnResult, BridgeError, ErrorCodes, FreebuffBackend } from '../bridge/types.js';
 
@@ -95,22 +95,29 @@ export class CliBackend implements FreebuffBackend {
   async sendMessage({ session, text, signal, onEvent }: { session: BackendSession; text: string; signal?: AbortSignal; onEvent?: (event: BackendEventInput) => void | Promise<void> }): Promise<BackendTurnResult> {
     if (!text || text.length > 100_000) throw new BridgeError(ErrorCodes.INVALID_INPUT, 'Message must be 1 to 100000 characters.');
     const state = this.sessions.get(session.id);
-    const conversationId = state?.backendSessionId;
+    // A session created through the composite carries its own handle; if it is
+    // not a live PTY key (an existing conversation continued via a fresh PTY),
+    // the verified conversation id must still reach the harness.
+    const conversationId = state?.backendSessionId ?? session.backendSessionId;
     const startedAt = Date.now();
     const turnKey = session.id;
-    const outputBefore = this.manager.snapshot(session.id).output.length;
+    let outputBefore = 0;
+    try { outputBefore = this.manager.snapshot(session.id).output.length; } catch { /* not a running PTY yet */ }
     this.pending.set(turnKey, { text, startedAt, outputMarker: outputBefore, onEvent, signal });
     try {
       const snapshot = await this.manager.send(session.id, text, session.cwd, conversationId);
+      const activeConvId = conversationId ?? snapshot.conversationId;
+      const turnEnd = activeConvId ? await waitForCliTurnEnd(session.cwd, activeConvId, startedAt, signal) : { state: 'completed' as const };
       // Emit coarse progress events derived from PTY output deltas.
       const output = snapshot.output.slice(outputBefore);
       this.emitPtyProgress(session, output, onEvent);
       const exited = snapshot.exited;
+      const finalState = exited ? 'failed' : turnEnd.state;
       return {
-        ...(conversationId ? { backendTurnId: conversationId } : {}),
-        state: exited ? 'failed' : 'completed',
-        result: redact({ output: output.slice(-20_000), conversationId: snapshot.conversationId, pid: snapshot.pid, ...(exited ? { exitCode: snapshot.exitCode } : {}) }),
-        ...(exited ? { error: `Freebuff CLI exited with code ${snapshot.exitCode ?? 'unknown'}.` } : {}),
+        ...(activeConvId ? { backendTurnId: activeConvId } : {}),
+        state: finalState,
+        result: redact({ output: output.slice(-20_000), conversationId: activeConvId, pid: snapshot.pid, ...(exited ? { exitCode: snapshot.exitCode } : {}) }),
+        ...(exited ? { error: `Freebuff CLI exited with code ${snapshot.exitCode ?? 'unknown'}.` } : turnEnd.error ? { error: turnEnd.error } : {}),
       };
     } finally {
       this.pending.delete(turnKey);
@@ -132,14 +139,19 @@ export class CliBackend implements FreebuffBackend {
   }
 
   async stop(session: BackendSession): Promise<void> {
-    const snapshot = this.manager.stop(session.id);
-    // Verify cancellation: give the child a moment, then terminate if stuck.
+    // A registered CLI conversation may not be a live PTY (it was continued
+    // through a fresh process, or is only known from the chat store). There is
+    // nothing to stop then — but a live one must be terminated for real.
+    let snapshot: { pid: number } | undefined;
+    try { snapshot = this.manager.stop(session.id); } catch { return; }
+    void snapshot;
+    // Verify cancellation: give the child a moment to exit, then terminate if stuck.
     await new Promise((resolve) => setTimeout(resolve, 1500));
-    const after = this.manager.snapshot(session.id);
+    let after: { exited: boolean } | undefined;
+    try { after = this.manager.snapshot(session.id); } catch { return; }
     if (!after.exited) {
       this.manager.kill(session.id);
     }
-    void snapshot;
   }
 
   async resume(session: BackendSession): Promise<BackendTurnResult> {
@@ -168,6 +180,28 @@ export class CliBackend implements FreebuffBackend {
   }
 
   listThreads(): Promise<unknown> { return this.manager.listConversations(this.projectRoot); }
+
+  /** The CLI works out of a single project root; report it without inventing others. */
+  listProjects(): Promise<unknown> {
+    return Promise.resolve([{ id: this.projectRoot, path: this.projectRoot, name: path.basename(this.projectRoot) }]);
+  }
+
+  /** Read one conversation's summary from the CLI chat store — never a guess. */
+  async getThread(backendSessionId: string): Promise<unknown> {
+    const snapshot = await readCliConversationSnapshot(this.projectRoot, backendSessionId);
+    if (!Object.keys(snapshot).length) {
+      throw new BridgeError(ErrorCodes.CLI_SESSION_NOT_FOUND, `No Freebuff CLI conversation '${backendSessionId}' was found in the chat store.`, 'List conversations with list_threads, then pass a real conversation id.');
+    }
+    return snapshot;
+  }
+
+  /** Read the stored message log for one conversation. */
+  getMessages(backendSessionId: string): Promise<unknown> {
+    return readCliConversationMessages(this.projectRoot, backendSessionId);
+  }
+
+  /** The CLI chat store exposes no attachment listing. */
+  listAttachments(): Promise<unknown> { return Promise.resolve([]); }
 
   snapshot(sessionId: string): { id: string; conversationId?: string; pid: number; output: string; exited: boolean; exitCode?: number } {
     return this.manager.snapshot(sessionId);

@@ -26,6 +26,13 @@ export interface BridgeSession {
   backend: BackendKind;
   /** Real Freebuff identity (Desktop thread id or CLI conversation id). */
   backendSessionId?: string;
+  /**
+   * The exact handle the owning backend addresses this session by — the value
+   * it returned as its own `BackendSession.id` (the CLI PTY key, or the Desktop
+   * thread id). Never a bridge-generated UUID: routing a turn through this
+   * handle is what keeps every prompt/cancel/model change on the real owner.
+   */
+  backendHandleId?: string;
   projectRoot: string;
   createdAt: string;
   updatedAt: string;

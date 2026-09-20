@@ -74,6 +74,12 @@ export class EventStore {
   private listeners = new Set<(threadId: string) => void>();
   private connected = false;
   private gapSuspected = false;
+  /**
+   * Turn-scoped liveness per thread (CLI/PTY backends, which have no persistent
+   * stream): a thread is `live` only while one of its turns is running, and the
+   * flag must never bleed across threads the way a global flag would.
+   */
+  private threadLive = new Map<string, boolean>();
 
   subscribe(listener: (threadId: string) => void): () => void {
     this.listeners.add(listener);
@@ -86,6 +92,12 @@ export class EventStore {
 
   setGapSuspected(value: boolean): void {
     this.gapSuspected = value;
+  }
+
+  /** Attribute liveness to a specific thread (turn-scoped); deleting marks the thread no longer live. */
+  setThreadLive(threadId: string, value: boolean): void {
+    if (value) this.threadLive.set(threadId, true);
+    else this.threadLive.delete(threadId);
   }
 
   get isConnected(): boolean { return this.connected; }
@@ -187,8 +199,12 @@ export class EventStore {
       phase: [...all].reverse().find((x) => x.phase && (x.sequence > afterSequence))?.phase ?? meaningful?.phase,
       events,
       nextSequence: this.lastSequenceFor({ threadId }),
-      connected: this.connected,
-      stale: !this.connected || (latest ? Date.now() - Date.parse(latest.timestamp) > STALE_MS : entries.length === 0),
+      // A thread explicitly marked live (a running CLI/PTY turn) is connected
+      // regardless of the global flag; every other thread falls back to the
+      // backend stream's global state. Never a single global leak across
+      // sessions.
+      connected: this.threadLive.get(threadId) ?? this.connected,
+      stale: !(this.threadLive.get(threadId) ?? this.connected) || (latest ? Date.now() - Date.parse(latest.timestamp) > STALE_MS : entries.length === 0),
       latestEventAt: latest?.timestamp,
       activeTool,
       filesChanged,

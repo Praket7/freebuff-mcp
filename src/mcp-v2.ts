@@ -136,7 +136,7 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
   write('start_thread', 'Create a bridge session backed by a real Freebuff identity.', { cwd: z.string().optional(), continueConversationId: id.optional() }, async (args) => shapeError(async () => {
     const cwd = typeof args.cwd === 'string' && args.cwd ? args.cwd : (process.env.FREEBUFF_PROJECT_ROOT ?? process.cwd());
     const session = await adapter.sessions.createSession({ cwd, ...(args.continueConversationId ? { continueBackendId: assertSafeId(args.continueConversationId) } : {}) });
-    return { ok: true, sessionId: session.id, backend: session.backend, backendSessionId: session.backendSessionId, state: session.state };
+    return { ok: true, sessionId: session.id, backend: session.backend, backendSessionId: session.backendSessionId, backendHandleId: session.backendHandleId, state: session.state };
   }));
 
   write('send_message', 'Submit text to a bridge session without waiting for completion (async).', { sessionId: id.optional(), threadId: id.optional(), text: z.string().min(1).max(100000) }, async (args) => shapeError(async () => {
@@ -183,14 +183,23 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
     }
   }));
 
-  write('stop_turn', 'Cancel a running canonical turn.', { sessionId: id, turnId: id.optional() }, async (args) => shapeError(async () => {
-    const cancelled = await adapter.turns.cancelTurn(assertSafeId(args.sessionId), args.turnId ? assertSafeId(args.turnId) : undefined);
-    return { ok: true, cancelled, note: cancelled ? 'Cancellation was delivered to the active turn.' : 'No active turn matched; the turn may have already finished.' };
+  write('stop_turn', 'Cancel a running canonical turn and stop it on the owning backend.', { sessionId: id, turnId: id.optional() }, async (args) => shapeError(async () => {
+    const result = await adapter.turns.cancelTurn(assertSafeId(args.sessionId), args.turnId ? assertSafeId(args.turnId) : undefined);
+    return {
+      ok: true,
+      cancelled: result.aborted,
+      stopped: result.stopped,
+      note: !result.aborted
+        ? 'No active turn matched; the turn may have already finished.'
+        : result.stopped
+          ? 'The active turn was aborted and the owning backend was asked to stop it.'
+          : 'The active turn was aborted locally; the backend exposes no stop operation to confirm.',
+    };
   }));
 
   write('stop_thread', 'Stop a running Freebuff turn.', { threadId: id, sessionId: id.optional() }, async (args) => shapeError(async () => {
     const session = args.sessionId ? adapter.sessions.getSession(assertSafeId(args.sessionId)) : adapter.sessions.listSessions().find((s) => s.backendSessionId === assertSafeId(args.threadId));
-    if (session) { await adapter.backend.stop({ id: session.id, backend: session.backend, ...(session.backendSessionId ? { backendSessionId: session.backendSessionId } : {}), cwd: session.projectRoot }); return { ok: true }; }
+    if (session) { await adapter.backend.stop(adapter.sessions.toBackendSession(session)); return { ok: true }; }
     throw new BridgeError(ErrorCodes.SESSION_NOT_FOUND, 'Stopping requires a bridge session created through start_thread.', 'Call start_thread with the conversation id, then stop_turn.');
   }));
 
@@ -201,7 +210,7 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
     const session = args.sessionId
       ? adapter.sessions.getSession(assertSafeId(args.sessionId))
       : adapter.sessions.listSessions().find((s) => s.backendSessionId === threadId);
-    const backendSession: BackendSession = { id: session?.id ?? threadId, backend: session?.backend ?? 'desktop', backendSessionId: threadId, cwd: session?.projectRoot ?? process.cwd() };
+    const backendSession: BackendSession = session ? adapter.sessions.toBackendSession(session) : { id: threadId, backend: 'desktop' as const, backendSessionId: threadId, cwd: process.cwd() };
     // Resuming is backend-specific. The Desktop unpauses the thread's queue
     // through its own route (`POST /api/thread/:id/resume`), which needs only
     // the thread id; only the CLI harness takes `/resume` as a command.
@@ -220,7 +229,7 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
     if (!session) throw new BridgeError(ErrorCodes.SESSION_NOT_FOUND, 'set_model requires a bridge session for this thread.', 'Call start_thread first.');
     const caps = await adapter.backend.probe();
     if (!caps.canSetModel) throw new BridgeError(ErrorCodes.DESKTOP_AUTH_REQUIRED, 'Model changes require write authorization.');
-    const backendSession: BackendSession = { id: session.id, backend: session.backend, ...(session.backendSessionId ? { backendSessionId: session.backendSessionId } : {}), cwd: session.projectRoot };
+    const backendSession = adapter.sessions.toBackendSession(session);
     if (typeof adapter.backend.setModel !== 'function') throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, `The ${session.backend} backend cannot change models.`);
     await adapter.backend.setModel(backendSession, args.model, args.harnessId);
     return { ok: true };
@@ -231,7 +240,7 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
     if (!session) throw new BridgeError(ErrorCodes.SESSION_NOT_FOUND, 'set_reasoning requires a bridge session for this thread.', 'Call start_thread first.');
     const caps = await adapter.backend.probe();
     if (!caps.canSetReasoning) throw new BridgeError(ErrorCodes.DESKTOP_AUTH_REQUIRED, 'Reasoning changes require write authorization.');
-    const backendSession: BackendSession = { id: session.id, backend: session.backend, ...(session.backendSessionId ? { backendSessionId: session.backendSessionId } : {}), cwd: session.projectRoot };
+    const backendSession = adapter.sessions.toBackendSession(session);
     if (typeof adapter.backend.setReasoning !== 'function') throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, `The ${session.backend} backend cannot change reasoning effort.`);
     await adapter.backend.setReasoning(backendSession, args.effort);
     return { ok: true };
@@ -330,10 +339,11 @@ async function resolveSessionId(adapter: V2Adapter, args: { sessionId?: unknown;
     throw new BridgeError(ErrorCodes.SESSION_NOT_FOUND, `Unknown bridge session ${args.sessionId}.`, 'Call start_thread first.');
   }
   if (typeof args.threadId === 'string' && args.threadId) {
-    // threadId may be a real backend identity — wrap it (never guess identity).
+    // threadId may be a real backend identity — wrap it (never guess identity,
+    // and never assign a session to a backend that does not own the id).
     const existing = adapter.sessions.listSessions().find((s) => s.backendSessionId === args.threadId);
     if (existing) return existing.id;
-    const session = adapter.sessions.registerExisting({ backendSessionId: assertSafeId(args.threadId), cwd: process.env.FREEBUFF_PROJECT_ROOT ?? process.cwd() });
+    const session = await adapter.sessions.registerExisting({ backendSessionId: assertSafeId(args.threadId), cwd: process.env.FREEBUFF_PROJECT_ROOT ?? process.cwd() });
     return session.id;
   }
   // Auto-create a session against the primary backend.
@@ -342,7 +352,7 @@ async function resolveSessionId(adapter: V2Adapter, args: { sessionId?: unknown;
 }
 
 async function findSessionByBackendId(adapter: V2Adapter, backendId: string) {
-  return adapter.sessions.listSessions().find((s) => s.backendSessionId === backendId) ?? adapter.sessions.registerExisting({ backendSessionId: backendId, cwd: process.env.FREEBUFF_PROJECT_ROOT ?? process.cwd() });
+  return adapter.sessions.listSessions().find((s) => s.backendSessionId === backendId) ?? (await adapter.sessions.registerExisting({ backendSessionId: backendId, cwd: process.env.FREEBUFF_PROJECT_ROOT ?? process.cwd() }));
 }
 
 export function createDefaultAdapter(): V2Adapter & { dispose(): void } {

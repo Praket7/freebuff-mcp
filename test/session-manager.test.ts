@@ -105,8 +105,9 @@ test('session manager: cancellation aborts the turn and clears active state', as
   const handle = manager.startTurn(session.id, { text: 'long task' });
   // Give the turn a tick to start, then cancel.
   await new Promise((resolve) => setTimeout(resolve, 10));
-  const cancelled = manager.cancelTurn(session.id, handle.turn.id);
-  assert.equal(cancelled, true);
+  const res = await manager.cancelTurn(session.id, handle.turn.id);
+  assert.equal(res.aborted, true);
+  assert.equal(res.stopped, true);
   const turn = await handle.done;
   assert.equal(turn.state, 'cancelled');
   assert.ok(observedSignal?.aborted, 'backend received the abort');
@@ -166,13 +167,15 @@ test('session manager: a suspected event gap is surfaced to clients, never a per
   assert.equal(gapped.events.progress('any-thread', 0, 1).eventGapSuspected, true, 'a reported gap reaches the snapshot');
 });
 
-test('session manager: a backend with no persistent stream tracks turn-scoped liveness', async () => {
+test('session manager: a backend with no persistent stream tracks turn-scoped liveness per thread', async () => {
   const manager = new SessionManager(fakeBackend());
   const session = await manager.createSession({ cwd: '/tmp/project' });
+  const thread = session.backendSessionId ?? session.id;
   const started = manager.startTurn(session.id, { text: 'work' });
-  assert.equal(manager.events.isConnected, true, 'live while a turn runs');
+  // Liveness is attributed to the running thread, never as a global flag.
+  assert.equal(manager.events.progress(thread, 0, 1).connected, true, 'live while a turn runs');
   await started.done;
-  assert.equal(manager.events.isConnected, false, 'no longer live once the turn is terminal');
+  assert.equal(manager.events.progress(thread, 0, 1).connected, false, 'no longer live once the turn is terminal');
 });
 
 test('session manager: unknown session and unknown turn produce structured errors', async () => {

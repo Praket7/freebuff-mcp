@@ -19,6 +19,17 @@ export interface TurnHandle {
   events: EventStore;
 }
 
+export interface CancelTurnResult {
+  /** A live turn was found and its local wait was aborted. */
+  aborted: boolean;
+  /**
+   * The backend owner was asked to stop the turn and acknowledged. False when
+   * the backend exposes no stop operation (so only the local wait ended) or
+   * when the stop request failed — cancellation is never claimed silently.
+   */
+  stopped: boolean;
+}
+
 /**
  * Canonical bridge session manager. Protocol adapters depend on this class,
  * never on Desktop/PTY details. Guarantees:
@@ -61,12 +72,40 @@ export class SessionManager {
 
   async createSession(options: { cwd: string; continueBackendId?: string; /** pre-verified backend session id */ backendSessionId?: string }): Promise<BridgeSession> {
     const backendSession = await this.ensureBackendSession(options);
+    return this.wrapBackendSession(backendSession, options.cwd);
+  }
+
+  /**
+   * Register a session that already exists (for example, wrapping a known
+   * Desktop thread or CLI conversation id). The owner is resolved through the
+   * backend facade so `backend`/`backendHandleId` record truth, never the
+   * facade's default kind.
+   */
+  async registerExisting(options: { backendSessionId: string; cwd: string }): Promise<BridgeSession> {
+    const backendSession = await this.resolveExistingIdentity(options);
+    return this.wrapBackendSession(backendSession, options.cwd);
+  }
+
+  /** Rebuild the backend-facing session exactly as the owner shipped it. */
+  toBackendSession(session: BridgeSession): BackendSession {
+    return {
+      id: session.backendHandleId ?? session.id,
+      backend: session.backend,
+      ...(session.backendSessionId ? { backendSessionId: session.backendSessionId } : {}),
+      cwd: session.projectRoot,
+    };
+  }
+
+  private wrapBackendSession(backendSession: BackendSession, projectRoot: string): BridgeSession {
     const now = new Date().toISOString();
     const session: BridgeSession = {
       id: randomUUID(),
-      backend: this.backend.kind,
+      // The kind that actually owns the session (Desktop or CLI), never the
+      // facade default.
+      backend: backendSession.backend,
       backendSessionId: backendSession.backendSessionId,
-      projectRoot: options.cwd,
+      backendHandleId: backendSession.id,
+      projectRoot,
       createdAt: now,
       updatedAt: now,
       state: 'ready',
@@ -75,20 +114,12 @@ export class SessionManager {
     return session;
   }
 
-  /** Register a session that already exists (for example, wrapping a known Desktop thread). */
-  registerExisting(options: { backendSessionId: string; cwd: string }): BridgeSession {
-    const now = new Date().toISOString();
-    const session: BridgeSession = {
-      id: randomUUID(),
-      backend: this.backend.kind,
-      backendSessionId: options.backendSessionId,
-      projectRoot: options.cwd,
-      createdAt: now,
-      updatedAt: now,
-      state: 'ready',
-    };
-    this.sessions.set(session.id, session);
-    return session;
+  private async resolveExistingIdentity(options: { backendSessionId: string; cwd: string }): Promise<BackendSession> {
+    // A CompositeBackend can distinguish a CLI conversation id from a Desktop
+    // thread id; every other backend owns the id it is handed.
+    const resolver = this.backend as unknown as { resolveExisting?(backendSessionId: string, cwd: string): Promise<BackendSession> | BackendSession };
+    if (resolver.resolveExisting) return await resolver.resolveExisting(options.backendSessionId, options.cwd);
+    return { id: options.backendSessionId, backend: this.backend.kind, backendSessionId: options.backendSessionId, cwd: options.cwd };
   }
 
   private async ensureBackendSession(options: { cwd: string; continueBackendId?: string; backendSessionId?: string }): Promise<BackendSession> {
@@ -127,8 +158,9 @@ export class SessionManager {
       session.updatedAt = new Date().toISOString();
       // A backend with no persistent stream is only "live" while a turn is
       // running, so liveness follows the turn lifecycle there rather than
-      // leaving `connected` permanently false.
-      if (this.turnScopedLiveness) this.events.setConnected(!isTerminalTurnState(state));
+      // leaving `connected` permanently false. It is attributed per thread —
+      // another session's turn (or silence) must never refresh this one.
+      if (this.turnScopedLiveness) this.events.setThreadLive(session.backendSessionId ?? session.id, !isTerminalTurnState(state));
       if (state === 'running') session.state = 'running';
       else if (state === 'waiting_for_user') session.state = 'waiting_for_user';
       else if (isTerminalTurnState(state)) {
@@ -164,8 +196,18 @@ export class SessionManager {
         turn.lastSequence = this.events.lastSequenceFor({ turnId: turn.id });
       };
       try {
-        const backendSession: BackendSession = { id: session.id, backend: session.backend, ...(session.backendSessionId ? { backendSessionId: session.backendSessionId } : {}), cwd: session.projectRoot };
-        const onAbort = () => { if (!isTerminalTurnState(turn.state)) setState('cancelled'); };
+        const backendSession = this.toBackendSession(session);
+        const onAbort = () => {
+          if (!isTerminalTurnState(turn.state)) setState('cancelled');
+          // Aborting the local wait is NOT stopping the backend. Ask the owner
+          // to stop the turn too, otherwise a "cancelled" Desktop thread or CLI
+          // process keeps working with nobody reading its output.
+          if (this.backend.stop && !this.stopOutcomes.has(turn.id)) {
+            this.stopOutcomes.set(turn.id, (async (): Promise<boolean> => {
+              try { await this.backend.stop!(backendSession, turn.id); return true; } catch { return false; }
+            })());
+          }
+        };
         controller.signal.addEventListener('abort', onAbort, { once: true });
         const result = await this.backend.sendMessage({ session: backendSession, text: options.text, signal: controller.signal, onEvent });
         controller.signal.removeEventListener('abort', onAbort);
@@ -188,27 +230,38 @@ export class SessionManager {
       return turn;
       } finally {
         this.controllers.delete(turn.id);
+        this.stopOutcomes.delete(turn.id);
       }
     })();
 
     return { turn, session, done, events: this.events };
   }
 
-  /** Abort the active turn, if any. Returns whether a turn was aborted. */
-  cancelTurn(sessionId: string, turnId?: string): boolean {
+  /**
+   * Abort the active turn, if any, AND ask the owning backend to stop it.
+   *
+   * Cancellation is only truthful when the backend that owns the work stops
+   * doing it; aborting the local wait alone left Desktop threads/CLI processes
+   * running. `stopped` reports whether that backend request was acknowledged.
+   */
+  async cancelTurn(sessionId: string, turnId?: string): Promise<CancelTurnResult> {
     const session = this.sessions.get(sessionId);
-    if (!session) return false;
+    if (!session) return { aborted: false, stopped: false };
     const target = turnId ?? session.activeTurnId;
-    if (!target) return false;
-    // The AbortController lives inside startTurn's async scope; expose
-    // cancellation by marking state and letting the backend's signal listeners
-    // fire via the registered controller. We keep a registry of controllers.
+    if (!target) return { aborted: false, stopped: false };
     const controller = this.controllers.get(target);
-    if (controller) { controller.abort(); return true; }
-    return false;
+    if (!controller) return { aborted: false, stopped: false };
+    // Aborting synchronously runs the turn's abort listener, which issues the
+    // backend stop; capture that promise before awaiting so we report real truth.
+    if (!controller.signal.aborted) controller.abort();
+    const stopping = this.stopOutcomes.get(target);
+    const stopped = stopping ? await stopping.catch(() => false) : false;
+    return { aborted: true, stopped };
   }
 
   private controllers = new Map<string, AbortController>();
+  /** Backend stop requests issued when a turn is aborted, keyed by turn id. */
+  private stopOutcomes = new Map<string, Promise<boolean>>();
   /** Register a controller so cancelTurn can abort a running turn. */
   registerController(turnId: string, controller: AbortController): void { this.controllers.set(turnId, controller); }
   unregisterController(turnId: string): void { this.controllers.delete(turnId); }
