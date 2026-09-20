@@ -69,7 +69,6 @@ interface Entry { event: BridgeEvent; bytes: number }
 export class EventStore {
   private threads = new Map<string, Entry[]>();
   private turns = new Map<string, BridgeTurnState>();
-  private lastActivity = new Map<string, number>();
   private sequence = 0;
   private waiters = new Map<string, Set<(sequence: number) => void>>();
   private listeners = new Set<(threadId: string) => void>();
@@ -120,8 +119,6 @@ export class EventStore {
       size -= removed?.bytes ?? 0;
     }
     this.threads.set(key, entries);
-    this.lastActivity.set(key, Date.now());
-    this.lastActivity.set(`turn:${input.turnId}`, Date.now());
     for (const wake of this.waiters.get(key) ?? []) wake(event.sequence);
     for (const listener of this.listeners) listener(key);
     return event;
@@ -243,5 +240,4 @@ export class EventStore {
   }
 
   /** Last activity timestamp for one thread (or turn) — staleness is never global. */
-  lastActivityAt(threadId: string): number | undefined { return this.lastActivity.get(threadId); }
 }

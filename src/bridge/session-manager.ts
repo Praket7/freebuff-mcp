@@ -31,7 +31,6 @@ export class SessionManager {
   readonly events = new EventStore();
   private sessions = new Map<string, BridgeSession>();
   private turns = new Map<string, BridgeTurn>();
-  private resolvers = new Map<string, () => void>();
 
   private streamHealthUnsubscribe?: () => void;
   /** True when the backend exposes no persistent stream (CLI/PTY). */

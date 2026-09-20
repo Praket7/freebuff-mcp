@@ -102,10 +102,8 @@ test('event store: per-thread staleness (activity in another thread does not ref
   const a = store.progress('thread-a');
   const b = store.progress('thread-b');
   assert.equal(b.stale, false, 'active thread is not stale');
-  // thread-a's last activity is older than thread-b's.
-  assert.ok((store.lastActivityAt('thread-a') ?? 0) < (store.lastActivityAt('thread-b') ?? 0));
-  // With a tiny staleness window simulated via TTL the API contract is per-thread:
-  // thread-a remains non-stale here because it is recent, but its latestEventAt differs.
+  // Recency is per thread and comes from the events themselves (the signal the
+  // bridge actually reports), so thread-a is older than thread-b.
   assert.ok((a.latestEventAt ? Date.parse(a.latestEventAt) : 0) < (b.latestEventAt ? Date.parse(b.latestEventAt) : 0));
 });
 

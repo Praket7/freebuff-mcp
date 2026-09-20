@@ -71,6 +71,7 @@ Every adapter's tests had used `fetch` stubs or scripted backends, so the bridge
 - **A Desktop rejection discarded the Desktop's explanation.** Any non-retriable status became a bare `HTTP 400`; the Desktop's own `error`/`message` (for example `no project` or `invalid model`) is now included, redacted and truncated.
 - **The first status call reported a healthy Desktop as `stale`.** `probe()` now gives a just-started event stream a bounded 1.5 s to connect, once per process, so `freebuff_status` no longer opens with a misleading sample.
 - HTTP transport hardening: rate-limiter buckets are pruned so the limiter cannot grow without bound, and request bodies are size-checked incrementally instead of re-concatenating every chunk.
+- Remove unbounded dead state: the event store kept a per-thread **and per-turn** activity map that nothing outside a test read (per-thread recency already comes from the events themselves), and the session manager carried an unused resolver map. The equivalent staleness assertion now uses `latestEventAt`, the signal the bridge actually reports.
 
 ### Legacy adapters & parity
 
