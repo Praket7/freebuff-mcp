@@ -177,7 +177,6 @@ export class SessionManager {
     this.turns.set(turn.id, turn);
     session.activeTurnId = turn.id;
     session.updatedAt = now;
-    this.events.append({ sessionId, turnId: turn.id, threadId: session.backendSessionId ?? session.id, type: 'queued' });
 
     const controller = new AbortController();
     if (options.signal) {
@@ -209,15 +208,18 @@ export class SessionManager {
         turn.completedAt = new Date().toISOString();
         this.pruneTerminalTurns();
       }
-      if (isTerminalTurnState(state)) {
-        this.events.setTurnState(session.backendSessionId ?? session.id, sessionId, turn.id, state, turn.error);
-      }
+      // Record every turn state in EventStore so pruneThreads can reliably
+      // know whether a thread has an active turn (queued/running/waiting).
+      this.events.setTurnState(session.backendSessionId ?? session.id, sessionId, turn.id, state, turn.error);
     };
+
+    // Record the initial 'queued' state through setState so EventStore.turns
+    // gets the non-terminal state and pruneThreads can see active turns.
+    setState('queued');
 
     const done = (async (): Promise<BridgeTurn> => {
       try {
       setState('running');
-      this.events.append({ sessionId, turnId: turn.id, threadId: session.backendSessionId ?? session.id, type: 'turn_started', state: 'running' });
       const onEvent = (event: BackendEventInput): void => {
         this.events.append({
           sessionId,

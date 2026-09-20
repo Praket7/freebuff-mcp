@@ -89,13 +89,18 @@ async function collectDoctor(): Promise<DoctorReport> {
   }
 
   const cliPath = await findFreebuffCli();
-  let cliBackend: DoctorReport['backend'] | undefined;
+  let cliCaps: Awaited<ReturnType<CliBackend['probe']>> | null = null;
   if (cliPath) {
     try {
       const cli = new CliBackend();
-      const caps = await cli.probe();
-      cliBackend = { kind: 'cli', connection: caps.connection, authorization: caps.authorization, liveProgress: caps.liveProgress, notes: caps.notes };
-      if (backend.kind === 'none') { backend.kind = 'cli'; Object.assign(backend, cliBackend); }
+      cliCaps = await cli.probe();
+      if (backend.kind === 'none') {
+        backend.kind = 'cli';
+        backend.connection = cliCaps.connection;
+        backend.authorization = cliCaps.authorization;
+        backend.liveProgress = cliCaps.liveProgress;
+        backend.notes = cliCaps.notes;
+      }
     } catch (error) {
       errors.push(error instanceof Error ? error.message : String(error));
     }
@@ -125,12 +130,12 @@ async function collectDoctor(): Promise<DoctorReport> {
     desktop: { detected: desktopDetected, authorized: desktopAuthorized, apiUrlCompatible: desktopApiCompatible, eventStreamState, ...(lastEventAt ? { lastEventAt } : {}) },
     capabilities: {
       read: desktopDetected || Boolean(cliPath),
-      write: desktopAuthorized || Boolean(cliPath),
-      createSession: desktopCaps ? desktopCaps.connection.startsWith('connected') : Boolean(cliPath),
-      stop: desktopAuthorized || Boolean(cliPath),
-      resume: desktopAuthorized || Boolean(cliPath),
-      model: desktopAuthorized || Boolean(cliPath),
-      reasoning: desktopAuthorized || Boolean(cliPath),
+      write: desktopAuthorized || (cliCaps?.canSendMessage ?? false),
+      createSession: desktopCaps ? desktopCaps.connection.startsWith('connected') : (cliCaps?.canCreateSession ?? false),
+      stop: desktopAuthorized || (cliCaps?.canStop ?? false),
+      resume: desktopAuthorized || (cliCaps?.canResume ?? false),
+      model: desktopAuthorized || (cliCaps?.canSetModel ?? false),
+      reasoning: desktopAuthorized || (cliCaps?.canSetReasoning ?? false),
     },
     projectRoot: process.env.FREEBUFF_PROJECT_ROOT ?? process.cwd(),
     pty: { available: Boolean(cliPath), nodePtyVersion: ptyVersion },

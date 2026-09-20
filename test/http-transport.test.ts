@@ -84,6 +84,8 @@ async function rpc(port: number, body: unknown, options: { token?: string | null
   return { status: response.status, result, text };
 }
 
+
+
 /** Establish a GET SSE stream (modern 2026-07-28 client path) and return parsed frames.
  * GET is used for stream establishment; messages are sent separately via POST. */
 async function sseStream(port: number): Promise<{ status: number; messages: any[] }> {
@@ -171,7 +173,7 @@ async function rpcSse(port: number, body: unknown): Promise<{ status: number; me
   return { status: response.status, messages };
 }
 
-test('http transport: legacy initialize stays on the 2025 compatibility path (kept separate)', async () => {
+test('http transport: legacy 2025 protocol stays on the compatibility path', async () => {
   const desktop = await startFakeDesktop();
   const server = await startHttpServer(desktop);
   try {
@@ -184,19 +186,21 @@ test('http transport: legacy initialize stays on the 2025 compatibility path (ke
   }
 });
 
-test('http transport: real 2026-07-28 modern client negotiates via createMcpHandler with GET stream + POST call', async () => {
+test('http transport: 2026-07-28 version string via legacy JSON-RPC (SDK limitation: modern envelope not yet supported)', async () => {
   const desktop = await startFakeDesktop({ turnDelayMs: 400 });
   const server = await startHttpServer(desktop);
   try {
-    // Modern 2026-07-28 client establishes an SSE stream via GET first,
-    // then sends the initialize + tools/call via POST. createMcpHandler
-    // negotiates the version and answers with the server's best revision.
+    // The vendored SDK v2.0.0 only accepts JSON-RPC 2.0 format.
+    // It negotiates a 2026-07-28 version string in the legacy initialize
+    // params, answering with the server's best supported revision (2025-11-25).
+    // A genuine modern 2026-07-28 envelope (no jsonrpc/id) is rejected 400
+    // by the current SDK. This test documents the current capability.
     const init = await rpc(server.port, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'modern-test', version: '1' } } });
     assert.equal(init.status, 200);
     assert.ok(init.result?.result?.serverInfo, `2026-07-28 init answered: ${init.text.slice(0, 200)}`);
     assert.equal(init.result?.result?.protocolVersion, '2025-11-25');
-    // The negotiation went through createMcpHandler, not the legacy
-    // transport: a 2026-07-28 request answered with best revision.
+    // The negotiation went through createMcpHandler: a 2026-07-28 version
+    // string in legacy JSON-RPC is answered with best supported revision.
     const started = await rpc(server.port, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'start_thread', arguments: {} } });
     const sessionId = started.result?.result?.structuredContent?.sessionId as string;
     assert.ok(sessionId);
