@@ -240,7 +240,9 @@ test('capabilities: BackendCapabilities covers CLI states without conflation', a
     assert.equal(caps.authorization, 'none');
     assert.equal(caps.canSendMessage, false);
   } else {
-    assert.equal(caps.canSendMessage, true);
+    // With authVerified=false, write capabilities are NOT advertised
+    assert.equal(caps.canSendMessage, false, 'write capabilities hidden until PTY auth succeeds');
+    assert.equal(caps.canCreateSession, false);
     assert.equal(caps.authorization, 'unknown', 'a binary alone never proves login');
   }
 });

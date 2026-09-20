@@ -53,6 +53,22 @@ test('bounds: 10k sessions stay capped and the newest active session survives', 
   assert.equal(outcome.stopped, false, 'no stop operation exists on this backend');
 });
 
+test('bounds: a live thread is never evicted even under pressure', () => {
+  const store = new EventStore();
+  // Create thread-0 with an event, then mark it live (a running CLI/PTY turn).
+  store.append({ sessionId: 's', turnId: 'turn-0', threadId: 'thread-0', type: 'phase', message: 'm0' });
+  store.setThreadLive('thread-0', true);
+  // Fill past the cap with other threads.
+  for (let i = 1; i < 6_000; i++) {
+    store.append({ sessionId: 's', turnId: `turn-${i}`, threadId: `thread-${i}`, type: 'phase', message: `m${i}` });
+  }
+  // thread-0's live flag protects it from eviction even though its
+  // turn state is not recorded in EventStore.turns.
+  assert.ok(store.progress('thread-0', 0, 1).events.length > 0, 'live thread was retained');
+  const size = (store as unknown as { threads: Map<string, unknown> }).threads.size;
+  assert.ok(size <= 5_500, `thread buckets bounded with a live thread (got ${size})`);
+});
+
 test('bounds: 10k thread buckets stay capped, newest readable, expired dropped', () => {
   const store = new EventStore();
   for (let i = 0; i < 10_000; i++) {

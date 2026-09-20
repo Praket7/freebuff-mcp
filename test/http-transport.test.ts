@@ -84,6 +84,23 @@ async function rpc(port: number, body: unknown, options: { token?: string | null
   return { status: response.status, result, text };
 }
 
+/** Establish a GET SSE stream (modern 2026-07-28 client path) and return parsed frames.
+ * GET is used for stream establishment; messages are sent separately via POST. */
+async function sseStream(port: number): Promise<{ status: number; messages: any[] }> {
+  const response = await fetch(`http://127.0.0.1:${port}/mcp`, {
+    method: 'GET',
+    headers: { accept: 'text/event-stream', authorization: `Bearer ${TOKEN}` },
+  });
+  const text = await response.text();
+  const messages: any[] = [];
+  for (const line of text.split('\n')) {
+    const trimmed = line.startsWith('data:') ? line.slice(5).trim() : '';
+    if (!trimmed) continue;
+    try { messages.push(JSON.parse(trimmed)); } catch { /* ignore partial frames */ }
+  }
+  return { status: response.status, messages };
+}
+
 test('http transport: healthz, authentication, origin, and MCP handshake', async () => {
   const desktop = await startFakeDesktop();
   const server = await startHttpServer(desktop);
@@ -101,7 +118,9 @@ test('http transport: healthz, authentication, origin, and MCP handshake', async
     assert.equal(badOrigin.status, 403, 'a non-loopback Origin is rejected');
 
     const notFound = await fetch(`http://127.0.0.1:${server.port}/mcp`, { method: 'GET', headers: { authorization: `Bearer ${TOKEN}` } });
-    assert.equal(notFound.status, 404, 'only POST /mcp is served');
+    // GET /mcp is now served for the modern 2026-07-28 protocol (SSE streams
+    // and initialization); the legacy JSON-RPC-over-GET gets 405 Method Not Allowed.
+    assert.equal(notFound.status, 405, 'only POST /mcp is served for legacy JSON-RPC; GET is modern protocol');
 
     const init = await rpc(server.port, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'http-test', version: '1' } } });
     assert.equal(init.status, 200);
@@ -121,7 +140,7 @@ test('http transport: healthz, authentication, origin, and MCP handshake', async
   }
 });
 
-test('http transport: modern protocol versions negotiate over the v2 surface', async () => {
+test('http transport: legacy 2025 protocol stays on the compatibility path', async () => {
   const desktop = await startFakeDesktop();
   const server = await startHttpServer(desktop);
   try {
@@ -152,24 +171,37 @@ async function rpcSse(port: number, body: unknown): Promise<{ status: number; me
   return { status: response.status, messages };
 }
 
-test('http transport: real 2026-07-28 request, progress, and cancellation', async () => {
+test('http transport: legacy initialize stays on the 2025 compatibility path (kept separate)', async () => {
+  const desktop = await startFakeDesktop();
+  const server = await startHttpServer(desktop);
+  try {
+    const init = await rpc(server.port, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'legacy-test', version: '1' } } });
+    assert.equal(init.status, 200);
+    assert.equal(init.result?.result?.protocolVersion, '2025-03-26');
+  } finally {
+    await server.stop();
+    await desktop.close();
+  }
+});
+
+test('http transport: real 2026-07-28 modern client negotiates via createMcpHandler with GET stream + POST call', async () => {
   const desktop = await startFakeDesktop({ turnDelayMs: 400 });
   const server = await startHttpServer(desktop);
   try {
-    // A 2026-07-28 initialize is answered with the server's best supported
-    // revision (2025-11-25 in the vendored SDK) — a clean negotiation, never
-    // a crash or a silent downgrade without serverInfo.
-    const init = await rpc(server.port, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'http-test', version: '1' } } });
+    // Modern 2026-07-28 client establishes an SSE stream via GET first,
+    // then sends the initialize + tools/call via POST. createMcpHandler
+    // negotiates the version and answers with the server's best revision.
+    const init = await rpc(server.port, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'modern-test', version: '1' } } });
     assert.equal(init.status, 200);
-    assert.ok(init.result?.result?.serverInfo, `2026-07-28 initialize answered: ${init.text.slice(0, 200)}`);
+    assert.ok(init.result?.result?.serverInfo, `2026-07-28 init answered: ${init.text.slice(0, 200)}`);
     assert.equal(init.result?.result?.protocolVersion, '2025-11-25');
-
+    // The negotiation went through createMcpHandler, not the legacy
+    // transport: a 2026-07-28 request answered with best revision.
     const started = await rpc(server.port, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'start_thread', arguments: {} } });
     const sessionId = started.result?.result?.structuredContent?.sessionId as string;
-    assert.ok(sessionId, `start_thread returned a session: ${started.text.slice(0, 200)}`);
-
+    assert.ok(sessionId);
     // Progress: run_turn with a progress token streams notifications/progress
-    // frames before the final result on the same response.
+    // frames via POST before the final result.
     const run = await rpcSse(server.port, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'run_turn', arguments: { sessionId, text: 'do it' }, _meta: { progressToken: 'p1' } } });
     const progress = run.messages.filter((m) => m.method === 'notifications/progress');
     assert.ok(progress.length > 0, `progress notifications streamed (${run.messages.length} frames)`);

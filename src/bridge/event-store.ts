@@ -178,7 +178,11 @@ export class EventStore {
     this.dropExpiredBuckets(now);
     if (this.threads.size <= MAX_THREADS) return;
     const byAge = [...this.threads.entries()]
-      .filter(([, entries]) => {
+      .filter(([threadId, entries]) => {
+        // A thread explicitly marked live (a running CLI/PTY turn)
+        // is never evicted, even if its turn state isn't yet
+        // terminal in this store.
+        if (this.threadLive.get(threadId) === true) return false;
         const turn = this.turns.get(entries.at(-1)?.event.turnId ?? '');
         return !turn || isTerminalTurnState(turn);
       })

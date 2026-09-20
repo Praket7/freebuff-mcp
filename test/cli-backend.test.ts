@@ -28,8 +28,11 @@ test('cli backend: probe distinguishes a missing binary from authentication', as
     assert.equal(caps.canSendMessage, false);
   } else {
     // A present binary is NOT proof of login: authorization stays unknown
-    // until a PTY session actually succeeds.
+    // and NO write capability is advertised until a PTY session actually succeeds.
     assert.equal(caps.authorization, 'unknown');
+    assert.equal(caps.canCreateSession, false, 'no create capability without auth');
+    assert.equal(caps.canSendMessage, false, 'no send capability without auth');
+    assert.equal(caps.canStop, false, 'no stop capability without auth');
   }
   assert.equal(caps.liveProgress, 'unavailable');
 });
@@ -43,7 +46,10 @@ test('cli backend: writes are authorized only after a PTY session succeeds', asy
   process.env.FREEBUFF_CLI_PATH = bin;
   try {
     const backend = new CliBackend('/tmp/project');
-    assert.equal((await backend.probe()).authorization, 'unknown', 'binary present but no session yet');
+    const before = await backend.probe();
+    assert.equal(before.authorization, 'unknown', 'binary present but no session yet');
+    assert.equal(before.canCreateSession, false, 'write capabilities hidden before auth');
+    assert.equal(before.canSendMessage, false, 'write capabilities hidden before auth');
     (backend as unknown as { manager: unknown }).manager = {
       start: async (id: string) => ({ id, pid: 1, output: 'Enter a coding task', exited: false }),
       send: async (id: string) => ({ id, pid: 1, output: 'ok', exited: false }),
@@ -51,7 +57,12 @@ test('cli backend: writes are authorized only after a PTY session succeeds', asy
       dispose: () => undefined,
     };
     await backend.createSession({ cwd: '/tmp/project' });
-    assert.equal((await backend.probe()).authorization, 'write_authorized', 'a successful PTY start proves login');
+    const after = await backend.probe();
+    assert.equal(after.authorization, 'write_authorized', 'a successful PTY start proves login');
+    assert.equal(after.canCreateSession, true, 'write capabilities revealed after auth');
+    assert.equal(after.canSendMessage, true, 'write capabilities revealed after auth');
+    assert.equal(after.canStop, true);
+    assert.equal(after.canResume, true);
   } finally {
     if (previous === undefined) delete process.env.FREEBUFF_CLI_PATH; else process.env.FREEBUFF_CLI_PATH = previous;
     await fs.rm(dir, { recursive: true, force: true });

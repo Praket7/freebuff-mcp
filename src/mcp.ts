@@ -92,8 +92,33 @@ export async function runHttp(): Promise<void> {
     if (!validOrigin(req)) { res.writeHead(403, {'content-type':'application/json'}); res.end(JSON.stringify({error:'invalid_origin'})); return; }
     const address = req.socket.remoteAddress ?? 'unknown'; const now = Date.now(); pruneRecent(now); const bucket = recent.get(address); if (!bucket || now - bucket.at >= RATE_WINDOW_MS) recent.set(address, {at:now,count:1}); else { bucket.count++; if (bucket.count > RATE_LIMIT) { res.writeHead(429, {'content-type':'application/json','retry-after':'60'}); res.end(JSON.stringify({error:'rate_limited'})); return; } }
     if (req.url === '/healthz' && req.method === 'GET') { if (!isLoopback(host) && !authorized(req)) { res.writeHead(401, {'www-authenticate':'Bearer'}); res.end(JSON.stringify({error:'unauthorized'})); return; } res.writeHead(200, {'content-type':'application/json'}); res.end(JSON.stringify({ok:true,readOnly:!(await adapter.backend.probe().catch(() => null))?.canSendMessage})); return; }
-    if (req.url !== '/mcp' || req.method !== 'POST') { res.writeHead(404, {'content-type':'application/json'}); res.end(JSON.stringify({error:'not_found'})); return; }
+    if (req.url !== '/mcp') { res.writeHead(404, {'content-type':'application/json'}); res.end(JSON.stringify({error:'not_found'})); return; }
     if (!authorized(req)) { res.writeHead(401, {'www-authenticate':'Bearer'}); res.end(JSON.stringify({error:'unauthorized'})); return; }
+    // The modern 2026-07-28 protocol uses GET to establish an SSE stream
+    // and POST to send messages; createMcpHandler handles both.
+    if (req.method === 'GET') {
+      try {
+        const headers = new Headers();
+        for (const [key, value] of Object.entries(req.headers)) {
+          if (value === undefined) continue;
+          if (Array.isArray(value)) { for (const item of value) headers.append(key, item); } else headers.append(key, value);
+        }
+        const response = await mcpHandler.fetch(new Request(`http://127.0.0.1:${port}/mcp`, { method: 'GET', headers }));
+        const responseHeaders: Record<string, string> = {};
+        response.headers.forEach((value, key) => { responseHeaders[key] = value; });
+        res.writeHead(response.status, responseHeaders);
+        if (response.body) {
+          for await (const chunk of response.body) {
+            if (!res.write(chunk)) await new Promise<void>((resolve) => res.once('drain', resolve));
+          }
+        }
+        res.end();
+      } catch {
+        if (!res.headersSent) res.writeHead(400, {'content-type':'application/json'}); res.end(JSON.stringify({error:'invalid_request'}));
+      }
+      return;
+    }
+    if (req.method !== 'POST') { res.writeHead(405, {'content-type':'application/json'}); res.end(JSON.stringify({error:'method_not_allowed'})); return; }
     let raw: string;
     try {
       raw = await rawBody(req);
@@ -109,13 +134,12 @@ export async function runHttp(): Promise<void> {
       }
     }
     try {
-      const url = new URL(req.url ?? '/mcp', 'http://127.0.0.1');
       const headers = new Headers();
       for (const [key, value] of Object.entries(req.headers)) {
         if (value === undefined) continue;
         if (Array.isArray(value)) { for (const item of value) headers.append(key, item); } else headers.append(key, value);
       }
-      const response = await mcpHandler.fetch(new Request(url, { method: 'POST', headers, body: raw }));
+      const response = await mcpHandler.fetch(new Request(`http://127.0.0.1:${port}/mcp`, { method: 'POST', headers, body: raw }));
       const responseHeaders: Record<string, string> = {};
       response.headers.forEach((value, key) => { responseHeaders[key] = value; });
       res.writeHead(response.status, responseHeaders);

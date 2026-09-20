@@ -80,7 +80,7 @@ export async function startFakeDesktop(options: FakeDesktopOptions = {}): Promis
   const droppedRoutes = new Set<string>();
 
   const now = (): number => Date.now();
-  const threads = new Map<string, Record<string, unknown>>([
+const threads = new Map<string, Record<string, unknown>>([
     [threadId, {
       id: threadId,
       projectId: projectPath,
@@ -89,6 +89,7 @@ export async function startFakeDesktop(options: FakeDesktopOptions = {}): Promis
       status: 'open',
       harnessId: 'codebuff',
       model: 'fixture-model',
+      reasoning: 'low',
       turnState: 'idle',
       lastTurnOutcome: 'closed',
       lastTurnFinishedAt: now() - 1000,
@@ -96,7 +97,7 @@ export async function startFakeDesktop(options: FakeDesktopOptions = {}): Promis
       createdAt: now() - 10_000,
       updatedAt: now(),
     }],
-  ]);
+]);
   const messages = new Map<string, unknown[]>([
     [threadId, [
       { role: 'user', parts: [{ type: 'text', text: 'do the thing' }], attachments: [{ path: '/tmp/spec.md', name: 'spec.md' }] },
@@ -247,7 +248,8 @@ export async function startFakeDesktop(options: FakeDesktopOptions = {}): Promis
         }
         if (method === 'POST' && suffix === '/effort') {
           if (dropAfterCommit('/effort')) return undefined;
-          return json(response, { ok: true, thread });
+          thread.reasoning = typeof body?.effort === 'string' ? body.effort : 'low';
+          return json(response, { ok: true, reasoning: thread.reasoning });
         }
         return json(response, { error: 'unknown action' }, 400);
       }

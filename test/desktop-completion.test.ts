@@ -98,6 +98,29 @@ test('desktop: idempotent control routes retry safely after an ambiguous drop', 
   }
 });
 
+test('desktop: /resume and /effort replay-safe after an ambiguous drop', async () => {
+  const desktop = await startFakeDesktop({ dropAfterCommitSuffixes: ['/resume', '/effort'] });
+  const restoreEnv = withEnv(desktop.url, desktop.launchId);
+  const backend = new DesktopBackend();
+  try {
+    const session = { id: 'bridge-1', backend: 'desktop' as const, backendSessionId: desktop.threadId, cwd: desktop.projectPath };
+    // /resume: first attempt commits then drops; retry is safe and idempotent.
+    await backend.resume(session);
+    const resumes = desktop.calls.filter((c) => c.method === 'POST' && c.path.endsWith('/resume')).length;
+    assert.equal(resumes, 2, `idempotent resume retried once (saw ${resumes})`);
+
+    // /effort: same story — setting effort twice has no extra side effect.
+    await backend.setReasoning(session, 'high');
+    const efforts = desktop.calls.filter((c) => c.method === 'POST' && c.path.endsWith('/effort')).length;
+    assert.equal(efforts, 2, `idempotent effort retried once (saw ${efforts})`);
+    assert.equal(desktop.threads.get(desktop.threadId)?.reasoning, 'high', 'reasoning applied exactly once');
+  } finally {
+    backend.dispose();
+    restoreEnv();
+    await desktop.close();
+  }
+});
+
 test('desktop: a real turn still completes with finish-timestamp proof', async () => {
   const desktop = await startFakeDesktop({ turnDelayMs: 30 });
   const restoreEnv = withEnv(desktop.url, desktop.launchId);

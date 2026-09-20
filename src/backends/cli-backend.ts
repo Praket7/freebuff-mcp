@@ -69,12 +69,12 @@ export class CliBackend implements FreebuffBackend {
       connection: 'cli_ready',
       authorization,
       liveProgress: 'unavailable',
-      canCreateSession: true,
-      canSendMessage: true,
-      canStop: true,
-      canResume: true,
-      canSetModel: true,
-      canSetReasoning: true,
+      canCreateSession: this.authVerified,
+      canSendMessage: this.authVerified,
+      canStop: this.authVerified,
+      canResume: this.authVerified,
+      canSetModel: this.authVerified,
+      canSetReasoning: this.authVerified,
       notes: [
         `Freebuff CLI found (${path.basename(cli)}); PTY fallback available.`,
         this.authVerified
