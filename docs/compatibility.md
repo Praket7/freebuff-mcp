@@ -1,20 +1,57 @@
 # Compatibility
 
-| Capability | Status in this build |
-| --- | --- |
-| Node.js runtime | Node 20 or newer |
-| MCP stdio | Implemented |
-| Desktop dynamic `/api/*` discovery | Readiness metadata, platform logs, and native listener fallback |
-| Projects, threads, visible messages | Implemented and live verified |
-| Safe project file reads | Implemented; shallow file listing and bounded reads |
-| Model, stop, resume writes | Enabled only after dynamic Desktop launch-ID verification; CLI writes use managed PTY |
-| Attachments | Not yet implemented |
-| Authenticated Streamable HTTP relay | Implemented, loopback by default |
-| Cloudflare deployment | Optional only for remote HTTP access; not required for local use |
-| CLI PTY and local chat history | Implemented; CLI writes require the managed PTY |
-| Live Freebuff Desktop write verification | `/healthz` launch-ID handshake; otherwise read-only |
-| Live Desktop progress | `/api/events` SSE with polling via `get_thread_progress` and bounded `watch_thread`; in-memory only |
-| Progress summaries | `get_thread_progress_summary` and `watch_active_threads`; user-facing phases and stale/error indicators |
-| Automatic Desktop readiness | Reads fresh port, launch ID, PID, and timestamp metadata; rejects stale records and retries live listener candidates |
-| Installer helper | `install` prints a current-path Codex entry; `install --write` appends without overwriting an existing entry |
-| OpenCode adapter | Not included; OpenCode model/session operations must be implemented by a separate adapter using its server API contract |
+Feature support by platform, client, and backend. All entries reflect tested behavior in CI (ubuntu/macos/windows × Node 20/22/24) unless marked otherwise.
+
+## Platforms
+
+| Capability | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| MCP v2 stdio | ✅ | ✅ | ✅ |
+| Desktop discovery (readiness/log/process) | readiness + log | + process env | + process env |
+| Desktop handoff file | ✅ | ✅ | ✅ |
+| Desktop writes (launch-ID health check) | ✅ | ✅ | ✅ |
+| SSE live progress | ✅ | ✅ | ✅ |
+| CLI PTY fallback (ConPTY/POSIX) | ✅ | ✅ | ✅ |
+| CLI cancellation + stuck-child cleanup | ✅ | ✅ | ✅ |
+| HTTP transport (loopback + bearer) | ✅ | ✅ | ✅ |
+| Codex installer | ✅ | ✅ | ✅ |
+| Claude Code installer | ✅ | ✅ | ✅ |
+
+## MCP clients
+
+| Feature | Codex | Claude Code | Notes |
+| --- | --- | --- | --- |
+| stdio server (`serve`) | ✅ | ✅ | Recommended default |
+| Stable tool catalog | ✅ | ✅ | Unavailable backends yield structured errors, not missing tools |
+| `run_turn` progress | ✅ (request progress) | ✅ (request progress) | Coalesced, request-scoped notifications |
+| Cancellation | ✅ | ✅ | `notifications/cancelled` aborts the backend |
+| Resources | ✅ | ✅ | Throttled update notifications |
+| `startup_timeout_sec` / `tool_timeout_sec` | ✅ via installer | n/a | Codex config.toml only |
+| `claude mcp add` / `.mcp.json` | n/a | ✅ via installer | user + project scope |
+
+## Backends
+
+| Feature | Desktop | CLI (PTY) | SDK |
+| --- | --- | --- | --- |
+| Read projects/threads/messages | ✅ | history only | Not enabled |
+| Writes (send/stop/resume/model/effort) | ✅ when authorized | ✅ | Not enabled |
+| Live progress | ✅ SSE | coarse PTY output events | Not enabled |
+| Structured events | ✅ | partial | Not enabled |
+
+The programmatic Codebuff/Freebuff SDK backend (`sdk`) is **not enabled**: the current upstream SDK requires an API key that normal Freebuff users do not have, and no supported local authenticated integration is exposed. Per the security rules, the bridge does not extract credentials to enable it. The adapter architecture keeps a slot for it (`FreebuffBackend.kind: 'sdk'`) should upstream expose a supported contract.
+
+## Protocol adapters
+
+| Adapter | Command | Status |
+| --- | --- | --- |
+| MCP v2 | `serve` | Stable, primary |
+| MCP v1 | `serve-v1` | Legacy compatibility |
+| HTTP (Streamable) | `serve-http` | Supported, local-first |
+| ACP v1 | `serve-acp` | Experimental |
+
+## Not supported
+
+- Remote HTTP without explicit `FREEBUFF_MCP_ALLOW_REMOTE=1` (and HTTPS in front).
+- Writing to a Desktop thread without its launch-ID health check passing.
+- Passing bridge-generated ids to Freebuff `--continue`.
+- Reasoning/thought content in tool output (dropped at the adapter layer).

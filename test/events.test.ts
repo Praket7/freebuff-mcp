@@ -13,6 +13,7 @@ test('normalizes, filters, redacts, and classifies progress events', () => {
   assert.equal(event?.kind, 'tool_start');
   assert.equal(event?.threadId, 'thread-1');
   assert.match(event?.raw ? JSON.stringify(event.raw) : '', /REDACTED/);
+  assert.doesNotMatch(`${event?.command} ${event?.text} ${event?.error}`, /secret/i);
   assert.equal(normalizeProgressEvent({ type:'completed' }), null);
   assert.equal(normalizeProgressEvent({ threadId:'bad/id', type:'x' }), null);
   assert.equal(normalizeProgressEvent({ threadId:'thread-1', type:'future_event' })?.kind, 'unknown');
@@ -31,6 +32,15 @@ test('stores bounded incremental progress and wakes waiters', async () => {
   assert.equal(snapshot.nextSequence, 2);
   assert.equal(snapshot.currentState, 'completed');
   assert.equal(snapshot.connected, true);
+});
+
+test('notifies resource subscribers when progress changes', () => {
+  const store = new ProgressStore(); const seen: string[] = [];
+  const unsubscribe = store.subscribe(threadId => seen.push(threadId));
+  store.append({ threadId:'thread-1', timestamp:new Date().toISOString(), kind:'turn_state', state:'running' });
+  unsubscribe();
+  store.append({ threadId:'thread-1', timestamp:new Date().toISOString(), kind:'completed', state:'completed' });
+  assert.deepEqual(seen, ['thread-1']);
 });
 
 test('event client sends launch ID and filters by thread through the store', async () => {

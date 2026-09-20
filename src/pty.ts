@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import * as pty from 'node-pty';
 import { assertSafeId } from './security.js';
 
@@ -41,11 +42,34 @@ export async function findLatestCliConversationId(cwd: string, minimumMtimeMs = 
   return candidates[0]?.id ?? null;
 }
 
+/**
+ * Cheap shape check for a Freebuff CLI conversation id. A syntactically valid
+ * id is a prerequisite (never a substitute) for cliConversationExists.
+ */
+export function verifyConversationIdShape(conversationId: string): boolean {
+  return /^[A-Za-z0-9._:-]{1,200}$/.test(conversationId) && !conversationId.startsWith('.') && !conversationId.includes('..');
+}
+
+export async function cliConversationExists(cwd: string, conversationId: string): Promise<boolean> {
+  const safe = assertSafeId(conversationId);
+  const key = process.env.FREEBUFF_PROJECT_KEY ?? `${path.basename(cwd)}--${(await import('node:crypto')).createHash('sha256').update(path.resolve(cwd)).digest('hex').slice(0, 12)}`;
+  const roots = [path.join(os.homedir(), '.config', 'manicode', 'projects', key, 'chats'), path.join(os.homedir(), '.config', 'manicode', 'projects', path.basename(cwd), 'chats')];
+  for (const chats of roots) {
+    try {
+      const entries = await fs.readdir(chats, { withFileTypes: true });
+      if (entries.some((entry) => entry.isDirectory() && entry.name === safe)) return true;
+    } catch { /* try the next root */ }
+  }
+  return false;
+}
+
 export class CliPtyManager {
   private sessions = new Map<string, { term: pty.IPty; cwd: string; startedAt: number; conversationId?: string; output: string; exited: boolean; exitCode?: number }>();
   async start(id: string, cwd: string, continueId?: string): Promise<CliSessionSnapshot> {
     const safeId = assertSafeId(id);
     const existing = this.sessions.get(safeId);
+    if (existing?.exited) { this.sessions.delete(safeId); }
+    if (this.sessions.size >= 16 && !existing) throw new Error('FREEBUFF_CLI_SESSION_LIMIT');
     if (existing) return { id: safeId, pid: existing.term.pid, output: existing.output, exited: existing.exited, exitCode: existing.exitCode };
     const file = await findFreebuffCli();
     if (!file) throw new Error('FREEBUFF_CLI_NOT_INSTALLED');
@@ -57,7 +81,7 @@ export class CliPtyManager {
     const state = { term, cwd, startedAt, conversationId: continueId, output: '', exited: false, exitCode: undefined as number | undefined };
     this.sessions.set(safeId, state);
     term.onData((data) => { state.output = (state.output + data).slice(-2_000_000); });
-    term.onExit(({ exitCode }) => { state.exited = true; state.exitCode = exitCode; });
+    term.onExit(({ exitCode }) => { state.exited = true; state.exitCode = exitCode; const timer = setTimeout(() => { if (this.sessions.get(safeId) === state) this.sessions.delete(safeId); }, 300_000); timer.unref?.(); });
     const deadline = Date.now() + 12_000;
     while (Date.now() < deadline && !/Enter a coding task or \/ for commands/i.test(state.output) && !/Not authenticated|Press ENTER to login/i.test(state.output)) await new Promise<void>((resolve) => setTimeout(resolve, 250));
     if (/Freebuff is already running/i.test(state.output) && process.env.FREEBUFF_CLI_TAKEOVER === '1') {
@@ -76,7 +100,7 @@ export class CliPtyManager {
     const state = this.sessions.get(assertSafeId(id));
     if (!state || state.exited) throw new Error('FREEBUFF_CLI_SESSION_EXITED');
     await new Promise<void>((resolve) => setTimeout(resolve, 300));
-    const clean = text.replace(/[\r\n]+/g, ' ');
+    const clean = text.replace(/[\u0000-\u001f\u007f\u001b]/g, ' ').replace(/[\r\n]+/g, ' ').replace(/\x1b\[201~/g, ' ');
     state.term.write('\x15');
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
     state.term.write(`\x1b[200~${clean}\x1b[201~`);
@@ -91,7 +115,37 @@ export class CliPtyManager {
     const state = this.sessions.get(assertSafeId(id));
     if (!state) throw new Error('FREEBUFF_CLI_SESSION_NOT_FOUND');
     state.term.write('\x1b');
+    state.term.write('\x03');
     return { id: assertSafeId(id), conversationId: state.conversationId, pid: state.term.pid, output: state.output, exited: state.exited, exitCode: state.exitCode };
+  }
+
+  /** Hard-terminate a stuck child process tree. */
+  kill(id: string): void {
+    const state = this.sessions.get(assertSafeId(id));
+    if (!state || state.exited) return;
+    try { state.term.kill(); } catch { /* already gone */ }
+    if (process.platform !== 'win32') {
+      try { process.kill(-state.term.pid, 'SIGKILL'); } catch { /* process group already gone */ }
+    }
+  }
+
+  listConversations(cwd: string): Promise<Array<{ id: string; firstPrompt?: string; messageCount?: number }>> {
+    return (async () => {
+      const key = process.env.FREEBUFF_PROJECT_KEY ?? `${path.basename(cwd)}--${createHash('sha256').update(path.resolve(cwd)).digest('hex').slice(0, 12)}`;
+      const roots = [path.join(os.homedir(), '.config', 'manicode', 'projects', key, 'chats'), path.join(os.homedir(), '.config', 'manicode', 'projects', path.basename(cwd), 'chats')];
+      const out: Array<{ id: string; firstPrompt?: string; messageCount?: number }> = [];
+      for (const chats of roots) {
+        try {
+          for (const entry of await fs.readdir(chats, { withFileTypes: true })) {
+            if (!entry.isDirectory() || !/^[A-Za-z0-9._:-]{1,200}$/.test(entry.name)) continue;
+            const dir = path.join(chats, entry.name);
+            const meta = JSON.parse(await fs.readFile(path.join(dir, 'chat-meta.json'), 'utf8').catch(() => '{}')) as { firstPrompt?: unknown; messageCount?: unknown };
+            out.push({ id: entry.name, ...(typeof meta.firstPrompt === 'string' ? { firstPrompt: meta.firstPrompt } : {}), ...(typeof meta.messageCount === 'number' ? { messageCount: meta.messageCount } : {}) });
+          }
+        } catch { /* try the next root */ }
+      }
+      return out;
+    })();
   }
   snapshot(id: string): CliSessionSnapshot { const state = this.sessions.get(assertSafeId(id)); if (!state) throw new Error('FREEBUFF_CLI_SESSION_NOT_FOUND'); return { id: assertSafeId(id), conversationId: state.conversationId, pid: state.term.pid, output: state.output, exited: state.exited, exitCode: state.exitCode }; }
   dispose(): void { for (const state of this.sessions.values()) { if (!state.exited) state.term.kill(); } this.sessions.clear(); }

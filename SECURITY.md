@@ -1,16 +1,34 @@
-# Security policy
+# Security
 
-Please report security issues privately to the repository maintainers. Do not include credentials, tokens, cookies, or private source code in an issue.
+## Trust model
 
-## Security model
+`freebuff-mcp` is a local bridge between your MCP client and your own Freebuff installation. It runs with your user's privileges on your machine.
 
-- Stdio is the default transport and stays on the local machine.
-- Optional HTTP binds to `127.0.0.1` by default.
-- Every `/mcp` request requires `Authorization: Bearer <FREEBUFF_MCP_TOKEN>`.
-- Non-loopback binding is refused unless `FREEBUFF_MCP_ALLOW_REMOTE=1`; when enabled, use a trusted HTTPS tunnel or private network.
-- `/healthz` is unauthenticated only for loopback health checks; remote health checks require the bearer token.
-- Desktop mutations require a dynamically discovered launch ID and successful `/healthz` verification. Otherwise mutation tools are not registered.
-- CLI writes use a bridge-owned PTY and do not take over an existing CLI process by default.
-- Project paths are confined to the configured root, unsafe identifiers are rejected, and credentials are never returned or logged.
+The bridge **does not**:
 
-This project has not undergone an independent security audit. Treat remote HTTP exposure as an advanced deployment and review the configuration before enabling it.
+- dump or scrape any process's memory (including Freebuff Desktop's)
+- attach debuggers to other processes
+- extract credentials from undocumented privileged storage
+- bypass Freebuff's permission checks or Electron security boundaries
+- expose your Freebuff auth token through tools, resources, or logs
+- bind to a non-loopback interface by default
+
+## How authorization works
+
+Desktop writes are gated on the Desktop's own launch-ID contract: the Desktop issues a short-lived launch id, and the bridge must present it (`x-freebuff-launch-id`) to a `/healthz` challenge that explicitly answers `{ ok: true }`. Without a passing challenge, every write path returns `FREEBUFF_DESKTOP_AUTH_REQUIRED` and the bridge stays read-only.
+
+The optional handoff file (`FREEBUFF_MCP_HANDOFF_FILE`) is written by the Desktop into the **current user's** config directory and contains only a loopback URL, a short-lived launch id, a PID, and an expiry. Before use the bridge validates format, version, loopback-ness, live PID, and expiry, then still challenges the launch id over HTTP. Possession of the file alone never grants writes.
+
+## Data handling
+
+- Secrets (Authorization headers, bearer tokens, access/refresh tokens, API keys, client secrets, private keys, cookies, session tokens, query-string tokens) are redacted at the adapter boundary before any event, message, or file content is returned to a client.
+- Hidden reasoning/ad content from Freebuff is dropped; visible tool activity (tool name, command, changed files) is preserved in redacted form.
+- Project file reads are confined to the configured project root, reject traversal, refuse protected files (`.env`, keys, credentials, …), reject binaries, and cap at 1 MB.
+- Identifiers are validated (`^[A-Za-z0-9._:-]{1,200}$`) before use.
+- The event store is in-memory, bounded (count/bytes/TTL), and never persisted.
+- Diagnostics (`doctor`) print at most the basename of the CLI path and never print launch ids, tokens, cookies, or full Authorization headers.
+- HTTP transport: loopback binding, constant-time bearer comparison, Origin validation, bounded request bodies, and rate limiting. Remote binding requires explicit opt-in; remote use requires trusted HTTPS/private networking.
+
+## Reporting
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and the project's GitHub issues. Please do not include secrets in bug reports; redacted doctor `--json` output is appreciated.

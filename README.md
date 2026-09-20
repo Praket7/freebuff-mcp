@@ -1,172 +1,118 @@
 # freebuff-mcp
 
-An MCP bridge for a locally installed and signed-in Freebuff CLI or Desktop installation. It gives an MCP client bounded access to Freebuff sessions, local CLI history, live CLI output, and safe project-file reads.
+A production MCP bridge for a locally installed, signed-in Freebuff Desktop or CLI installation. It gives MCP clients (Codex, Claude Code, and others) bounded access to Freebuff projects, threads, live turn progress, safe project-file reads, and full coding turns.
 
 ## Requirements
 
 - Windows, macOS, or Linux
 - Node.js 20 or newer
-- Freebuff CLI or Desktop installed and signed in
-- Codex CLI or another MCP-compatible client
+- Freebuff Desktop or the Freebuff CLI installed and signed in
 
-The bridge uses the Freebuff installation on the same computer. It does not share credentials or expose your chats to other users.
+The bridge runs entirely on your machine. It does not dump process memory, steal credentials, or expose your auth tokens. See SECURITY.md.
 
-## Install from npm
+## What it does
+
+- **Canonical sessions and turns.** Every interaction is a bridge session/turn with its own identity, mapped explicitly to the real Freebuff thread or conversation id. Bridge ids are never passed to Freebuff as conversation ids.
+- **Deterministic backend selection.** 1) Desktop with verified write authorization, 2) Desktop read-only, 3) Freebuff CLI via a managed PTY (fallback), 4) a structured unavailable state. A port being open is never enough: `/api/projects` must answer correctly and the launch-ID health check must pass for writes.
+- **`run_turn` with live progress.** A first-class long-running MCP tool that streams coalesced, request-scoped progress notifications and honors MCP cancellation (`notifications/cancelled` → backend abort).
+- **Resilient Desktop connection.** Handoff-file-first discovery (no broad port scanning in the normal path), SSE with `Last-Event-ID`, `retry:`, bounded backoff with jitter, and recovery from 401/403/404, 5xx, ECONNREFUSED, timeouts, and Desktop restarts/port rotation.
+- **Bounded event store.** Per-thread sequences and cursors, count/byte/TTL retention, per-thread staleness, terminal states clear running state. Events past 100 are readable with `afterSequence`.
+- **Accurate phases.** `read_files`/`code_search` → reading files; `change_file`/`apply_patch` → editing files; terminal commands → running a command; only actual test commands (`pnpm test`, `pytest`, `cargo test`, …) are classified as running tests.
+
+## Install
 
 ```bash
 npm install --global freebuff-mcp
 freebuff-mcp doctor
 ```
 
-The package includes its compiled runtime files. No local build is required for npm users.
+`doctor` prints (or `--json` emits) package version, platform, selected backend, Desktop detection/authorization, event-stream state, CLI detection, PTY/node-pty version, handoff status, capabilities, and recent safe diagnostic errors.
 
-## Configure Codex for Desktop and CLI discovery
-
-The bridge probes the locally running Freebuff Desktop first, then falls back to the CLI if Desktop is unavailable. Do not set `FREEBUFF_MCP_CLI_MODE` in this setup:
-
-```toml
-[mcp_servers.freebuff]
-command = 'freebuff-mcp'
-args = ['serve']
-enabled = true
-
-[mcp_servers.freebuff.env]
-FREEBUFF_PROJECT_ROOT = '/Users/YOUR_NAME/Desktop/freebuff-work'
-# Optional: use this when the Freebuff CLI is not on PATH.
-# FREEBUFF_CLI_PATH = '/Users/YOUR_NAME/.config/manicode/freebuff'
-```
-
-Desktop discovery reads dynamic port/launch metadata when Freebuff exposes a readiness file, then verifies the launch ID through `/healthz`. If that handshake is unavailable, it stays read-only. Use the explicit CLI configuration below when you need bridge-owned prompt injection.
-
-## Configure Codex for CLI-only mode
-
-Add this server to `~/.codex/config.toml` (`%USERPROFILE%\.codex\config.toml` on Windows):
-
-```toml
-[mcp_servers.freebuff]
-command = 'freebuff-mcp'
-args = ['serve']
-enabled = true
-
-[mcp_servers.freebuff.env]
-FREEBUFF_MCP_CLI_MODE = 'pty'
-FREEBUFF_PROJECT_ROOT = 'C:\Users\YOUR_NAME\Documents\FreeBuff WORK'
-# Set this when two project roots share the same basename.
-# FREEBUFF_PROJECT_KEY = 'FreeBuff WORK'
-```
-
-On macOS or Linux, use the same block and set the root to a Unix path such as `/Users/YOUR_NAME/Desktop/freebuff-work`.
-
-Restart Codex and ask it to call `freebuff_status`, then `list_threads`.
-
-Run `freebuff-mcp install` to print a ready-to-paste Desktop-plus-CLI configuration using the current executable, or `freebuff-mcp install --write` to append it to `%USERPROFILE%\\.codex\\config.toml` (or `~/.codex/config.toml`). The write mode refuses to overwrite an existing `freebuff` entry.
-
-CLI mode can start a managed Freebuff session, inject prompts, monitor live output, discover the local conversation ID, resume persisted CLI chats, read visible history, list safe project files, and read individual project files. Reasoning changes are supported through Freebuff slash commands. Model changes require Freebuff's interactive new-session model picker.
-
-If Desktop discovery is configured with `FREEBUFF_ORCHESTRATOR_URL`, Desktop remains the selected runtime unless `FREEBUFF_MCP_CLI_MODE = 'pty'` is set in the server's environment. For a CLI installed outside PATH, set `FREEBUFF_CLI_PATH` to its absolute executable path (for example `/Users/YOUR_NAME/.config/manicode/freebuff`). `freebuff_status` will identify which runtime was selected.
-
-On macOS, a `posix_spawnp failed` error is emitted with the executable and working directory. Verify the CLI is executable, its interpreter exists, and the native `node-pty` binary matches the Node architecture. Repeated failures after many PTY launches can indicate the known node-pty macOS pseudo-terminal descriptor leak; restart the bridge and update node-pty when a fixed stable release is available.
-
-### Live Desktop progress
-
-When Desktop is discovered, the bridge subscribes to its read-only `/api/events` stream. Use `get_thread_progress` with a thread ID to poll bounded, in-memory progress events. Pass `afterSequence` from the previous response for incremental reads. `watch_thread` provides bounded long-polling for up to 30 seconds. These views can show turn state, assistant updates, tools, command summaries, file changes, and completion/failure while a task is running. `get_thread` remains the saved snapshot and may include a `live` summary; event history is intentionally not persisted. CLI mode reports Desktop live events as unavailable and continues to expose PTY output.
-
-For a simpler view, call `get_thread_progress_summary`. It reports the current phase (Planning, Reading files, Running tests, Editing files, Reviewing changes, Waiting for input, Completed, or Failed), latest meaningful update, active tool/command, changed files, last error, seconds since the last event, and whether the stream is stale. `watch_active_threads` returns the latest summary for every active Desktop thread. Detailed reasoning deltas are omitted by default.
-
-## Run directly with npm or npx
-
-Install the published package:
+## Configure Codex
 
 ```bash
-npm install --global freebuff-mcp
+freebuff-mcp install codex          # print config
+freebuff-mcp install codex --write  # append to ~/.codex/config.toml (refuses to overwrite an existing entry)
 ```
 
-Or install the latest GitHub checkout. The repository includes compiled `dist/src` files, so this does not require a local TypeScript build:
-
-```bash
-npm install --global github:Praket7/freebuff-mcp
-```
-
-Then verify the selected runtime:
-
-```bash
-freebuff-mcp doctor
-```
-
-The same server can be configured without a global install:
-
-```toml
-[mcp_servers.freebuff]
-command = 'npx'
-args = ['-y', 'freebuff-mcp@latest', 'serve']
-enabled = true
-
-[mcp_servers.freebuff.env]
-FREEBUFF_PROJECT_ROOT = 'C:\Users\YOUR_NAME\Documents\FreeBuff WORK'
-```
-
-## Build from GitHub
-
-For development or a local source build, build it from GitHub:
-
-```bash
-git clone https://github.com/Praket7/freebuff-mcp.git
-cd freebuff-mcp
-pnpm install
-pnpm build
-```
-
-Then point Codex at `dist/src/cli.js`:
+Generated entry (note `tool_timeout_sec` — long coding turns exceed Codex's default tool timeout):
 
 ```toml
 [mcp_servers.freebuff]
 command = 'node'
-args = ['C:\path\to\freebuff-mcp\dist\src\cli.js', 'serve']
+args = ['/path/to/freebuff-mcp/dist/src/cli.js', 'serve']
+startup_timeout_sec = 20
+tool_timeout_sec = 3600
 enabled = true
-
-[mcp_servers.freebuff.env]
-FREEBUFF_PROJECT_ROOT = 'C:\Users\YOUR_NAME\Documents\FreeBuff WORK'
 ```
 
-## Optional HTTP transport
-
-You do not need HTTP or Cloudflare for local Codex use. Stdio is the safer default. Use HTTP only when another MCP client must reach this bridge.
+## Configure Claude Code
 
 ```bash
-$env:FREEBUFF_MCP_TOKEN = '<long-random-value>' # PowerShell
-freebuff-mcp serve-http
+freebuff-mcp install claude            # print instructions
+freebuff-mcp install claude --write    # merge into ~/.claude.json (user scope)
+freebuff-mcp install claude --write --project   # write ./.mcp.json (project scope)
 ```
 
-On macOS/Linux, use `export FREEBUFF_MCP_TOKEN='<long-random-value>'` before starting it. It listens on `127.0.0.1:8788` by default, and `/mcp` always requires `Authorization: Bearer <token>`. Non-loopback binding is refused unless `FREEBUFF_MCP_ALLOW_REMOTE=1`; if enabled, use a trusted HTTPS tunnel or private VPN and never expose the port directly to the Internet.
-
-### Cloudflare is optional
-
-Cloudflare is only one possible HTTPS tunnel for remote access. It is not required for local use, npm publication, GitHub, or Desktop discovery. Use it only if you specifically want a Cloudflare-managed hostname for the authenticated HTTP bridge.
-
-## Development and verification
+The writer merges into the `mcpServers` object, preserves unrelated keys, and refuses to clobber a differing existing `freebuff` entry. Equivalent manual command:
 
 ```bash
-pnpm install
-pnpm typecheck
+claude mcp add --scope user freebuff -- node /path/to/freebuff-mcp/dist/src/cli.js serve
+```
+
+## Tools (MCP v2, `freebuff-mcp serve`)
+
+The catalog is stable: tools are always registered and return structured actionable errors (`{ ok:false, code, message, recovery }`) when Freebuff is unavailable — availability never depends on the client processing dynamic tool-list updates.
+
+- Status/discovery: `freebuff_status`, `list_projects`, `list_threads`, `get_thread`, `get_thread_messages`, `get_active_work`, `search_history`, `list_models`
+- Progress: `get_turn`, `watch_turn`, `get_thread_progress`, `watch_thread`, `watch_active_threads`, `get_changed_files`
+- Sessions/turns: `start_thread`, `send_message` (async, returns `turnId`), `run_turn` (synchronous with progress + cancellation), `stop_turn`, `stop_thread`, `resume_thread`, `set_model`, `set_reasoning`
+- Files/attachments: `list_project_files`, `read_project_file`, `list_thread_attachments`
+
+### `run_turn` and cancellation
+
+`run_turn` keeps the MCP request open for the whole Freebuff turn, emits request-scoped progress notifications (coalesced, human-meaningful — never token spam), aborts the backend when the MCP client cancels the request, and returns structured output (`turnId`, `state`, `result`/`error`) when the turn is terminal.
+
+### Resources
+
+`freebuff://projects`, project threads, thread messages, and per-thread progress resources are available. Resource updates are throttled (max one per thread per 2 s) and are supplementary to progress tools.
+
+## ACP (experimental)
+
+`freebuff-mcp serve-acp` implements the ACP v1 wire contract on the canonical bridge: ACP session ids map to real Freebuff identities, prompts complete only at terminal turn state, progress uses an advancing cursor, assistant text comes only from structured deltas, and infrastructure errors are reported as errors (never "refusal"). Only implemented capabilities are advertised.
+
+## HTTP transport (optional, local-first)
+
+Stdio is the safer default. `freebuff-mcp serve-http` binds `127.0.0.1:8788`, requires `Authorization: Bearer $FREEBUFF_MCP_TOKEN` on `/mcp`, validates Origin, bounds request bodies, and refuses non-loopback binding unless `FREEBUFF_MCP_ALLOW_REMOTE=1`. Remote use requires trusted HTTPS/private networking.
+
+## CLI fallback mode
+
+Set `FREEBUFF_MCP_CLI_MODE=pty` to force the CLI backend. New-session creation is serialized per project so conversation identity is never misattributed; `--continue` only receives conversation ids verified to exist in the CLI chat store; cancellation is verified and stuck children are cleaned up. Readiness relies on multiple signals, and UI scraping stays isolated here as fallback behavior.
+
+## Environment reference
+
+| Variable | Purpose |
+| --- | --- |
+| `FREEBUFF_PROJECT_ROOT` | Project root for CLI-mode sessions |
+| `FREEBUFF_MCP_CLI_MODE=pty` | Force the CLI PTY backend |
+| `FREEBUFF_ORCHESTRATOR_URL` | Explicit Desktop URL (skips discovery) |
+| `FREEBUFF_MCP_HANDOFF_FILE` | Explicit Desktop handoff file path |
+| `FREEBUFF_CLI_PATH` | Explicit Freebuff CLI executable path |
+| `FREEBUFF_MCP_TOKEN` | Bearer token for `serve-http` |
+
+## Development
+
+```bash
+pnpm install --frozen-lockfile
+pnpm typecheck        # src
+pnpm typecheck:test   # src + tests
 pnpm test
 pnpm build
 pnpm pack:check
 ```
 
-The bridge rejects unsafe identifiers and paths, redacts credential-like fields, and never returns Freebuff credentials.
+The suite (80+ tests) covers the event store (cursors past 100 events, retention, per-thread staleness), SSE parsing/reconnect/Last-Event-ID/retry, handoff validation matrix, Desktop restart recovery, session/turn lifecycle and cancellation, phase classification, redaction classes, installers on existing/missing configs, and MCP integration tests that drive the real server through the MCP SDK client (tools/list, run_turn, cancellation survival).
 
-## User workflow
+## Security
 
-Install the package and run `freebuff-mcp doctor` first. The result tells you which runtime is selected and whether live progress is connected.
-
-Use `freebuff-mcp install` to print a current Codex setup. Use `freebuff-mcp install --write` when you want the tool to add the setup for you. Restart Codex after changing the file.
-
-Start with `freebuff_status`, then use `list_projects`, `list_threads`, and `search_history`. Use `get_thread_progress_summary` for a readable progress view and `watch_active_threads` when several tasks are running.
-
-The bridge reports read only Desktop access separately from verified Desktop writes. Unsupported write tools are not registered in read only mode. CLI mode remains available as an explicit choice through `FREEBUFF_MCP_CLI_MODE = 'pty'`.
-
-Progress reconnects automatically and resumes from sequence numbers supplied by the client. The event window is bounded and sensitive reasoning fragments are omitted by default.
-
-For remote HTTP use, create a long random `FREEBUFF_MCP_TOKEN`, keep the host on loopback unless a trusted private network is used, and place HTTPS and access control in front of any remote route. Cloudflare is optional and is not part of local setup.
-
-This package does not contain an OpenCode adapter. OpenCode integrations must send model selections as `{ providerID, modelID }` and use provider-specific variants; `low`/`high` are not agent names. OpenCode session model/reasoning mutation should not be exposed unless the adapter implements the corresponding supported server operation. Configure and authenticate OpenCode separately with its own CLI/server tools.
+The bridge never scrapes process memory, attaches debuggers, dumps credentials, or bypasses Freebuff permission boundaries. Desktop writes require the Desktop's own launch-ID health check; the handoff file contains only a loopback URL and a short-lived launch id, lives in the current user's config directory, and is validated (version, loopback, live PID, expiry) before use. See SECURITY.md and PRIVACY.md.

@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+Production rebuild around one canonical session/turn/event lifecycle shared by every adapter.
+
+### Architecture
+
+- Add the canonical bridge layer (`src/bridge/`): `SessionManager`, `TurnManager`, bounded `EventStore`, and shared types/error codes. Bridge ids are always distinct from real Freebuff identities, and bridge-generated ids are never passed to Freebuff as conversation ids.
+- Add backend adapters (`src/backends/`): `DesktopBackend` (structured HTTP + SSE) and `CliBackend` (PTY fallback) behind one `FreebuffBackend` contract with deterministic selection (CLI mode → authorized Desktop → read-only Desktop → CLI → structured unavailable).
+- Add resilient Desktop support (`src/desktop/`): validated handoff files, ordered/cached discovery that no longer scans every localhost listener in the normal path, and an SSE client with `Last-Event-ID`, `retry:`, bounded jittered backoff, connection timeouts, and buffer caps.
+
+### MCP v2
+
+- Rewrite the server on the canonical bridge with a stable guarded tool catalog: unavailable Freebuff now yields structured actionable errors (`{ ok:false, code, message, recovery }`) instead of disappearing tools.
+- Add `run_turn` with request-scoped, coalesced progress notifications and native MCP cancellation propagation to the backend; add `start_thread`, `send_message` (async with `turnId`), `get_turn`, `watch_turn`, `stop_turn`, and `get_changed_files`.
+- Throttle resource update notifications (max one per thread per 2 s).
+
+### ACP (experimental)
+
+- Map ACP sessions to real backend identities, wait for terminal turn state (not submission return), advance the event cursor past 100 events, emit each assistant delta exactly once, advertise only implemented capabilities, and report infrastructure failures as errors instead of model refusals.
+
+### Reliability & correctness
+
+- Desktop rediscovery on 401/403/404, 5xx, ECONNREFUSED, timeouts, and port rotation with bounded retries.
+- `liveProgress: connected` now reflects only the event stream's own health.
+- Per-thread event staleness and cursors; terminal turn states clear running state; retention bounded by count, bytes, and TTL.
+- Progress phases are classified structurally (`read_files`→reading, `apply_patch`→editing, terminal commands→running a command) and only actual test commands are labeled `running_tests`.
+- CLI PTY: serialize new-session creation per project, verify conversation ids before `--continue`, verify cancellation and clean up stuck children, and send Ctrl+C with Escape on stop.
+- Expand secret redaction (authorization/bearer, access/refresh tokens, API keys, client secrets, private keys, cookies, session tokens, query-string tokens) and keep visible tool activity in `sanitizeFreebuff` while dropping reasoning and ads.
+
+### Installers, CLI & CI
+
+- Split installation into `src/install/{codex,claude,common}.ts`; add `install claude [--write] [--project]` (merges safely into `~/.claude.json` or `./.mcp.json`) and set Codex `tool_timeout_sec = 3600` for long turns; `install` still defaults to Codex.
+- Rewrite the CLI: full usage text, `doctor --json` with structured diagnostics and nonzero exit when nothing is detected, centralized `version` from package.json.
+- Add `tsconfig.test.json` and `typecheck:test` so tests are typechecked; CI runs it on every matrix job and performs a packed-tarball smoke test (install, version, doctor, installers).
+
+### Packaging
+
+- Centralize the package version; the shipped `dist` matches `package.json` (0.2.0).
+
+## 0.1.17
+
+- Restore full MCP v2 tool parity and structured results.
+- Stream ACP progress, map ACP sessions to backing CLI identities, and stop backing work on cancellation.
+- Emit MCP resource updates when Desktop progress changes.
+- Fix CI workflow YAML parsing.
+
+## 0.1.16
+
+- Add MCP v2 stdio serving with structured tool results and Freebuff resources.
+- Add `serve-acp`, an ACP session/prompt adapter with live session updates and cancellation.
+- Keep the v1 stdio server available as `serve-v1` during the migration.
+
+## 0.1.14
+
+- Harden project-file reads with sensitive-name blocking, text-only validation, redaction, and a 1 MB limit.
+- Redact normalized live-event fields, fix progress staleness, and close the progress lost-wakeup race.
+- Bound and clean up CLI PTY sessions and neutralize terminal control input.
+- Add granular hybrid mutation capability registration and use the safer node-pty beta.14 Windows baseline.
+
 ## 0.1.11
 
 - Update `node-pty` to `1.2.0-beta.15`, which includes the macOS `spawn-helper` packaging fix for `posix_spawnp failed`.
@@ -63,3 +122,7 @@ Expanded setup and compatibility guidance.
 # 0.1.9
 
 Removed the accidental Cursor specific integration.
+# 0.1.17
+
+- Restore full MCP v2 tool parity, including writes, progress, file, history, and attachment operations.
+- Fix CI workflow YAML parsing and clarify the generated legacy/CLI configuration entries.

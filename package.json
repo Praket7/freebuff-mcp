@@ -1,6 +1,6 @@
 {
   "name": "freebuff-mcp",
-  "version": "0.1.12",
+  "version": "0.2.0",
   "description": "A secure MCP bridge for locally installed Freebuff Desktop and CLI sessions.",
   "keywords": [
     "mcp",
@@ -36,18 +36,22 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepare": "npm run build",
     "prepack": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --test --import tsx test/**/*.test.ts",
+    "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
+    "test": "node --test --import tsx \"test/**/*.test.ts\" \"test/integration/**/*.test.ts\"",
     "pack:check": "pnpm build && pnpm pack --pack-destination work"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "1.4.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "node-pty": "1.2.0-beta.15",
-    "zod": "^4.1.5"
+    "@modelcontextprotocol/server": "2.0.0",
+    "node-pty": "1.2.0-beta.14",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
