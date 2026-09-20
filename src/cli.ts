@@ -5,10 +5,10 @@ import { runAcp } from './acp.js';
 import { installCodex } from './install/codex.js';
 import { installClaude } from './install/claude.js';
 import { findFreebuffCli } from './pty.js';
-import { discoverDesktop } from './desktop/discovery.js';
 import { DesktopBackend } from './backends/desktop-backend.js';
 import { CliBackend } from './backends/cli-backend.js';
-import { nodePtyVersion } from './diagnostics.js';import { VERSION } from './version.js';
+import { nodePtyVersion } from './diagnostics.js';
+import { VERSION } from './version.js';
 
 const USAGE = `freebuff-mcp — MCP bridge for locally installed Freebuff Desktop and CLI
 
@@ -38,7 +38,7 @@ interface DoctorReport {
   arch: string;
   backend: { kind: string; connection: string; authorization: string; liveProgress: string; notes: string[] };
   cli: { installed: boolean; pathBasename?: string };
-  desktop: { detected: boolean; authorized: boolean; apiUrlCompatible: boolean; eventStreamState: string };
+  desktop: { detected: boolean; authorized: boolean; apiUrlCompatible: boolean; eventStreamState: string; lastEventAt?: string };
   capabilities: Record<string, boolean>;
   projectRoot: string;
   pty: { available: boolean; nodePtyVersion: string | null };
@@ -55,16 +55,29 @@ async function collectDoctor(): Promise<DoctorReport> {
   let desktopAuthorized = false;
   let desktopApiCompatible = false;
   let eventStreamState = 'unavailable';
+  let lastEventAt: string | undefined;
   let handoffReport: DoctorReport['handoff'];
   const backend: DoctorReport['backend'] = { kind: 'none', connection: 'unavailable', authorization: 'none', liveProgress: 'unavailable', notes: [] };
 
   try {
     const desktop = new DesktopBackend();
-    const caps = await desktop.probe();
+    let caps = await desktop.probe();
+    // The live event stream connects asynchronously after the Desktop link is
+    // established. Doctor is a diagnostic, so it waits a bounded moment for the
+    // stream to prove itself instead of reporting a misleading first-sample
+    // "stale". It never reports "connected" without the stream actually working.
+    if (caps.connection === 'connected_writable' || caps.connection === 'connected_read_only') {
+      const deadline = Date.now() + 3_000;
+      while (caps.liveProgress !== 'connected' && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        caps = await desktop.probe();
+      }
+    }
     desktopDetected = caps.connection === 'connected_writable' || caps.connection === 'connected_read_only';
     desktopAuthorized = caps.authorization === 'write_authorized';
     desktopApiCompatible = desktopDetected;
     eventStreamState = caps.liveProgress;
+    lastEventAt = caps.lastEventAt;
     backend.kind = 'desktop';
     backend.connection = caps.connection;
     backend.authorization = caps.authorization;
@@ -109,7 +122,7 @@ async function collectDoctor(): Promise<DoctorReport> {
     arch: process.arch,
     backend: { ...backend, notes: backend.notes.filter(Boolean) },
     cli: { installed: Boolean(cliPath), ...(cliPath ? { pathBasename: cliPath.split(/[\\/]/).pop() } : {}) },
-    desktop: { detected: desktopDetected, authorized: desktopAuthorized, apiUrlCompatible: desktopApiCompatible, eventStreamState },
+    desktop: { detected: desktopDetected, authorized: desktopAuthorized, apiUrlCompatible: desktopApiCompatible, eventStreamState, ...(lastEventAt ? { lastEventAt } : {}) },
     capabilities: {
       read: desktopDetected || Boolean(cliPath),
       write: desktopAuthorized || Boolean(cliPath),
@@ -155,7 +168,7 @@ async function main(): Promise<void> {
         console.log(`freebuff-mcp ${report.version}`);
         console.log(`Node ${report.node} on ${report.platform}/${report.arch}`);
         console.log(`Backend: ${report.backend.kind} (${report.backend.connection}), authorization: ${report.backend.authorization}, live progress: ${report.backend.liveProgress}`);
-        console.log(`Desktop detected: ${report.desktop.detected}, authorized: ${report.desktop.authorized}, event stream: ${report.desktop.eventStreamState}`);
+        console.log(`Desktop detected: ${report.desktop.detected}, authorized: ${report.desktop.authorized}, event stream: ${report.desktop.eventStreamState}${report.desktop.lastEventAt ? `, last event: ${report.desktop.lastEventAt}` : ''}`);
         console.log(`Freebuff CLI: ${report.cli.installed ? `installed (${report.cli.pathBasename})` : 'not found'}`);
         console.log(`PTY: ${report.pty.available ? 'available' : 'unavailable'}${report.pty.nodePtyVersion ? `, node-pty ${report.pty.nodePtyVersion}` : ''}`);
         console.log(`Project root: ${report.projectRoot}`);

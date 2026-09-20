@@ -6,7 +6,7 @@ import { SessionManager } from './bridge/session-manager.js';
 import { TurnManager } from './bridge/turn-manager.js';
 import { BridgeError, ErrorCodes, toErrorShape, BackendSession } from './bridge/types.js';
 import { Json } from './types.js';
-import { assertSafeId } from './security.js';
+import { assertSafeId, redact } from './security.js';
 import { VERSION } from './version.js';
 
 const json = (value: unknown): Json => value as Json;
@@ -68,6 +68,23 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
   }));
   read('get_thread_progress', 'Read bounded live thread progress.', { threadId: id, afterSequence: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(100).optional() }, (args) => shapeError(async () => adapter.sessions.events.progress(assertSafeId(args.threadId), args.afterSequence ?? 0, args.limit ?? 50)));
   read('watch_thread', 'Wait up to 30 seconds for live thread progress.', { threadId: id, afterSequence: z.number().int().nonnegative().optional(), timeoutMs: z.number().int().min(0).max(30000).optional(), limit: z.number().int().min(1).max(100).optional() }, (args) => shapeError(() => adapter.sessions.events.wait(assertSafeId(args.threadId), args.afterSequence ?? 0, args.timeoutMs ?? 30_000, args.limit ?? 50)));
+  read('get_thread_progress_summary', 'Return a compact user-facing live progress summary without raw event detail.', { threadId: id }, (args) => shapeError(async () => {
+    const snapshot = adapter.sessions.events.progress(assertSafeId(args.threadId), 0, 1);
+    return {
+      ok: true,
+      threadId: snapshot.threadId,
+      state: snapshot.currentState,
+      turnState: snapshot.turnState,
+      phase: snapshot.phase,
+      connected: snapshot.connected,
+      stale: snapshot.stale,
+      latestEventAt: snapshot.latestEventAt,
+      activeTool: snapshot.activeTool,
+      filesChanged: snapshot.filesChanged,
+      secondsSinceLastEvent: snapshot.secondsSinceLastEvent,
+      lastError: snapshot.lastError,
+    };
+  }));
   read('watch_turn', 'Wait up to 30 seconds for canonical turn progress.', { turnId: id, timeoutMs: z.number().int().min(0).max(30000).optional(), afterSequence: z.number().int().nonnegative().optional() }, (args) => shapeError(() => adapter.turns.waitForTurn(assertSafeId(args.turnId), args.timeoutMs ?? 30_000, args.afterSequence ?? 0)));
   read('watch_active_threads', 'Read compact progress summaries for active threads.', {}, () => shapeError(async () => adapter.sessions.events.activeThreads().map((threadId) => adapter.sessions.events.progress(threadId, 0, 1))));
   read('list_project_files', 'List safe files in a project.', { projectId: id, relative: z.string().optional() }, (args) => shapeError(async () => { const caps = await adapter.backend.probe(); return caps.backend === 'cli' ? [] : (adapter.backend.desktop as unknown as { listFiles(root: string, relative?: string): Promise<string[]> }).listFiles(args.projectId, args.relative); }));
@@ -176,6 +193,29 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
   read('get_changed_files', 'List files changed during the most recent events for a thread.', { threadId: id }, (args) => shapeError(async () => {
     const snapshot = adapter.sessions.events.progress(assertSafeId(args.threadId), 0, 100);
     return { ok: true, threadId: args.threadId, files: snapshot.filesChanged ?? [] };
+  }));
+  read('get_diff', 'Return the changed files for a thread plus any diff text the Desktop exposes.', { threadId: id }, (args) => shapeError(async () => {
+    const threadId = assertSafeId(args.threadId);
+    const snapshot = adapter.sessions.events.progress(threadId, 0, 100);
+    const files = snapshot.filesChanged ?? [];
+    // The changed-file list is always available from live events. Diff text is
+    // only reported when this Desktop build exposes it on the thread payload;
+    // the bridge never fabricates a diff.
+    let diff: string | undefined;
+    try {
+      const thread = await adapter.backend.getThread(threadId);
+      const record = thread && typeof thread === 'object' && !Array.isArray(thread) ? thread as Record<string, unknown> : undefined;
+      const candidate = record?.diff ?? record?.patch ?? record?.changes;
+      if (typeof candidate === 'string' && candidate.trim()) diff = String(redact(candidate)).slice(0, 100_000);
+    } catch { /* a live-only thread may not be readable through the HTTP API */ }
+    return {
+      ok: true,
+      threadId,
+      files,
+      ...(diff !== undefined ? { diff } : {}),
+      diffAvailable: diff !== undefined,
+      note: diff === undefined ? 'This Desktop build does not expose diff text; the changed-file list comes from live events.' : 'Diff text was truncated to 100000 characters.',
+    };
   }));
 
   // --- Resources (supplementary; throttled updates) ---

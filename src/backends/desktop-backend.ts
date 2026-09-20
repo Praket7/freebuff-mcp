@@ -159,6 +159,7 @@ export class DesktopBackend implements FreebuffBackend {
       connection: writable ? 'connected_writable' : 'connected_read_only',
       authorization: writable ? 'write_authorized' : this.connection.launchId ? 'read_only' : 'none',
       liveProgress: this.sseConnected ? (streamHealthy || this.lastEventAt !== undefined ? 'connected' : 'connected') : started ? 'stale' : 'unavailable',
+      ...(this.lastEventAt !== undefined ? { lastEventAt: new Date(this.lastEventAt).toISOString() } : {}),
       canCreateSession: true,
       canSendMessage: writable,
       canStop: writable,

@@ -6,6 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { createServer } from '../src/mcp.js';
 
+const BASE = 'http://127.0.0.1:55354';
+
 test('Desktop runtime probes /api/projects and never infers write authorization from an env var', async () => {
   const previousFetch = globalThis.fetch;
   const previousLaunch = process.env.FREEBUFF_LAUNCH_ID;
@@ -15,12 +17,13 @@ test('Desktop runtime probes /api/projects and never infers write authorization 
     if (url.endsWith('/api/projects')) return new Response(JSON.stringify({ projects: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
     throw new Error(`unexpected ${url}`);
   };
+  const runtime = new DesktopOrchestratorRuntime(BASE);
   try {
-    const runtime = new DesktopOrchestratorRuntime('http://127.0.0.1:55354');
     const caps = await runtime.capabilities();
     assert.equal(caps.orchestrator, true);
     assert.equal(caps.readOnly, true);
   } finally {
+    runtime.dispose();
     globalThis.fetch = previousFetch;
     if (previousLaunch === undefined) delete process.env.FREEBUFF_LAUNCH_ID; else process.env.FREEBUFF_LAUNCH_ID = previousLaunch;
   }
@@ -37,12 +40,13 @@ test('Desktop runtime enables writes only after /healthz verifies the dynamic la
     if (url.endsWith('/api/projects')) return new Response(JSON.stringify({ projects: [] }), { status:200 });
     throw new Error(`unexpected ${url}`);
   };
+  const runtime = new DesktopOrchestratorRuntime(BASE);
   try {
-    const runtime = new DesktopOrchestratorRuntime('http://127.0.0.1:55354');
     const caps = await runtime.capabilities();
     assert.equal(caps.readOnly, false);
     assert.deepEqual(seen, ['dynamic-launch-id']);
   } finally {
+    runtime.dispose();
     globalThis.fetch = previousFetch;
     if (previousLaunch === undefined) delete process.env.FREEBUFF_LAUNCH_ID; else process.env.FREEBUFF_LAUNCH_ID = previousLaunch;
   }
@@ -63,11 +67,11 @@ test('Desktop runtime rejects malformed project and thread payloads', async () =
     if (url.endsWith('/api/thread/thread-1')) return new Response(JSON.stringify(['not-a-thread']), { status: 200 });
     throw new Error(`unexpected ${url}`);
   };
+  const runtime = new DesktopOrchestratorRuntime(BASE);
   try {
-    const runtime = new DesktopOrchestratorRuntime('http://127.0.0.1:55354');
     assert.deepEqual(await runtime.listProjects(), [{ id:'C:/valid', path:'C:/valid', name:'valid', metadata:{path:'C:/valid'} }]);
     await assert.rejects(() => runtime.getThread('thread-1'), /Invalid Freebuff thread response/);
-  } finally { globalThis.fetch = previousFetch; }
+  } finally { runtime.dispose(); globalThis.fetch = previousFetch; }
 });
 
 test('read-only servers omit mutation tools', () => {
@@ -77,31 +81,68 @@ test('read-only servers omit mutation tools', () => {
   assert.equal(tools.includes('set_model'), false);
 });
 
-test('status reports the selected Desktop runtime and live progress', async () => {
+test('status reports the selected Desktop runtime, and live progress is never inferred from HTTP success', async () => {
   const previousFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const url = String(input);
     if (url.endsWith('/api/projects')) return new Response(JSON.stringify({ projects: [] }), { status: 200 });
+    // The event stream is unreachable here: /api/projects success must NOT be
+    // reported as live progress.
     throw new Error(`unexpected ${url}`);
   };
+  const runtime = new DesktopOrchestratorRuntime(BASE);
   try {
-    const runtime = new DesktopOrchestratorRuntime('http://127.0.0.1:55354');
     const caps = await runtime.capabilities();
     assert.equal(caps.status, 'desktop_read_only');
-    assert.equal(caps.liveProgress, 'connected');
     assert.equal(caps.selectedRuntime, 'desktop');
-  } finally { globalThis.fetch = previousFetch; }
+    assert.equal(caps.liveProgress, 'stale');
+  } finally { runtime.dispose(); globalThis.fetch = previousFetch; }
+});
+
+test('live progress becomes connected only when the event stream delivers data', async () => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith('/api/projects')) return new Response(JSON.stringify({ projects: [] }), { status: 200 });
+    if (url.endsWith('/api/events')) {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) { controller.enqueue(new TextEncoder().encode('event: running\ndata: {"threadId":"thread-1","state":"running"}\n\n')); /* stays open */ },
+      });
+      return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    }
+    throw new Error(`unexpected ${url}`);
+  };
+  const runtime = new DesktopOrchestratorRuntime(BASE);
+  try {
+    await runtime.capabilities();
+    for (let i = 0; i < 60; i++) {
+      if ((await runtime.capabilities()).liveProgress === 'connected') break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal((await runtime.capabilities()).liveProgress, 'connected');
+    const progress = await runtime.getThreadProgress('thread-1');
+    assert.equal(progress.connected, true);
+    assert.equal(progress.stale, false);
+    assert.equal(progress.nextSequence, 1);
+    assert.equal(progress.events[0]?.kind, 'turn_state');
+    assert.equal(progress.events[0]?.state, 'running');
+    // Summary output never leaks raw event detail.
+    assert.deepEqual((await runtime.getThreadProgressSummary('thread-1')).events, []);
+  } finally { runtime.dispose(); globalThis.fetch = previousFetch; }
 });
 
 test('history search validates query length', async () => {
-  const runtime = new DesktopOrchestratorRuntime('http://127.0.0.1:55354');
-  await assert.rejects(() => runtime.searchHistory(''), /Query must be 1 to 200/);
+  const runtime = new DesktopOrchestratorRuntime(BASE);
+  try { await assert.rejects(() => runtime.searchHistory(''), /Query must be 1 to 200/); }
+  finally { runtime.dispose(); }
 });
 
 test('write refreshes authorization after Freebuff rotates its launch ID', async () => {
   const previousFetch = globalThis.fetch; const previousLaunch = process.env.FREEBUFF_LAUNCH_ID; process.env.FREEBUFF_LAUNCH_ID = 'old-launch'; let writes = 0;
   globalThis.fetch = async (input, init) => { const url=String(input); const launch=(init?.headers as Record<string,string> | undefined)?.['x-freebuff-launch-id']; if(url.endsWith('/api/projects')) return new Response(JSON.stringify({projects:[]}),{status:200}); if(url.endsWith('/healthz')) return new Response(JSON.stringify({ok:launch==='old-launch'||launch==='new-launch'}),{status:200}); if(url.endsWith('/api/thread/t/message')) { writes++; if(writes===1){process.env.FREEBUFF_LAUNCH_ID='new-launch'; return new Response('{}',{status:403});} return new Response(JSON.stringify({accepted:true}),{status:200}); } throw new Error(`unexpected ${url}`); };
-  try { const runtime=new DesktopOrchestratorRuntime('http://127.0.0.1:55354'); assert.deepEqual(await runtime.sendMessage('t','hello'),{accepted:true}); assert.equal(writes,2); } finally { globalThis.fetch=previousFetch; if(previousLaunch===undefined)delete process.env.FREEBUFF_LAUNCH_ID;else process.env.FREEBUFF_LAUNCH_ID=previousLaunch; }
+  const runtime = new DesktopOrchestratorRuntime(BASE);
+  try { assert.deepEqual(await runtime.sendMessage('t','hello'),{accepted:true}); assert.equal(writes,2); }
+  finally { runtime.dispose(); globalThis.fetch=previousFetch; if(previousLaunch===undefined)delete process.env.FREEBUFF_LAUNCH_ID;else process.env.FREEBUFF_LAUNCH_ID=previousLaunch; }
 });
 
 test('stale readiness metadata is ignored', async () => {
@@ -112,5 +153,18 @@ test('stale readiness metadata is ignored', async () => {
 test('separate bridge instances refresh independently after a rotation', async () => {
   const previousFetch=globalThis.fetch; const previousLaunch=process.env.FREEBUFF_LAUNCH_ID; process.env.FREEBUFF_LAUNCH_ID='first'; const seen:string[]=[];
   globalThis.fetch=async(input,init)=>{ const url=String(input); const launch=(init?.headers as Record<string,string> | undefined)?.['x-freebuff-launch-id'] ?? ''; if(url.endsWith('/api/projects')){seen.push(launch);return new Response(JSON.stringify({projects:[]}));} if(url.endsWith('/healthz'))return new Response(JSON.stringify({ok:true})); throw new Error('unexpected'); };
-  try { const one=new DesktopOrchestratorRuntime('http://127.0.0.1:55354'); await one.capabilities(); process.env.FREEBUFF_LAUNCH_ID='second'; const two=new DesktopOrchestratorRuntime('http://127.0.0.1:55354'); await two.capabilities(); assert.deepEqual(seen,['first','second']); } finally {globalThis.fetch=previousFetch;if(previousLaunch===undefined)delete process.env.FREEBUFF_LAUNCH_ID;else process.env.FREEBUFF_LAUNCH_ID=previousLaunch;}
+  const one = new DesktopOrchestratorRuntime(BASE); const two = new DesktopOrchestratorRuntime(BASE);
+  try { await one.capabilities(); process.env.FREEBUFF_LAUNCH_ID='second'; await two.capabilities(); assert.deepEqual(seen,['first','second']); }
+  finally { one.dispose(); two.dispose(); globalThis.fetch=previousFetch;if(previousLaunch===undefined)delete process.env.FREEBUFF_LAUNCH_ID;else process.env.FREEBUFF_LAUNCH_ID=previousLaunch; }
+});
+
+test('the legacy runtime reuses the canonical event store, not a private copy', async () => {
+  const runtime = new DesktopOrchestratorRuntime(BASE);
+  try {
+    // No Desktop: bounds and staleness still come from the canonical store.
+    const snapshot = await runtime.getThreadProgress('thread-1');
+    assert.equal(snapshot.events.length, 0);
+    assert.equal(snapshot.connected, false);
+    assert.equal(snapshot.stale, true);
+  } finally { runtime.dispose(); }
 });

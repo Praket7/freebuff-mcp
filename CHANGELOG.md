@@ -35,6 +35,14 @@ Production rebuild around one canonical session/turn/event lifecycle shared by e
 - Rewrite the CLI: full usage text, `doctor --json` with structured diagnostics and nonzero exit when nothing is detected, centralized `version` from package.json.
 - Add `tsconfig.test.json` and `typecheck:test` so tests are typechecked; CI runs it on every matrix job and performs a packed-tarball smoke test (install, version, doctor, installers).
 
+### Legacy adapters & parity
+
+- Delete the duplicated legacy Desktop implementation (`src/events.ts` and the private discovery/SSE/progress store inside `src/runtime.ts`). MCP v1 (`serve-v1`) and the HTTP transport (`serve-http`) now reuse the canonical `desktop/discovery.ts`, `desktop/sse.ts`, `desktop/event-adapter.ts`, and `bridge/event-store.ts`, so Desktop discovery — including removing the broad all-listener port scan from the legacy path — and SSE parsing exist exactly once.
+- Fix `liveProgress` in the legacy runtime: it was reported as `connected` whenever `/api/projects` succeeded. It now reflects the event stream's own health, exactly like the v2 Desktop backend.
+- Add the `get_thread_progress_summary` and `get_diff` read tools to MCP v2 so the v2 catalog matches v1. `get_diff` returns the changed-file list derived from live events and only includes diff text when the Desktop exposes it — the bridge never fabricates a diff.
+- `doctor` now reports the timestamp of the most recent live event (`desktop.lastEventAt`) and gives the event stream a bounded moment to prove itself before reporting its state, so a healthy Desktop is no longer reported as `stale` on the first sample. Backend capabilities expose the same value as `lastEventAt`.
+- Add end-to-end coverage for the legacy adapter (`test/integration/mcp-v1.test.ts`) that drives the real MCP client through `serve-v1` onto the canonical store.
+
 ### Packaging
 
 - Centralize the package version; the shipped `dist` matches `package.json` (0.2.0).

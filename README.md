@@ -12,7 +12,7 @@ The bridge runs entirely on your machine. It does not dump process memory, steal
 
 ## What it does
 
-- **Canonical sessions and turns.** Every interaction is a bridge session/turn with its own identity, mapped explicitly to the real Freebuff thread or conversation id. Bridge ids are never passed to Freebuff as conversation ids.
+- **Canonical sessions and turns.** Every interaction is a bridge session/turn with its own identity, mapped explicitly to the real Freebuff thread or conversation id. Bridge ids are never passed to Freebuff as conversation ids. Every adapter — MCP v2, legacy MCP v1, HTTP, and ACP — runs on this one implementation; discovery, SSE parsing, and the event store are never duplicated.
 - **Deterministic backend selection.** 1) Desktop with verified write authorization, 2) Desktop read-only, 3) Freebuff CLI via a managed PTY (fallback), 4) a structured unavailable state. A port being open is never enough: `/api/projects` must answer correctly and the launch-ID health check must pass for writes.
 - **`run_turn` with live progress.** A first-class long-running MCP tool that streams coalesced, request-scoped progress notifications and honors MCP cancellation (`notifications/cancelled` → backend abort).
 - **Resilient Desktop connection.** Handoff-file-first discovery (no broad port scanning in the normal path), SSE with `Last-Event-ID`, `retry:`, bounded backoff with jitter, and recovery from 401/403/404, 5xx, ECONNREFUSED, timeouts, and Desktop restarts/port rotation.
@@ -26,7 +26,7 @@ npm install --global freebuff-mcp
 freebuff-mcp doctor
 ```
 
-`doctor` prints (or `--json` emits) package version, platform, selected backend, Desktop detection/authorization, event-stream state, CLI detection, PTY/node-pty version, handoff status, capabilities, and recent safe diagnostic errors.
+`doctor` prints (or `--json` emits) package version, platform, selected backend, Desktop detection/authorization, event-stream state (including the timestamp of the most recent live event), CLI detection, PTY/node-pty version, handoff status, capabilities, and recent safe diagnostic errors.
 
 ## Configure Codex
 
@@ -65,7 +65,7 @@ claude mcp add --scope user freebuff -- node /path/to/freebuff-mcp/dist/src/cli.
 The catalog is stable: tools are always registered and return structured actionable errors (`{ ok:false, code, message, recovery }`) when Freebuff is unavailable — availability never depends on the client processing dynamic tool-list updates.
 
 - Status/discovery: `freebuff_status`, `list_projects`, `list_threads`, `get_thread`, `get_thread_messages`, `get_active_work`, `search_history`, `list_models`
-- Progress: `get_turn`, `watch_turn`, `get_thread_progress`, `watch_thread`, `watch_active_threads`, `get_changed_files`
+- Progress: `get_turn`, `watch_turn`, `get_thread_progress`, `watch_thread`, `get_thread_progress_summary`, `watch_active_threads`, `get_changed_files`, `get_diff`
 - Sessions/turns: `start_thread`, `send_message` (async, returns `turnId`), `run_turn` (synchronous with progress + cancellation), `stop_turn`, `stop_thread`, `resume_thread`, `set_model`, `set_reasoning`
 - Files/attachments: `list_project_files`, `read_project_file`, `list_thread_attachments`
 
@@ -111,7 +111,7 @@ pnpm build
 pnpm pack:check
 ```
 
-The suite (80+ tests) covers the event store (cursors past 100 events, retention, per-thread staleness), SSE parsing/reconnect/Last-Event-ID/retry, handoff validation matrix, Desktop restart recovery, session/turn lifecycle and cancellation, phase classification, redaction classes, installers on existing/missing configs, and MCP integration tests that drive the real server through the MCP SDK client (tools/list, run_turn, cancellation survival).
+The suite (83 tests) covers the event store (cursors past 100 events, retention, per-thread staleness), SSE parsing/reconnect/Last-Event-ID/retry, handoff validation matrix, Desktop restart recovery, session/turn lifecycle and cancellation, phase classification, live-progress honesty, redaction classes, installers on existing/missing configs, and MCP integration tests that drive the real server through the MCP SDK client for both the v2 (`serve`) and legacy v1 (`serve-v1`) surfaces (tools/list, run_turn, cancellation survival, legacy progress on the canonical store).
 
 ## Security
 

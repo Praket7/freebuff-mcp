@@ -26,6 +26,8 @@ DesktopBackend                CliBackend (PTY fallback)
   SSE (desktop/sse.ts)
 ```
 
+The canonical layer is the ONLY implementation: MCP v2, legacy MCP v1 (`mcp.ts`), the HTTP transport, and ACP all reach Desktop and CLI through the same discovery, SSE client, event adapter, and event store. Nothing re-implements discovery or SSE, so the legacy path cannot drift (in particular it no longer scans every localhost listener) and `liveProgress` has one definition everywhere.
+
 ## Identity model
 
 - `BridgeSession.id` / `BridgeTurn.id` are bridge-generated UUIDs.
@@ -54,7 +56,7 @@ Validation covers presence, JSON shape, version, loopback URL, live PID, and exp
 
 ## Live events (`desktop/sse.ts`, `desktop/event-adapter.ts`)
 
-`SseClient` is a resilient SSE loop: LF/CRLF, comments, multiline `data:`, `event:`/`id:`/`retry:`, `Last-Event-ID` on reconnect, bounded backoff with 50–100% jitter, connection timeout, buffer caps, and cancellation. Untrusted payloads are mapped to structured bridge events (reasoning dropped, secrets redacted, phases classified structurally). `liveProgress: connected` reflects only the event stream's own health — never `/api/projects` success.
+`SseClient` is a resilient SSE loop: LF/CRLF, comments, multiline `data:`, `event:`/`id:`/`retry:`, `Last-Event-ID` on reconnect, bounded backoff with 50–100% jitter, connection timeout, buffer caps, and cancellation. Untrusted payloads are mapped to structured bridge events (reasoning dropped, secrets redacted, phases classified structurally). `liveProgress: connected` reflects only the event stream's own health — never `/api/projects` success. This holds in every adapter, including legacy MCP v1 and HTTP.
 
 ## Event store (`bridge/event-store.ts`)
 

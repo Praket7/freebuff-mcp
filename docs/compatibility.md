@@ -49,6 +49,8 @@ The programmatic Codebuff/Freebuff SDK backend (`sdk`) is **not enabled**: the c
 | HTTP (Streamable) | `serve-http` | Supported, local-first |
 | ACP v1 | `serve-acp` | Experimental |
 
+Every adapter runs on the same canonical discovery, SSE client, and bounded event store; none of them duplicate Desktop discovery or event handling. `serve-v1` exposes the legacy tool names (`get_thread_progress_summary`, `watch_active_threads`, …) on top of that shared layer, and `serve` additionally exposes `get_thread_progress_summary` and `get_diff`.
+
 ## Not supported
 
 - Remote HTTP without explicit `FREEBUFF_MCP_ALLOW_REMOTE=1` (and HTTPS in front).

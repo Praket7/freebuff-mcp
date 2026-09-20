@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Run `freebuff-mcp doctor` (or `freebuff-mcp doctor --json`) first — it reports the selected backend, Desktop authorization, event-stream state, CLI detection, handoff status, and recent diagnostic errors.
+Run `freebuff-mcp doctor` (or `freebuff-mcp doctor --json`) first — it reports the selected backend, Desktop authorization, event-stream state (including `desktop.lastEventAt`, the timestamp of the most recent live event), CLI detection, handoff status, and recent diagnostic errors.
 
 ## Desktop not detected
 
@@ -25,9 +25,9 @@ Run `freebuff-mcp doctor` (or `freebuff-mcp doctor --json`) first — it reports
 
 ## Event stream disconnected
 
-**Symptoms:** `liveProgress: "unavailable"` or `"stale"`; `watch_thread` times out with no events.
+**Symptoms:** `liveProgress: "unavailable"` or `"stale"`; `watch_thread` times out with no events; `doctor` shows no `desktop.lastEventAt`.
 
-**Fixes:** The stream reconnects with bounded backoff and `Last-Event-ID` automatically. If it stays down, restart Desktop. `connected` is only reported when the SSE stream itself is healthy — a working `/api/projects` alone never sets it.
+**Fixes:** The stream reconnects with bounded backoff and `Last-Event-ID` automatically. If it stays down, restart Desktop. `connected` is only reported when the SSE stream itself is healthy — a working `/api/projects` alone never sets it, in any adapter (v2, v1, HTTP). A `liveProgress: "stale"` immediately after startup usually means the stream is still connecting; re-run `doctor` a moment later.
 
 ## CLI not installed
 

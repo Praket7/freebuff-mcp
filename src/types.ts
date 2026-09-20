@@ -16,13 +16,13 @@ export interface Capabilities {
 export interface ProjectSummary { id: string; path: string; name?: string; metadata?: Json; }
 export interface ThreadSummary { id: string; projectId?: string; title?: string; state?: string; model?: string; metadata?: Json; }
 export interface ThreadDetail extends ThreadSummary { messages?: Json[]; activeWork?: Json; live?: ThreadProgressSnapshot; }
-export type ThreadProgressKind = 'turn_state' | 'assistant_text' | 'tool_start' | 'tool_output' | 'file_change' | 'completed' | 'failed' | 'unknown';
+export type ThreadProgressKind = 'turn_state' | 'assistant_text' | 'tool_start' | 'tool_output' | 'file_change' | 'completed' | 'failed' | 'cancelled' | 'unknown';
 export interface ThreadProgressEvent {
   sequence: number;
   threadId: string;
   timestamp: string;
   kind: ThreadProgressKind;
-  phase?: 'planning' | 'reading_files' | 'running_tests' | 'editing_files' | 'reviewing_changes' | 'waiting_for_input' | 'completed' | 'failed' | 'unknown';
+  phase?: 'planning' | 'reading_files' | 'running_tests' | 'running_command' | 'editing_files' | 'reviewing_changes' | 'waiting_for_input' | 'completed' | 'failed' | 'unknown';
   state?: string;
   tool?: string;
   command?: string;

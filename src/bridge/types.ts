@@ -190,6 +190,8 @@ export interface BackendCapabilities {
   authorization: 'none' | 'read_only' | 'write_authorized';
   /** True only when the live event stream itself is healthy — never inferred from other API success. */
   liveProgress: 'connected' | 'stale' | 'unavailable';
+  /** Timestamp of the most recent live event received, when one has arrived. */
+  lastEventAt?: string;
   canCreateSession: boolean;
   canSendMessage: boolean;
   canStop: boolean;
