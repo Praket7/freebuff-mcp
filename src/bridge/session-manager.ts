@@ -44,7 +44,12 @@ export class SessionManager {
     // `connected: false, stale: true` even while progress events were actively
     // flowing, because only the legacy runtime ever set it.
     this.turnScopedLiveness = typeof this.backend.onStreamHealth !== 'function';
-    this.streamHealthUnsubscribe = this.backend.onStreamHealth?.((connected) => this.events.setConnected(connected));
+    this.streamHealthUnsubscribe = this.backend.onStreamHealth?.((health) => {
+      this.events.setConnected(health.connected);
+      // Keep the gap signal honest: it is returned to clients inside progress
+      // snapshots, so it must not stay permanently false.
+      this.events.setGapSuspected(Boolean(health.gapSuspected));
+    });
   }
 
   get backendKind(): FreebuffBackend['kind'] { return this.backend.kind; }

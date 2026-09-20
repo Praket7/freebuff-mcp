@@ -134,6 +134,10 @@ export class SseClient {
         this.attempt = 0;
         this.setConnected(true);
         await this.consume(response.body, signal);
+        // A clean end-of-stream (the server closed the connection, e.g. a
+        // Desktop restart) is still a disconnection. Without this, `connected`
+        // stayed true while nothing was arriving.
+        this.setConnected(false);
       } catch {
         clearTimeout(timeout);
         this.setConnected(false);

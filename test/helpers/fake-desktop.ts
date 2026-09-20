@@ -40,6 +40,8 @@ export interface FakeDesktop {
   /** Attached SSE clients (for assertions about stream lifecycle). */
   sseClients: number;
   setChangedFiles(threadId: string, files: Array<{ path: string; adds: number; dels: number }>): void;
+  /** Drop every attached SSE client, as a network blip or Desktop restart would. */
+  dropSseClients(): void;
   close(): Promise<void>;
 }
 
@@ -222,6 +224,10 @@ export async function startFakeDesktop(options: FakeDesktopOptions = {}): Promis
     threads,
     get sseClients() { return sseResponses.size; },
     setChangedFiles(id, files) { changedFiles.set(id, files); },
+    dropSseClients() {
+      for (const response of sseResponses) { try { response.end(); } catch { /* ignore */ } }
+      sseResponses.clear();
+    },
     close: async () => {
       for (const timer of timers) clearTimeout(timer);
       timers.clear();

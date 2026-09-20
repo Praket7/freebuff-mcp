@@ -12,6 +12,8 @@ interface FakeOptions {
   refusalDelayMs?: number;
   /** Emulate a backend with a persistent stream (Desktop-like). */
   streamHealth?: boolean;
+  /** Report a suspected event gap alongside the stream state. */
+  gapSuspected?: boolean;
 }
 
 function fakeBackend(options: FakeOptions = {}): FreebuffBackend & { callCount: number } {
@@ -41,8 +43,8 @@ function fakeBackend(options: FakeOptions = {}): FreebuffBackend & { callCount: 
     },
     async stop() { /* not used directly here */ },
     ...(options.streamHealth === undefined ? {} : {
-      onStreamHealth(listener: (connected: boolean) => void) {
-        listener(Boolean(options.streamHealth));
+      onStreamHealth(listener: (health: { connected: boolean; gapSuspected?: boolean }) => void) {
+        listener({ connected: Boolean(options.streamHealth), ...(options.gapSuspected ? { gapSuspected: true } : {}) });
         return () => undefined;
       },
     }),
@@ -152,6 +154,16 @@ test('session manager: backend stream health reaches the canonical event store, 
 
   const down = new SessionManager(fakeBackend({ streamHealth: false }));
   assert.equal(down.events.progress('any-thread', 0, 1).connected, false, 'a disconnected backend reports disconnected');
+});
+
+test('session manager: a suspected event gap is surfaced to clients, never a permanent false', () => {
+  // Regression: setGapSuspected had no caller, so eventGapSuspected — which is
+  // returned by get_turn/watch_turn/watch_thread — was always false.
+  const quiet = new SessionManager(fakeBackend({ streamHealth: true }));
+  assert.equal(quiet.events.progress('any-thread', 0, 1).eventGapSuspected, false);
+
+  const gapped = new SessionManager(fakeBackend({ streamHealth: true, gapSuspected: true }));
+  assert.equal(gapped.events.progress('any-thread', 0, 1).eventGapSuspected, true, 'a reported gap reaches the snapshot');
 });
 
 test('session manager: a backend with no persistent stream tracks turn-scoped liveness', async () => {

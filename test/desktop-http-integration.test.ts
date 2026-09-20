@@ -127,6 +127,37 @@ test('http: cancelling a running turn aborts it and reports cancelled', async ()
   }
 });
 
+test('http: a dropped stream is reported as connected=false plus a suspected gap, then clears on resync', async () => {
+  const desktop = await startFakeDesktop();
+  const restoreEnv = withEnv(desktop.url, desktop.launchId);
+  const backend = new DesktopBackend();
+  const seen: string[] = [];
+  const unsubscribe = backend.onStreamHealth?.((health) => {
+    seen.push(`${health.connected}${health.gapSuspected ? '+gap' : ''}`);
+  });
+  try {
+    // Connecting is what opens the stream.
+    await backend.listThreads();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(seen.at(-1), 'true', `stream should be connected, saw: ${seen.join(',')}`);
+
+    // The Desktop goes away mid-session: events during the outage may be lost.
+    desktop.dropSseClients();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.ok(seen.includes('false+gap'), `a drop must raise a suspected gap, saw: ${seen.join(',')}`);
+
+    // The client reconnects and receives full state, so the gap resolves.
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && seen.at(-1) !== 'true') await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(seen.at(-1), 'true', `resync clears the gap, saw: ${seen.join(',')}`);
+  } finally {
+    unsubscribe?.();
+    backend.dispose();
+    restoreEnv();
+    await desktop.close();
+  }
+});
+
 test('http: run_turn over the canonical bridge waits for the real turn and maps identity', async () => {
   const desktop = await startFakeDesktop({ turnDelayMs: 250 });
   const restoreEnv = withEnv(desktop.url, desktop.launchId);

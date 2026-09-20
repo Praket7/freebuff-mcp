@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { BackendCapabilities, BackendSession, BackendTurnResult, BridgeError, ErrorCodes, FreebuffBackend, BackendEventInput } from '../bridge/types.js';
+import { BackendCapabilities, BackendSession, BackendStreamHealth, BackendTurnResult, BridgeError, ErrorCodes, FreebuffBackend, BackendEventInput } from '../bridge/types.js';
 import { DesktopBackend } from './desktop-backend.js';
 import { CliBackend } from './cli-backend.js';
 import { findFreebuffCli } from '../pty.js';
@@ -126,7 +126,7 @@ export class CompositeBackend implements FreebuffBackend {
    * has no persistent stream, so it reports nothing and the canonical layer
    * falls back to turn-scoped liveness.
    */
-  onStreamHealth(listener: (connected: boolean) => void): () => void {
+  onStreamHealth(listener: (health: BackendStreamHealth) => void): () => void {
     const backend: FreebuffBackend = this.forced === 'cli' ? this.cli : this.desktop;
     return backend.onStreamHealth?.(listener) ?? (() => undefined);
   }

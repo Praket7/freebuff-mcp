@@ -233,6 +233,16 @@ export interface BackendEventInput {
   metadata?: Record<string, unknown>;
 }
 
+/** Live stream health, reported by backends that hold a persistent stream. */
+export interface BackendStreamHealth {
+  connected: boolean;
+  /**
+   * True when progress events may have been missed — for example while the
+   * stream was down. Cleared once full state is known again.
+   */
+  gapSuspected?: boolean;
+}
+
 export interface FreebuffBackend {
   kind: BackendKind;
   probe(): Promise<BackendCapabilities>;
@@ -255,6 +265,6 @@ export interface FreebuffBackend {
    * this and invoke `listener` with the current value on subscribe. Backends
    * that stream only while a turn runs (CLI/PTY) omit it.
    */
-  onStreamHealth?(listener: (connected: boolean) => void): () => void;
+  onStreamHealth?(listener: (health: BackendStreamHealth) => void): () => void;
   dispose(): Promise<void> | void;
 }

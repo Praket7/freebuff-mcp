@@ -123,6 +123,40 @@ test('sse: server retry value is honored', async () => {
   assert.equal(retrySeen, 1234);
 });
 
+test('sse: a clean end-of-stream reports disconnected, not a permanent connected', async () => {
+  // Regression: only the error path cleared the connection flag, so a server
+  // that closes cleanly (a Desktop restart) left `connected` true forever
+  // while nothing was arriving — the exact false positive the bridge forbids.
+  const originalFetch = globalThis.fetch;
+  const connections: boolean[] = [];
+  globalThis.fetch = (async () => {
+    const body = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new TextEncoder().encode('data: {"x":1}\n\n')); c.close(); } });
+    return new Response(body, { status: 200 }) as Response;
+  }) as typeof fetch;
+  const client = new SseClient({
+    url: () => new URL('http://127.0.0.1:1/events'),
+    onEvent: () => undefined,
+    onConnectionChange: (connected) => connections.push(connected),
+    baseDelayMs: 5,
+    maxDelayMs: 15,
+    connectionTimeoutMs: 500,
+  });
+  client.start();
+  await new Promise((r) => setTimeout(r, 80));
+  client.dispose();
+  globalThis.fetch = originalFetch;
+
+  assert.ok(connections.length >= 2, `saw connection transitions: ${connections.join(',')}`);
+  assert.equal(connections[0], true, 'the first connection is reported');
+  assert.equal(connections[1], false, 'closing the stream reports disconnected');
+  // Every reported connection must be followed by a disconnection, so the flag
+  // can never stay stuck true.
+  for (let i = 0; i < connections.length; i += 2) {
+    assert.equal(connections[i], true, `pair ${i} opens with connected`);
+    assert.equal(connections[i + 1], false, `pair ${i} closes with disconnected`);
+  }
+});
+
 test('sse: malformed events and unknown types do not crash the loop', async () => {
   // Raw frames are delivered regardless of payload validity; the consumer (not
   // the transport) decides what to do with malformed data.

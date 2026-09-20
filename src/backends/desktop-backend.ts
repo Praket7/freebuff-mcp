@@ -6,7 +6,7 @@ import { blocked } from '../security.js';
 import { SseClient, SseEvent } from '../desktop/sse.js';
 import { mapDesktopEvent, safeMetadata } from '../desktop/event-adapter.js';
 import { discoverDesktop, invalidateDiscoveryCache, DesktopCandidate } from '../desktop/discovery.js';
-import { BackendCapabilities, BackendEventInput, BackendTurnResult, BackendSession, BridgeError, BridgeTurnState, ErrorCodes, FreebuffBackend } from '../bridge/types.js';
+import { BackendCapabilities, BackendEventInput, BackendStreamHealth, BackendTurnResult, BackendSession, BridgeError, BridgeTurnState, ErrorCodes, FreebuffBackend } from '../bridge/types.js';
 
 const REQUEST_TIMEOUT_MS = 8_000;
 const RECOVERABLE = /(fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|network|socket)/i;
@@ -62,7 +62,13 @@ export class DesktopBackend implements FreebuffBackend {
   private sseConnected = false;
   private lastEventAt?: number;
   private eventListeners = new Set<(event: BackendEventInput) => void>();
-  private streamListeners = new Set<(connected: boolean) => void>();
+  private streamListeners = new Set<(health: BackendStreamHealth) => void>();
+  /**
+   * Set while the stream is down and cleared once a full state snapshot proves
+   * the bridge has caught up. Surfaced as `eventGapSuspected` in progress
+   * snapshots, which are returned by get_turn/watch_turn/watch_thread.
+   */
+  private gapSuspected = false;
   private lastUpstreamId?: string;
   /** Latest turn state per thread, kept current from the event stream. */
   private readonly threadStates = new Map<string, ThreadTurnState>();
@@ -81,17 +87,36 @@ export class DesktopBackend implements FreebuffBackend {
    * stream as disconnected, or vice versa. The current value is delivered
    * immediately on subscribe.
    */
-  onStreamHealth(listener: (connected: boolean) => void): () => void {
+  onStreamHealth(listener: (health: BackendStreamHealth) => void): () => void {
     this.streamListeners.add(listener);
-    listener(this.sseConnected);
+    listener(this.streamHealth());
     return () => { this.streamListeners.delete(listener); };
+  }
+
+  private streamHealth(): BackendStreamHealth {
+    return { connected: this.sseConnected, ...(this.gapSuspected ? { gapSuspected: true } : {}) };
+  }
+
+  private notifyStreamHealth(): void {
+    const health = this.streamHealth();
+    for (const listener of this.streamListeners) listener(health);
   }
 
   /** Single writer for `sseConnected`, so every transition is observable. */
   private setSseConnected(value: boolean): void {
     if (this.sseConnected === value) return;
+    // Losing an established stream means events may have been missed until a
+    // fresh full snapshot arrives; claiming otherwise would be a silent lie.
+    if (this.sseConnected && !value) this.gapSuspected = true;
     this.sseConnected = value;
-    for (const listener of this.streamListeners) listener(value);
+    this.notifyStreamHealth();
+  }
+
+  /** Full state is known again, so any suspected gap is resolved. */
+  private clearSuspectedGap(): void {
+    if (!this.gapSuspected) return;
+    this.gapSuspected = false;
+    this.notifyStreamHealth();
   }
 
   private async connect(force = false): Promise<void> {
@@ -179,6 +204,8 @@ export class DesktopBackend implements FreebuffBackend {
         const type = turnState === 'running' ? 'phase' : turnState === 'completed' ? 'completed' : turnState === 'failed' ? 'failed' : turnState === 'cancelled' ? 'cancelled' : 'phase';
         this.emit({ threadId, type, ...(turnState ? { state: turnState } : {}) });
       }
+      // A snapshot carries the whole picture, so the bridge is no longer out of sync.
+      this.clearSuspectedGap();
       return;
     }
     const mapped = mapDesktopEvent(payload, event.event);
@@ -488,7 +515,10 @@ export class DesktopBackend implements FreebuffBackend {
   dispose(): void {
     this.sse?.dispose();
     this.sse = undefined;
-    this.setSseConnected(false);
     this.connection = undefined;
+    // Shutting down is not a gap, and nobody needs the notification.
+    this.streamListeners.clear();
+    this.gapSuspected = false;
+    this.sseConnected = false;
   }
 }
