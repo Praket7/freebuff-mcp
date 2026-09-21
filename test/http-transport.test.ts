@@ -136,9 +136,10 @@ test('http transport: healthz, authentication, origin, and MCP handshake', async
     assert.equal(badOrigin.status, 403, 'a non-loopback Origin is rejected');
 
     const notFound = await fetch(`http://127.0.0.1:${server.port}/mcp`, { method: 'GET', headers: { authorization: `Bearer ${TOKEN}` } });
-    // GET /mcp is now served for the modern 2026-07-28 protocol (SSE streams
-    // and initialization); the legacy JSON-RPC-over-GET gets 405 Method Not Allowed.
-    assert.equal(notFound.status, 405, 'only POST /mcp is served for legacy JSON-RPC; GET is modern protocol');
+    // GET /mcp is served for the modern 2026-07-28 protocol (SSE streams
+    // and initialization) but requires Accept: text/event-stream. Legacy
+    // JSON-RPC-over-GET without proper Accept header gets 406 Not Acceptable.
+    assert.equal(notFound.status, 406, 'legacy GET /mcp rejected; modern GET requires Accept: text/event-stream');
 
     const init = await rpc(server.port, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'http-test', version: '1' } } });
     assert.equal(init.status, 200);
@@ -202,15 +203,15 @@ test('http transport: legacy 2025 protocol stays on the compatibility path', asy
   }
 });
 
-test('http transport: 2026-07-28 version string via legacy JSON-RPC (modern _meta envelope not supported by SDK 2.0.0)', async () => {
+test('http transport: 2026-07-28 version string via legacy JSON-RPC initialize', async () => {
   const desktop = await startFakeDesktop({ turnDelayMs: 400 });
   const server = await startHttpServer(desktop);
   try {
-    // The vendored SDK v2.0.0 only accepts JSON-RPC 2.0 format.
-    // It negotiates a 2026-07-28 version string in the legacy initialize
-    // params, answering with the server's best supported revision (2025-11-25).
-    // A genuine modern 2026-07-28 envelope (no jsonrpc/id) is rejected 400
-    // by the current SDK. This test documents the current capability.
+    // The SDK's WebStandardStreamableHTTPServerTransport accepts 2026-07-28
+    // version strings in the legacy initialize params, answering with the
+    // server's best supported revision (2025-11-25). This test documents
+    // the legacy compatibility path; the modern _meta envelope path is
+    // tested separately in "genuine MCP 2026-07-28 modern protocol".
     const init = await rpc(server.port, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'modern-test', version: '1' } } });
     assert.equal(init.status, 200);
     assert.ok(init.result?.result?.serverInfo, `2026-07-28 init answered: ${init.text.slice(0, 200)}`);

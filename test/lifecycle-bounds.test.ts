@@ -122,6 +122,3 @@ test('bounds: running turn state survives turn-state cap and thread-bucket press
   assert.ok(turnSize <= 2_500, `turn states bounded (got ${turnSize})`);
   assert.ok(threadSize <= 5_501, `thread buckets bounded (got ${threadSize})`);
 });
-
-test('bounds: 10k thread buckets stay capped, newest readable, expired dropped', () => {
-});

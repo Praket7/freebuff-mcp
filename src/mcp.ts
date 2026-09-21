@@ -1,6 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { createMcpHandler } from '@modelcontextprotocol/server';
+import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/server';
 import { createServer as createHttpServer, IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
@@ -66,86 +66,91 @@ async function rawBody(req: IncomingMessage): Promise<string> {
 }
 export async function runHttp(): Promise<void> {
   // HTTP serves the SAME canonical v2 surface as stdio (CompositeBackend +
-  // SessionManager + TurnManager) through the modern per-request handler
-  // (`createMcpHandler`), which negotiates every era the SDK supports —
-  // including 2026-07-28 requests, which it answers with the server's best
-  // supported revision. Only POST /mcp is served (a deliberate, tested
-  // retention: no standalone GET SSE stream), and the 2025-era fallback stays
-  // on intentionally for deployed clients.
+  // SessionManager + TurnManager) through the official SDK transport
+  // (`WebStandardStreamableHTTPServerTransport`), which implements the full
+  // MCP 2026-07-28 protocol including modern envelope negotiation, per-request
+  // _meta for progress/cancellation, and client-disconnect abort propagation.
   const adapter = createDefaultAdapter();
-  const mcpHandler = createMcpHandler(() => createV2ServerFromAdapter(adapter), { legacy: 'stateless' });
+  const server = createV2ServerFromAdapter(adapter);
+  const transport = new WebStandardStreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+  });
+  await server.connect(transport);
+
   const host = process.env.FREEBUFF_MCP_HOST ?? '127.0.0.1';
   const port = Number(process.env.FREEBUFF_MCP_PORT ?? 8788);
   if (!isLoopback(host) && process.env.FREEBUFF_MCP_ALLOW_REMOTE !== '1') throw new Error('Refusing non-loopback HTTP host; set FREEBUFF_MCP_ALLOW_REMOTE=1 only behind trusted HTTPS and authentication.');
+
   const recent = new Map<string, { at: number; count: number }>();
   const RATE_WINDOW_MS = 60_000;
   const RATE_LIMIT = 120;
-  /**
-   * Bound the limiter's own memory: without pruning, one bucket per source
-   * address accumulates for the lifetime of the process.
-   */
   const pruneRecent = (now: number): void => {
     if (recent.size <= 1_024) return;
     for (const [key, bucket] of recent) if (now - bucket.at >= RATE_WINDOW_MS) recent.delete(key);
   };
-  const server = createHttpServer(async (req, res) => {
+
+  const httpServer = createHttpServer(async (req, res) => {
     if (!validOrigin(req)) { res.writeHead(403, {'content-type':'application/json'}); res.end(JSON.stringify({error:'invalid_origin'})); return; }
     const address = req.socket.remoteAddress ?? 'unknown'; const now = Date.now(); pruneRecent(now); const bucket = recent.get(address); if (!bucket || now - bucket.at >= RATE_WINDOW_MS) recent.set(address, {at:now,count:1}); else { bucket.count++; if (bucket.count > RATE_LIMIT) { res.writeHead(429, {'content-type':'application/json','retry-after':'60'}); res.end(JSON.stringify({error:'rate_limited'})); return; } }
-    if (req.url === '/healthz' && req.method === 'GET') { if (!isLoopback(host) && !authorized(req)) { res.writeHead(401, {'www-authenticate':'Bearer'}); res.end(JSON.stringify({error:'unauthorized'})); return; } res.writeHead(200, {'content-type':'application/json'}); res.end(JSON.stringify({ok:true,readOnly:!(await adapter.backend.probe().catch(() => null))?.canSendMessage})); return; }
+
+    if (req.url === '/healthz' && req.method === 'GET') {
+      if (!isLoopback(host) && !authorized(req)) { res.writeHead(401, {'www-authenticate':'Bearer'}); res.end(JSON.stringify({error:'unauthorized'})); return; }
+      res.writeHead(200, {'content-type':'application/json'}); res.end(JSON.stringify({ok:true,readOnly:!(await adapter.backend.probe().catch(() => null))?.canSendMessage})); return;
+    }
+
     if (req.url !== '/mcp') { res.writeHead(404, {'content-type':'application/json'}); res.end(JSON.stringify({error:'not_found'})); return; }
     if (!authorized(req)) { res.writeHead(401, {'www-authenticate':'Bearer'}); res.end(JSON.stringify({error:'unauthorized'})); return; }
-    // The modern 2026-07-28 protocol uses GET to establish an SSE stream
-    // and POST to send messages; createMcpHandler handles both.
-    if (req.method === 'GET') {
-      try {
-        const headers = new Headers();
-        for (const [key, value] of Object.entries(req.headers)) {
-          if (value === undefined) continue;
-          if (Array.isArray(value)) { for (const item of value) headers.append(key, item); } else headers.append(key, value);
-        }
-        const response = await mcpHandler.fetch(new Request(`http://127.0.0.1:${port}/mcp`, { method: 'GET', headers }));
-        const responseHeaders: Record<string, string> = {};
-        response.headers.forEach((value, key) => { responseHeaders[key] = value; });
-        res.writeHead(response.status, responseHeaders);
-        if (response.body) {
-          for await (const chunk of response.body) {
-            if (!res.write(chunk)) await new Promise<void>((resolve) => res.once('drain', resolve));
-          }
-        }
-        res.end();
-      } catch {
-        if (!res.headersSent) res.writeHead(400, {'content-type':'application/json'}); res.end(JSON.stringify({error:'invalid_request'}));
-      }
-      return;
-    }
-    if (req.method !== 'POST') { res.writeHead(405, {'content-type':'application/json'}); res.end(JSON.stringify({error:'method_not_allowed'})); return; }
-    let raw: string;
+
+    // Convert Node IncomingMessage to Web Request
+    let rawBodyText: string;
     try {
-      raw = await rawBody(req);
+      rawBodyText = await rawBody(req);
     } catch {
       if (!res.headersSent) { res.writeHead(400, {'content-type':'application/json'}); res.end(JSON.stringify({error:'Request too large'})); }
       return;
     }
-    // Malformed JSON is rejected here with a plain 400 regardless of Accept
-    // headers, so the contract never depends on handler content negotiation.
-    if (raw.trim()) {
-      try { JSON.parse(raw); } catch {
+    if (rawBodyText.trim()) {
+      try { JSON.parse(rawBodyText); } catch {
         res.writeHead(400, {'content-type':'application/json'}); res.end(JSON.stringify({error:'malformed JSON body'})); return;
       }
     }
+
+    const headers = new Headers();
+    for (const [key, value] of Object.entries(req.headers)) {
+      if (value === undefined) continue;
+      if (Array.isArray(value)) { for (const item of value) headers.append(key, item); } else headers.append(key, value);
+    }
+
+    // Create AbortSignal that fires when client disconnects
+    const abortController = new AbortController();
+    req.on('close', () => abortController.abort());
+
+    const webRequest = new Request(`http://${host}:${port}/mcp`, {
+      method: req.method,
+      headers,
+      body: rawBodyText || undefined,
+      signal: abortController.signal,
+    });
+
     try {
-      const headers = new Headers();
-      for (const [key, value] of Object.entries(req.headers)) {
-        if (value === undefined) continue;
-        if (Array.isArray(value)) { for (const item of value) headers.append(key, item); } else headers.append(key, value);
-      }
-      const response = await mcpHandler.fetch(new Request(`http://127.0.0.1:${port}/mcp`, { method: 'POST', headers, body: raw }));
+      const webResponse = await transport.handleRequest(webRequest);
+
       const responseHeaders: Record<string, string> = {};
-      response.headers.forEach((value, key) => { responseHeaders[key] = value; });
-      res.writeHead(response.status, responseHeaders);
-      if (response.body) {
-        for await (const chunk of response.body) {
-          if (!res.write(chunk)) await new Promise<void>((resolve) => res.once('drain', resolve));
+      webResponse.headers.forEach((value, key) => { responseHeaders[key] = value; });
+      res.writeHead(webResponse.status, responseHeaders);
+
+      if (webResponse.body) {
+        // Use AbortSignal to stop streaming if client disconnects
+        const reader = webResponse.body.getReader();
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (!res.write(value)) await new Promise<void>((resolve) => res.once('drain', resolve));
+            if (abortController.signal.aborted) break;
+          }
+        } finally {
+          reader.releaseLock();
         }
       }
       res.end();
@@ -154,7 +159,13 @@ export async function runHttp(): Promise<void> {
       else { try { res.end(); } catch { /* already closing */ } }
     }
   });
-  const cleanup=()=>{ adapter.dispose(); void mcpHandler.close().catch(() => undefined); }; server.once('close',cleanup); process.once('SIGINT',()=>{cleanup();server.close()}); process.once('SIGTERM',()=>{cleanup();server.close()}); process.once('exit',cleanup);
-  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, host, () => resolve()); });
+
+  const cleanup = () => { adapter.dispose(); void transport.close().catch(() => undefined); };
+  httpServer.once('close', cleanup);
+  process.once('SIGINT', () => { cleanup(); httpServer.close(); });
+  process.once('SIGTERM', () => { cleanup(); httpServer.close(); });
+  process.once('exit', cleanup);
+
+  await new Promise<void>((resolve, reject) => { httpServer.once('error', reject); httpServer.listen(port, host, () => resolve()); });
   console.error(`freebuff-mcp HTTP listening on http://${host}:${port}/mcp`);
 }

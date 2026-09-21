@@ -90,10 +90,29 @@ export class CompositeBackend implements FreebuffBackend {
     const desktopCaps = this.desktopCaps;
     const cliCaps = await this.cli.probe().catch(() => null);
     if (desktopCaps && (desktopCaps.connection === 'connected_writable' || desktopCaps.connection === 'connected_read_only')) {
-      // Never claim a capability the Desktop did not grant: creating a thread is
-      // a write, so a read-only Desktop cannot do it.
+      // Aggregate capabilities according to the same operation-aware policy
+      // used by selectFor(). A read-only Desktop still allows reads; writes
+      // fall through to CLI when available.
       const writable = desktopCaps.connection === 'connected_writable';
-      return { ...desktopCaps, canCreateSession: writable, notes: [...desktopCaps.notes, ...(cliCaps ? [cliCaps.notes[0] ?? ''] : []).filter(Boolean)] };
+      const merged: BackendCapabilities = {
+        backend: 'desktop',
+        connection: desktopCaps.connection,
+        authorization: desktopCaps.authorization,
+        liveProgress: desktopCaps.liveProgress,
+        lastEventAt: desktopCaps.lastEventAt,
+        canCreateSession: writable || (cliCaps?.canCreateSession ?? false),
+        canSendMessage: writable || (cliCaps?.canSendMessage ?? false),
+        canStop: writable || (cliCaps?.canStop ?? false),
+        canResume: writable || (cliCaps?.canResume ?? false),
+        canSetModel: writable || (cliCaps?.canSetModel ?? false),
+        canSetReasoning: writable || (cliCaps?.canSetReasoning ?? false),
+        notes: [...desktopCaps.notes, ...(cliCaps ? cliCaps.notes : [])].filter(Boolean),
+      };
+      // If Desktop is read-only but CLI is available, note the fallback
+      if (!writable && cliCaps) {
+        merged.notes.push('Write operations fall back to CLI (Desktop read-only).');
+      }
+      return merged;
     }
     if (cliCaps) return cliCaps;
     return { backend: 'desktop', connection: 'unavailable', authorization: 'none', liveProgress: 'unavailable', canCreateSession: false, canSendMessage: false, canStop: false, canResume: false, canSetModel: false, canSetReasoning: false, notes: ['No Freebuff backend is available.'] };
