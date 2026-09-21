@@ -246,3 +246,53 @@ test('capabilities: BackendCapabilities covers CLI states without conflation', a
     assert.equal(caps.authorization, 'unknown', 'a binary alone never proves login');
   }
 });
+
+test('capabilities: CompositeBackend aggregates CLI fallback when Desktop is read-only', async () => {
+  const { CompositeBackend } = await import('../src/backends/backend.js');
+  const { DesktopBackend } = await import('../src/backends/desktop-backend.js');
+  // Create a read-only Desktop backend
+  const desktop = new DesktopBackend();
+  desktop.probe = async () => ({
+    backend: 'desktop',
+    connection: 'connected_read_only',
+    authorization: 'read_only',
+    liveProgress: 'connected',
+    canCreateSession: false,
+    canSendMessage: false,
+    canStop: false,
+    canResume: false,
+    canSetModel: false,
+    canSetReasoning: false,
+    notes: ['Desktop is connected but read-only'],
+  });
+  // Create a mock CLI backend with write authorization
+  const cli = {
+    kind: 'cli' as const,
+    probe: async () => ({
+      backend: 'cli',
+      connection: 'cli_ready',
+      authorization: 'write_authorized',
+      liveProgress: 'unavailable',
+      canCreateSession: true,
+      canSendMessage: true,
+      canStop: true,
+      canResume: true,
+      canSetModel: true,
+      canSetReasoning: true,
+      notes: ['CLI is available with write authorization'],
+    }),
+    dispose: () => undefined,
+  };
+  const composite = new CompositeBackend({ desktop, cli: cli as any });
+  const caps = await composite.probe();
+  // Desktop is read-only but CLI is available -> writes should be available via CLI fallback
+  assert.equal(caps.canCreateSession, true, 'createSession available via CLI fallback');
+  assert.equal(caps.canSendMessage, true, 'sendMessage available via CLI fallback');
+  assert.equal(caps.canStop, true, 'stop available via CLI fallback');
+  assert.equal(caps.canResume, true, 'resume available via CLI fallback');
+  assert.equal(caps.canSetModel, true, 'setModel available via CLI fallback');
+  assert.equal(caps.canSetReasoning, true, 'setReasoning available via CLI fallback');
+  // Notes should indicate CLI fallback
+  assert.ok(caps.notes.some((n) => n.includes('CLI')), 'notes mention CLI fallback');
+  await desktop.dispose();
+});

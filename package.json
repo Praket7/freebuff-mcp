@@ -49,12 +49,14 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.4.0",
+    "@modelcontextprotocol/node": "2.0.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@modelcontextprotocol/server": "2.0.0",
     "node-pty": "1.2.0-beta.14",
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "2.0.0",
     "@types/node": "^24.0.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.2"

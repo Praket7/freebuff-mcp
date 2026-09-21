@@ -46,7 +46,7 @@ The programmatic Codebuff/Freebuff SDK backend (`sdk`) is **not enabled**: the c
 | --- | --- | --- |
 | MCP v2 | `serve` | Stable, primary |
 | MCP v1 | `serve-v1` | Deprecated: frozen, legacy compatibility only, excluded from the 0.2 stability promise |
-| HTTP (`createMcpHandler`) | `serve-http` | Supported, local-first; same v2 tool surface as `serve`; 2026-07-28 requests answered with the best supported revision |
+| HTTP (`createMcpHandler` + `toNodeHandler`) | `serve-http` | Supported, local-first; same v2 tool surface as `serve`; modern 2026-07-28 via `server/discover` + `_meta`, legacy 2025 fallback via `legacy: 'stateless'` |
 | ACP v1 | `serve-acp` | Experimental |
 
 ## Desktop handoff producer contract (unverified upstream)

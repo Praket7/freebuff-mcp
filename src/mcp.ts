@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/server';
+import { createMcpHandler } from '@modelcontextprotocol/server';
+import { toNodeHandler } from '@modelcontextprotocol/node';
 import { createServer as createHttpServer, IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
@@ -66,17 +67,14 @@ async function rawBody(req: IncomingMessage): Promise<string> {
 }
 export async function runHttp(): Promise<void> {
   // HTTP serves the SAME canonical v2 surface as stdio (CompositeBackend +
-  // SessionManager + TurnManager) through the official SDK transport
-  // (`WebStandardStreamableHTTPServerTransport`), which implements the full
-  // MCP 2026-07-28 protocol including modern envelope negotiation, per-request
-  // _meta for progress/cancellation, and client-disconnect abort propagation.
+  // SessionManager + TurnManager) through the official SDK's createMcpHandler
+  // + toNodeHandler adapter, which implements the full MCP 2026-07-28 protocol
+  // including modern envelope negotiation, per-request _meta for progress/
+  // cancellation, and client-disconnect abort propagation via the SDK's
+  // toNodeHandler adapter.
   const adapter = createDefaultAdapter();
-  const server = createV2ServerFromAdapter(adapter);
-  const transport = new WebStandardStreamableHTTPServerTransport({
-    sessionIdGenerator: undefined,
-  });
-  await server.connect(transport);
-
+  const mcpHandler = createMcpHandler(() => createV2ServerFromAdapter(adapter), { legacy: 'stateless' });
+  const nodeHandler = toNodeHandler(mcpHandler, { onerror: (error) => console.error('[MCP HTTP]', error) });
   const host = process.env.FREEBUFF_MCP_HOST ?? '127.0.0.1';
   const port = Number(process.env.FREEBUFF_MCP_PORT ?? 8788);
   if (!isLoopback(host) && process.env.FREEBUFF_MCP_ALLOW_REMOTE !== '1') throw new Error('Refusing non-loopback HTTP host; set FREEBUFF_MCP_ALLOW_REMOTE=1 only behind trusted HTTPS and authentication.');
@@ -101,7 +99,7 @@ export async function runHttp(): Promise<void> {
     if (req.url !== '/mcp') { res.writeHead(404, {'content-type':'application/json'}); res.end(JSON.stringify({error:'not_found'})); return; }
     if (!authorized(req)) { res.writeHead(401, {'www-authenticate':'Bearer'}); res.end(JSON.stringify({error:'unauthorized'})); return; }
 
-    // Convert Node IncomingMessage to Web Request
+    // Read body for the SDK handler
     let rawBodyText: string;
     try {
       rawBodyText = await rawBody(req);
@@ -115,52 +113,28 @@ export async function runHttp(): Promise<void> {
       }
     }
 
-    const headers = new Headers();
-    for (const [key, value] of Object.entries(req.headers)) {
-      if (value === undefined) continue;
-      if (Array.isArray(value)) { for (const item of value) headers.append(key, item); } else headers.append(key, value);
+    // Parse body for the SDK handler (toNodeHandler expects parsed body)
+    let parsedBody: unknown;
+    try {
+      parsedBody = rawBodyText ? JSON.parse(rawBodyText) : undefined;
+    } catch {
+      parsedBody = undefined;
     }
 
-    // Create AbortSignal that fires when client disconnects
-    const abortController = new AbortController();
-    req.on('close', () => abortController.abort());
-
-    const webRequest = new Request(`http://${host}:${port}/mcp`, {
-      method: req.method,
-      headers,
-      body: rawBodyText || undefined,
-      signal: abortController.signal,
-    });
-
+    // Delegate to the SDK's toNodeHandler which handles:
+    // - Modern MCP 2026-07-28 protocol (server/discover, _meta envelope)
+    // - Legacy 2025 compatibility path
+    // - Client-disconnect abort propagation via AbortSignal
+    // - Streaming with backpressure
     try {
-      const webResponse = await transport.handleRequest(webRequest);
-
-      const responseHeaders: Record<string, string> = {};
-      webResponse.headers.forEach((value, key) => { responseHeaders[key] = value; });
-      res.writeHead(webResponse.status, responseHeaders);
-
-      if (webResponse.body) {
-        // Use AbortSignal to stop streaming if client disconnects
-        const reader = webResponse.body.getReader();
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            if (!res.write(value)) await new Promise<void>((resolve) => res.once('drain', resolve));
-            if (abortController.signal.aborted) break;
-          }
-        } finally {
-          reader.releaseLock();
-        }
-      }
-      res.end();
+      await nodeHandler(req, res, parsedBody);
     } catch (error) {
       if (!res.headersSent) { res.writeHead(400, {'content-type':'application/json'}); res.end(JSON.stringify({error: error instanceof Error ? error.message : 'invalid_request'})); }
       else { try { res.end(); } catch { /* already closing */ } }
     }
   });
 
-  const cleanup = () => { adapter.dispose(); void transport.close().catch(() => undefined); };
+  const cleanup = () => { adapter.dispose(); void mcpHandler.close().catch(() => undefined); };
   httpServer.once('close', cleanup);
   process.once('SIGINT', () => { cleanup(); httpServer.close(); });
   process.once('SIGTERM', () => { cleanup(); httpServer.close(); });
