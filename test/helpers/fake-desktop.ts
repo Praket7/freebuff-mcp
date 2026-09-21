@@ -159,7 +159,9 @@ const threads = new Map<string, Record<string, unknown>>([
       calls.push({ method, path: path + url.search, ...(body !== undefined ? { body } : {}), ...(typeof headerLaunch === 'string' ? { launchId: headerLaunch } : {}) });
 
       if (path === '/healthz') {
-        if (typeof headerLaunch !== 'string' || headerLaunch !== launchId) return json(response, { error: 'unauthorized' }, 401);
+        if (typeof headerLaunch !== 'string' || headerLaunch !== launchId) {
+          return json(response, { error: 'unauthorized' }, 401);
+        }
         return json(response, { ok: true, launchId, pid: process.pid, port: (server.address() as AddressInfo).port });
       }
 

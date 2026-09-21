@@ -483,7 +483,6 @@ export class DesktopBackend implements FreebuffBackend {
   }
 
   private async assertWritable(): Promise<void> {
-    // Connect first: the launch id only exists once a Desktop is resolved.
     await this.connect();
     if (!this.connection?.launchId || !(await this.assertWritableCached())) throw new BridgeError(ErrorCodes.DESKTOP_AUTH_REQUIRED, 'Freebuff Desktop write authorization is unavailable.', 'Restart Freebuff Desktop or reopen the project, then retry.');
   }

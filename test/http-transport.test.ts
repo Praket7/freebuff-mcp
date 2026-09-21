@@ -46,10 +46,15 @@ async function startHttpServer(desktop: FakeDesktop): Promise<HttpServerHandle> 
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stderr = '';
-  child.stderr?.on('data', (chunk) => { stderr += chunk.toString(); });
+  child.stderr?.on('data', (chunk) => { 
+    stderr += chunk.toString();
+    const lines = chunk.toString().split('\n');
+    for (const line of lines) {
+      if (line.trim()) console.error('[SERVER STDERR]', line);
+    }
+  });
   const deadline = Date.now() + 30_000;
   for (;;) {
-    if (child.exitCode !== null) throw new Error(`serve-http exited early (${child.exitCode}): ${stderr}`);
     try {
       const response = await fetch(`http://127.0.0.1:${port}/healthz`, { signal: AbortSignal.timeout(1000) });
       if (response.ok) break;
@@ -512,8 +517,13 @@ test('http transport: real 2026 cancellation aborts request stream', async () =>
       controller.abort();
       // The callTool should reject with cancellation
       await assert.rejects(turnPromise, /aborted|cancelled/i, 'run_turn aborts when signal is aborted');
-      // Verify the turn was actually cancelled by checking bridge state
-      // (The fake desktop turnDelayMs is 30s so it would still be running)
+      // Verify the cancellation propagated to the Desktop backend via /stop
+      // Wait a bit for the stop call to be processed
+      await new Promise((r) => setTimeout(r, 500));
+      const stopCalls = desktop.calls.filter(
+        (call) => call.method === 'POST' && call.path.endsWith('/stop')
+      );
+      assert.ok(stopCalls.length > 0, 'aborting the modern request propagated cancellation to the Desktop backend');
     } finally {
       await client.close();
     }
