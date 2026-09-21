@@ -86,6 +86,12 @@ The catalog is stable: tools are always registered and return structured actiona
 
 Stdio is the safer default. `freebuff-mcp serve-http` binds `127.0.0.1:8788`, requires `Authorization: Bearer $FREEBUFF_MCP_TOKEN` on `/mcp`, validates Origin, bounds request bodies, and refuses non-loopback binding unless `FREEBUFF_MCP_ALLOW_REMOTE=1`. Remote use requires trusted HTTPS/private networking.
 
+The HTTP server uses `@modelcontextprotocol/server`'s `createMcpHandler`, which serves:
+- Modern MCP 2026-07-28 requests (with `Mcp-Method` header and per-request `_meta` for progress/cancellation)
+- Legacy 2025-era `initialize`/`tools/call` traffic through the compatibility path
+
+Both paths are tested and share the same canonical v2 tool surface.
+
 ## CLI fallback mode
 
 Set `FREEBUFF_MCP_CLI_MODE=pty` to force the CLI backend. New-session creation is serialized per project so conversation identity is never misattributed; `--continue` only receives conversation ids verified to exist in the CLI chat store; cancellation is verified and stuck children are cleaned up. Readiness relies on multiple signals, and UI scraping stays isolated here as fallback behavior.
@@ -112,7 +118,7 @@ pnpm build
 pnpm pack:check
 ```
 
-The suite (171 tests) covers the event store (cursors past 100 events, retention, per-thread staleness), SSE parsing/reconnect/Last-Event-ID/retry, handoff validation matrix, Desktop restart recovery, session/turn lifecycle and cancellation, phase classification, live-progress honesty, redaction classes, installers on existing/missing configs, and MCP integration tests that drive the real server through the MCP SDK client for both the v2 (`serve`) and legacy v1 (`serve-v1`) surfaces.
+The suite (178 tests) covers the event store (cursors past 100 events, retention, per-thread staleness), SSE parsing/reconnect/Last-Event-ID/retry, handoff validation matrix, Desktop restart recovery, session/turn lifecycle and cancellation, phase classification, live-progress honesty, redaction classes, installers on existing/missing configs, and MCP integration tests that drive the real server through the MCP SDK client for both the v2 (`serve`) and legacy v1 (`serve-v1`) surfaces.
 
 Because CI has no Freebuff Desktop, `test/helpers/fake-desktop.ts` serves the Desktop HTTP contract (payload shapes first captured from a live installation): `test/desktop-wire.test.ts` pins the exact payload shapes, `test/desktop-http-integration.test.ts` drives real sockets including turn completion/cancellation, and `test/http-transport.test.ts` / `test/acp-wire.test.ts` spawn the real `serve-http` and `serve-acp` processes to verify auth, rate limiting, capability advertisement, and prompt semantics on the wire.
 

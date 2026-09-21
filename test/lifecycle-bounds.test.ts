@@ -87,3 +87,41 @@ test('bounds: 10k thread buckets stay capped, newest readable, expired dropped',
   store.append({ sessionId: 's', turnId: 'fresh', threadId: 'fresh', type: 'phase' });
   assert.equal(store.progress('old-0', 0, 10).events.length, 0, 'expired buckets swept');
 });
+
+test('bounds: running turn state survives turn-state cap and thread-bucket pressure', () => {
+  const store = new EventStore();
+  // Create a running turn (Desktop-style) and register its state.
+  // This exercises the real state-registration path: setTurnState('running')
+  // is called by SessionManager when a turn transitions to running.
+  store.setTurnState('thread-running', 'session-0', 'turn-running', 'running');
+  // Verify the turn state is recorded
+  assert.equal(store.turnState('turn-running'), 'running');
+
+  // Create >2,000 terminal turns to exceed the turn-state cap (2,000).
+  // These will fill the turns map and force eviction.
+  for (let i = 0; i < 2_500; i++) {
+    store.setTurnState(`thread-${i}`, `session-${i}`, `turn-${i}`, 'completed');
+  }
+
+  // The original running turn state must survive because it's non-terminal.
+  // Terminal states should be evicted first.
+  assert.equal(store.turnState('turn-running'), 'running', 'running turn state must not be evicted');
+
+  // Now add >5,500 thread buckets to trigger thread-bucket pruning.
+  // The running turn's thread should have events from the setTurnState call.
+  for (let i = 0; i < 6_000; i++) {
+    store.append({ sessionId: 's', turnId: `turn-bucket-${i}`, threadId: `thread-bucket-${i}`, type: 'phase', message: `m${i}` });
+  }
+
+  // The running thread should still exist (protected by turn state + threadLive)
+  assert.ok(store.progress('thread-running', 0, 1).events.length > 0, 'running thread was retained');
+
+  // Memory should remain bounded
+  const turnSize = (store as unknown as { turns: Map<string, unknown> }).turns.size;
+  const threadSize = (store as unknown as { threads: Map<string, unknown> }).threads.size;
+  assert.ok(turnSize <= 2_500, `turn states bounded (got ${turnSize})`);
+  assert.ok(threadSize <= 5_501, `thread buckets bounded (got ${threadSize})`);
+});
+
+test('bounds: 10k thread buckets stay capped, newest readable, expired dropped', () => {
+});

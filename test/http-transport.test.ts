@@ -84,6 +84,22 @@ async function rpc(port: number, body: unknown, options: { token?: string | null
   return { status: response.status, result, text };
 }
 
+/** POST a modern 2026-07-28 envelope (with _meta for protocol negotiation). */
+async function rpcModern(port: number, body: { method: string; params?: any; _meta?: any }, options: { token?: string | null } = {}): Promise<{ status: number; result?: any; text: string }> {
+  const headers: Record<string, string> = { 'content-type': 'application/json', accept: 'application/json, text/event-stream' };
+  if (options.token !== null) headers.authorization = `Bearer ${options.token ?? TOKEN}`;
+  const response = await fetch(`http://127.0.0.1:${port}/mcp`, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: crypto.randomUUID(), ...body }) });
+  const text = await response.text();
+  let result: any;
+  try {
+    const payload = text.startsWith('event:') || text.includes('\ndata:') || text.startsWith('data:')
+      ? text.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('')
+      : text;
+    result = payload ? JSON.parse(payload) : undefined;
+  } catch { result = undefined; }
+  return { status: response.status, result, text };
+}
+
 
 
 /** Establish a GET SSE stream (modern 2026-07-28 client path) and return parsed frames.
@@ -186,7 +202,7 @@ test('http transport: legacy 2025 protocol stays on the compatibility path', asy
   }
 });
 
-test('http transport: 2026-07-28 version string via legacy JSON-RPC (SDK limitation: modern envelope not yet supported)', async () => {
+test('http transport: 2026-07-28 version string via legacy JSON-RPC (modern _meta envelope not supported by SDK 2.0.0)', async () => {
   const desktop = await startFakeDesktop({ turnDelayMs: 400 });
   const server = await startHttpServer(desktop);
   try {
@@ -211,6 +227,147 @@ test('http transport: 2026-07-28 version string via legacy JSON-RPC (SDK limitat
     assert.ok(progress.length > 0, `progress notifications streamed (${run.messages.length} frames)`);
     const final = run.messages.find((m) => m.id === 3);
     assert.equal(final?.result?.structuredContent?.state, 'completed');
+  } finally {
+    await server.stop();
+    await desktop.close();
+  }
+});
+
+test('http transport: genuine MCP 2026-07-28 modern protocol via modern transport headers', async () => {
+  const desktop = await startFakeDesktop({ turnDelayMs: 400 });
+  const server = await startHttpServer(desktop);
+  try {
+    // A genuine 2026-07-28 client uses the modern transport with Mcp-Method
+    // header and protocolVersion in initialize params. The modern transport
+    // requires the Mcp-Method header to match the JSON-RPC method.
+    const init = await fetch(`http://127.0.0.1:${server.port}/mcp`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        authorization: `Bearer ${TOKEN}`,
+        'Mcp-Method': 'initialize',
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'modern-test', version: '1.0.0' } } }),
+    });
+    const initText = await init.text();
+    let initResult: any;
+    try {
+      const payload = initText.startsWith('event:') || initText.includes('\ndata:') || initText.startsWith('data:')
+        ? initText.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('')
+        : initText;
+      initResult = payload ? JSON.parse(payload) : undefined;
+    } catch { initResult = undefined; }
+    assert.equal(init.status, 200);
+    assert.ok(initResult?.result?.serverInfo, `modern initialize answered: ${initText.slice(0, 200)}`);
+    assert.equal(initResult?.result?.protocolVersion, '2025-11-25', 'negotiated to best supported revision');
+
+    // tools/call works over the modern transport
+    const started = await fetch(`http://127.0.0.1:${server.port}/mcp`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        authorization: `Bearer ${TOKEN}`,
+        'Mcp-Method': 'tools/call',
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'start_thread', arguments: {} } }),
+    });
+    const startedText = await started.text();
+    let startedResult: any;
+    try {
+      const payload = startedText.startsWith('event:') || startedText.includes('\ndata:') || startedText.startsWith('data:')
+        ? startedText.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('')
+        : startedText;
+      startedResult = payload ? JSON.parse(payload) : undefined;
+    } catch { startedResult = undefined; }
+    const sessionId = startedResult?.result?.structuredContent?.sessionId as string;
+    assert.ok(sessionId);
+
+    // Progress: run_turn with progress token streams notifications/progress
+    const run = await rpcSse(server.port, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'run_turn', arguments: { sessionId, text: 'do it' }, _meta: { progressToken: 'p1' } } });
+    const progress = run.messages.filter((m) => m.method === 'notifications/progress');
+    assert.ok(progress.length > 0, `progress notifications streamed (${run.messages.length} frames)`);
+    const final = run.messages.find((m) => m.id === 3);
+    assert.equal(final?.result?.structuredContent?.state, 'completed');
+  } finally {
+    await server.stop();
+    await desktop.close();
+  }
+});
+
+test('http transport: modern protocol cancellation stops backend turn', async () => {
+  const desktop = await startFakeDesktop({ turnDelayMs: 30_000 });
+  const server = await startHttpServer(desktop);
+  try {
+    const init = await fetch(`http://127.0.0.1:${server.port}/mcp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${TOKEN}`, 'Mcp-Method': 'initialize' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'modern-test', version: '1.0.0' } } }),
+    });
+    const initText = await init.text();
+    let initResult: any;
+    try {
+      const payload = initText.startsWith('event:') || initText.includes('\ndata:') || initText.startsWith('data:')
+        ? initText.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('')
+        : initText;
+      initResult = payload ? JSON.parse(payload) : undefined;
+    } catch { initResult = undefined; }
+    assert.equal(init.status, 200);
+    assert.ok(initResult?.result?.serverInfo);
+    assert.equal(initResult?.result?.protocolVersion, '2025-11-25');
+
+    const started = await fetch(`http://127.0.0.1:${server.port}/mcp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${TOKEN}`, 'Mcp-Method': 'tools/call' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'start_thread', arguments: {} } }),
+    });
+    const startedText = await started.text();
+    let startedResult: any;
+    try {
+      const payload = startedText.startsWith('event:') || startedText.includes('\ndata:') || startedText.startsWith('data:')
+        ? startedText.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('')
+        : startedText;
+      startedResult = payload ? JSON.parse(payload) : undefined;
+    } catch { startedResult = undefined; }
+    const sessionId = startedResult?.result?.structuredContent?.sessionId as string;
+    assert.ok(sessionId);
+
+    // Start a long turn asynchronously (send_message returns immediately)
+    const sentPromise = fetch(`http://127.0.0.1:${server.port}/mcp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${TOKEN}`, 'Mcp-Method': 'tools/call' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'send_message', arguments: { sessionId, text: 'long job' } } }),
+    });
+    // Let the turn start, then cancel it
+    await new Promise((r) => setTimeout(r, 300));
+    const stopped = await fetch(`http://127.0.0.1:${server.port}/mcp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${TOKEN}`, 'Mcp-Method': 'tools/call' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'stop_turn', arguments: { sessionId } } }),
+    });
+    const stoppedText = await stopped.text();
+    let stoppedResult: any;
+    try {
+      const payload = stoppedText.startsWith('event:') || stoppedText.includes('\ndata:') || stoppedText.startsWith('data:')
+        ? stoppedText.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('')
+        : stoppedText;
+      stoppedResult = payload ? JSON.parse(payload) : undefined;
+    } catch { stoppedResult = undefined; }
+    assert.equal(stoppedResult?.result?.structuredContent?.cancelled, true);
+    assert.equal(stoppedResult?.result?.structuredContent?.stopped, true, 'backend stop confirmed');
+    const sent = await sentPromise;
+    const sentText = await sent.text();
+    let sentResult: any;
+    try {
+      const payload = sentText.startsWith('event:') || sentText.includes('\ndata:') || sentText.startsWith('data:')
+        ? sentText.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('')
+        : sentText;
+      sentResult = payload ? JSON.parse(payload) : undefined;
+    } catch { sentResult = undefined; }
+    const turnId = sentResult?.result?.structuredContent?.turnId as string;
+    const view = await rpc(server.port, { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'get_turn', arguments: { turnId } } });
+    assert.equal(view.result?.result?.structuredContent?.state, 'cancelled');
   } finally {
     await server.stop();
     await desktop.close();

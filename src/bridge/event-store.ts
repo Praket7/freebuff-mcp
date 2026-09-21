@@ -213,10 +213,34 @@ export class EventStore {
     this.turns.set(turnId, state);
     // Bound turn-state memory for long-lived processes (insertion-ordered, so
     // the oldest — overwhelmingly long-terminal — entries go first).
+    // CRITICAL: Never evict a non-terminal turn state (queued/running/waiting_for_user)
+    // solely because it is old. Only evict terminal states first. If the store
+    // contains more active states than the nominal cap, temporarily exceeding the
+    // cap is preferable to losing correctness.
     while (this.turns.size > 2_000) {
       const oldest = this.turns.keys().next();
       if (oldest.done) break;
-      this.turns.delete(oldest.value);
+      const oldestState = this.turns.get(oldest.value);
+      if (oldestState && !isTerminalTurnState(oldestState)) {
+        // Skip non-terminal states; try the next oldest
+        // We need to find a terminal state to evict
+        let foundTerminal = false;
+        for (const [key, value] of this.turns) {
+          if (isTerminalTurnState(value)) {
+            this.turns.delete(key);
+            foundTerminal = true;
+            break;
+          }
+        }
+        if (!foundTerminal) {
+          // No terminal states to evict; temporarily exceed cap rather than
+          // lose track of an active turn. This is the correct behavior:
+          // active turns must never be evicted.
+          break;
+        }
+      } else {
+        this.turns.delete(oldest.value);
+      }
     }
     const type: BridgeEventType = state === 'queued' ? 'queued' : state === 'completed' ? 'completed' : state === 'failed' ? 'failed' : state === 'cancelled' ? 'cancelled' : state === 'waiting_for_user' ? 'waiting_for_user' : 'turn_started';
     this.append({ sessionId, turnId, threadId, type, state, ...(error ? { error } : {}) });

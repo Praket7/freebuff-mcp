@@ -58,6 +58,8 @@ async function collectDoctor(): Promise<DoctorReport> {
   let lastEventAt: string | undefined;
   let handoffReport: DoctorReport['handoff'];
   const backend: DoctorReport['backend'] = { kind: 'none', connection: 'unavailable', authorization: 'none', liveProgress: 'unavailable', notes: [] };
+  // Store the full Desktop probe capabilities for accurate capability reporting
+  let desktopCaps: Awaited<ReturnType<DesktopBackend['probe']>> | null = null;
 
   try {
     const desktop = new DesktopBackend();
@@ -83,6 +85,7 @@ async function collectDoctor(): Promise<DoctorReport> {
     backend.authorization = caps.authorization;
     backend.liveProgress = caps.liveProgress;
     backend.notes = caps.notes;
+    desktopCaps = caps; // Store full capabilities for accurate reporting
     desktop.dispose();
   } catch (error) {
     errors.push(error instanceof Error ? error.message : String(error));
@@ -118,7 +121,6 @@ async function collectDoctor(): Promise<DoctorReport> {
   let ptyVersion: string | null = null;
   try { ptyVersion = await nodePtyVersion(); } catch { ptyVersion = null; }
 
-  const desktopCaps = backend.kind === 'desktop' ? backend : undefined;
   return {
     ok: desktopDetected || Boolean(cliPath),
     version: VERSION,
@@ -131,11 +133,11 @@ async function collectDoctor(): Promise<DoctorReport> {
     capabilities: {
       read: desktopDetected || Boolean(cliPath),
       write: desktopAuthorized || (cliCaps?.canSendMessage ?? false),
-      createSession: desktopCaps ? desktopCaps.connection.startsWith('connected') : (cliCaps?.canCreateSession ?? false),
-      stop: desktopAuthorized || (cliCaps?.canStop ?? false),
-      resume: desktopAuthorized || (cliCaps?.canResume ?? false),
-      model: desktopAuthorized || (cliCaps?.canSetModel ?? false),
-      reasoning: desktopAuthorized || (cliCaps?.canSetReasoning ?? false),
+      createSession: desktopCaps?.canCreateSession ?? (cliCaps?.canCreateSession ?? false),
+      stop: desktopCaps?.canStop ?? (cliCaps?.canStop ?? false),
+      resume: desktopCaps?.canResume ?? (cliCaps?.canResume ?? false),
+      model: desktopCaps?.canSetModel ?? (cliCaps?.canSetModel ?? false),
+      reasoning: desktopCaps?.canSetReasoning ?? (cliCaps?.canSetReasoning ?? false),
     },
     projectRoot: process.env.FREEBUFF_PROJECT_ROOT ?? process.cwd(),
     pty: { available: Boolean(cliPath), nodePtyVersion: ptyVersion },
