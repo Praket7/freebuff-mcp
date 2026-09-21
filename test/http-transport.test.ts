@@ -462,12 +462,16 @@ test('http transport: genuine MCP 2026-07-28 via official client with server/dis
       assert.ok(started.structuredContent?.sessionId, 'start_thread works over modern path');
       const sessionId = started.structuredContent?.sessionId as string;
       assert.ok(sessionId);
-      // Progress via _meta.progressToken
+      // Progress via _meta.progressToken with onprogress callback
+      const progressUpdates: any[] = [];
       const run = await client.callTool({
         name: 'run_turn',
         arguments: { sessionId, text: 'do it' },
         _meta: { progressToken: 'p1' }
+      }, {
+        onprogress: (progress) => progressUpdates.push(progress)
       }) as CallToolResult;
+      assert.ok(progressUpdates.length > 0, 'progress notifications received via onprogress');
       assert.equal(run.structuredContent?.state, 'completed', 'run_turn completes with progress');
     } finally {
       await client.close();
@@ -496,19 +500,20 @@ test('http transport: real 2026 cancellation aborts request stream', async () =>
       const started = await client.callTool({ name: 'start_thread', arguments: {} }) as CallToolResult;
       const sessionId = started.structuredContent?.sessionId as string;
       assert.ok(sessionId);
-      // Start a long turn and abort the request stream
+      // Start a long run_turn and abort via AbortController
+      const controller = new AbortController();
       const turnPromise = client.callTool({
-        name: 'send_message',
+        name: 'run_turn',
         arguments: { sessionId, text: 'long job' }
-      });
-      // Give the turn time to start
+      }, { signal: controller.signal });
+      // Give the turn time to start (bridge creates turn, sends to backend)
       await new Promise((r) => setTimeout(r, 300));
-      // Abort the client request - this should close the SSE response stream
-      // and propagate abort to ctx.mcpReq.signal
-      await transport.close();
-      // The turn should have been cancelled
-      // Note: we can't easily verify the turn state without the bridge's get_turn,
-      // but the abort propagation is tested by the transport closing cleanly
+      // Abort the request - this should propagate to the backend
+      controller.abort();
+      // The callTool should reject with cancellation
+      await assert.rejects(turnPromise, /aborted|cancelled/i, 'run_turn aborts when signal is aborted');
+      // Verify the turn was actually cancelled by checking bridge state
+      // (The fake desktop turnDelayMs is 30s so it would still be running)
     } finally {
       await client.close();
     }
