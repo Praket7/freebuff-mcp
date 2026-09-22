@@ -39,6 +39,7 @@ export function isLoopbackCandidateUrl(url: string): boolean {
 
 const DISCOVERY_TTL_MS = 10_000;
 const FRESHNESS_MS = 10 * 60_000;
+const FUTURE_CLOCK_SKEW_MS = 60_000;
 
 function asString(value: unknown): string | undefined { return typeof value === 'string' && value.length > 0 ? value : undefined; }
 
@@ -112,8 +113,8 @@ export async function discoverDesktopCandidates(): Promise<{ candidates: Desktop
       const discoveredLaunchId = asString(value.launchId) ?? asString(value['launch-id']) ?? asString(value.launch_id);
       // A readiness file may provide harmless loopback routing metadata even
       // when it is not private. A launch id is different: it authorizes local
-      // writes, so never consume it from a POSIX file that is foreign-owned or
-      // group/world-readable. Windows relies on the user-profile ACL contract.
+      // writes, so never consume it from a POSIX file that is foreign-owned,
+      // group/world-readable, non-regular, or oversized.
       let launchId = discoveredLaunchId;
       if (launchId) {
         try { await verifyHandoffOwnership(file); } catch { launchId = undefined; }
@@ -122,7 +123,9 @@ export async function discoverDesktopCandidates(): Promise<{ candidates: Desktop
       const pid = Number.isInteger(pidValue) && pidValue > 0 ? pidValue : undefined;
       const freshnessValue = value.timestamp ?? value.updatedAt ?? value.updated_at;
       const freshness = typeof freshnessValue === 'number' ? freshnessValue : typeof freshnessValue === 'string' ? Date.parse(freshnessValue) : undefined;
-      if (freshness && Date.now() - freshness > FRESHNESS_MS) continue;
+      if (typeof freshness !== 'number' || !Number.isFinite(freshness)) continue;
+      const age = Date.now() - freshness;
+      if (age > FRESHNESS_MS || age < -FUTURE_CLOCK_SKEW_MS) continue;
       if (!pid || !processIsAlive(pid)) continue;
       push({ url, launchId, pid, source: 'readiness' });
     } catch { /* optional metadata */ }
@@ -162,17 +165,23 @@ export async function discoverDesktopCandidates(): Promise<{ candidates: Desktop
 }
 
 async function probeCandidate(candidate: DesktopCandidate): Promise<DesktopCandidate | null> {
-  const headers: Record<string, string> = { accept: 'application/json' };
-  if (candidate.launchId) headers['x-freebuff-launch-id'] = candidate.launchId;
+  const readHeaders: Record<string, string> = { accept: 'application/json' };
   try {
-    const response = await fetch(new URL('/api/projects', candidate.url), { signal: AbortSignal.timeout(1500), headers });
+    if (candidate.launchId) {
+      const health = await fetch(new URL('/healthz', candidate.url), {
+        signal: AbortSignal.timeout(1500),
+        headers: { ...readHeaders, 'x-freebuff-launch-id': candidate.launchId },
+      });
+      if (!health.ok) return null;
+      const healthBody = await health.json().catch(() => null) as Record<string, unknown> | null;
+      if (!healthBody || healthBody.ok !== true) return null;
+    }
+
+    // Read-only discovery does not need the write-authorizing launch id.
+    const response = await fetch(new URL('/api/projects', candidate.url), { signal: AbortSignal.timeout(1500), headers: readHeaders });
     if (!response.ok) return null;
     const body = (await response.json()) as unknown;
     if (!body || typeof body !== 'object' || !Array.isArray((body as Record<string, unknown>).projects)) return null;
-    if (candidate.launchId) {
-      const health = await fetch(new URL('/healthz', candidate.url), { signal: AbortSignal.timeout(1500), headers });
-      if (!health.ok) return null;
-    }
     return candidate;
   } catch { return null; }
 }
@@ -201,7 +210,7 @@ export async function discoverDesktop(options: DiscoverLiveOptions = {}): Promis
   for (const candidate of candidates) {
     const ok = await probeCandidate(candidate);
     if (ok) verified.push(ok);
-    if (ok) break; // first healthy candidate wins; keep the rest listed for diagnostics
+    if (ok) break;
   }
   cache.set(cacheKey, { at: Date.now(), candidates: verified, reason });
   return { candidate: verified[0] ?? null, considered: verified.length ? verified : candidates, reason: verified.length ? undefined : (reason ?? 'no_healthy_candidate') };
