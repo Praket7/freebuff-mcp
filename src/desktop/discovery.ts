@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readHandoff, processIsAlive } from './handoff.js';
+import { readHandoff, processIsAlive, verifyHandoffOwnership } from './handoff.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -109,7 +109,15 @@ export async function discoverDesktopCandidates(): Promise<{ candidates: Desktop
       const port = typeof value.port === 'number' || typeof value.port === 'string' ? Number(value.port) : undefined;
       const url = asString(value.url) ?? (port && port > 0 && port < 65536 ? `http://127.0.0.1:${port}` : undefined);
       if (!url || !isLoopbackCandidateUrl(url)) continue;
-      const launchId = asString(value.launchId) ?? asString(value['launch-id']) ?? asString(value.launch_id);
+      const discoveredLaunchId = asString(value.launchId) ?? asString(value['launch-id']) ?? asString(value.launch_id);
+      // A readiness file may provide harmless loopback routing metadata even
+      // when it is not private. A launch id is different: it authorizes local
+      // writes, so never consume it from a POSIX file that is foreign-owned or
+      // group/world-readable. Windows relies on the user-profile ACL contract.
+      let launchId = discoveredLaunchId;
+      if (launchId) {
+        try { await verifyHandoffOwnership(file); } catch { launchId = undefined; }
+      }
       const pidValue = Number(value.pid ?? value.processId ?? value.process_id);
       const pid = Number.isInteger(pidValue) && pidValue > 0 ? pidValue : undefined;
       const freshnessValue = value.timestamp ?? value.updatedAt ?? value.updated_at;

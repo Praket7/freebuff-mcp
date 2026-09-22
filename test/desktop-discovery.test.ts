@@ -249,3 +249,34 @@ test('discovery: readiness metadata without a PID is ignored', async () => {
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+
+test('discovery: insecure POSIX readiness metadata never contributes a launch id', async () => {
+  if (process.platform === 'win32') return;
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'freebuff-readiness-mode-'));
+  const file = path.join(dir, 'readiness.json');
+  const previousReadiness = process.env.FREEBUFF_READINESS_FILE;
+  const previousHandoff = process.env[HANDOFF_ENV];
+  const url = 'http://127.0.0.1:65430';
+  try {
+    await fs.writeFile(file, JSON.stringify({
+      url,
+      launchId: 'must-not-be-used',
+      pid: process.pid,
+      timestamp: Date.now(),
+    }), { encoding: 'utf8', mode: 0o644 });
+    await fs.chmod(file, 0o644);
+    process.env.FREEBUFF_READINESS_FILE = file;
+    process.env[HANDOFF_ENV] = path.join(dir, 'missing-handoff.json');
+    invalidateDiscoveryCache();
+    const { candidates } = await discoverDesktopCandidates();
+    const candidate = candidates.find((value) => value.url === url);
+    assert.ok(candidate, 'readiness URL remains usable for read-only discovery');
+    assert.equal(candidate?.launchId, undefined, 'insecure readiness file must not contribute write authorization');
+  } finally {
+    invalidateDiscoveryCache();
+    if (previousReadiness === undefined) delete process.env.FREEBUFF_READINESS_FILE; else process.env.FREEBUFF_READINESS_FILE = previousReadiness;
+    if (previousHandoff === undefined) delete process.env[HANDOFF_ENV]; else process.env[HANDOFF_ENV] = previousHandoff;
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

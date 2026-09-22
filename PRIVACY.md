@@ -4,7 +4,7 @@
 
 - All bridge state (sessions, turns, progress events) lives in process memory with bounded retention and is never persisted or transmitted anywhere by the bridge itself.
 - Desktop discovery reads only local metadata you or Freebuff Desktop placed in the current user's config/log directories.
-- The handoff file contains a loopback URL and short-lived launch id — no credentials — and stays in the current user's config directory.
+- The handoff file contains a loopback URL and short-lived launch id, but no Freebuff account token. The launch id is still sensitive local write authorization and the bridge requires owner-only POSIX permissions before using it.
 - `freebuff-mcp doctor` output stays local unless you share it.
 
 ## What flows where
