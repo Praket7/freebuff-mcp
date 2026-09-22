@@ -7,6 +7,7 @@ Security, routing, and release-hygiene hardening after the 0.2.0 publication.
 - Route direct thread/message reads by the real owning backend so a connected Desktop cannot steal CLI conversation reads.
 - Reject group/world-readable POSIX handoff files and repair handoff mode to 0600 when writing.
 - Require readiness metadata to include a live positive PID.
+- Treat readiness-file launch IDs as sensitive: on POSIX they are ignored unless the metadata file is current-user-owned and owner-only.
 - Merge doctor capabilities across Desktop and CLI fallback with logical OR semantics.
 - Remove legacy credential-file inspection and stop deprecated serve-v1 from advertising unverified CLI write capability.
 - Expand protected project-file rules for common credential files/directories and add focused regressions.
