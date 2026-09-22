@@ -4,6 +4,7 @@ import path from 'node:path';
 
 export const HANDOFF_VERSION = 1;
 export const HANDOFF_ENV = 'FREEBUFF_MCP_HANDOFF_FILE';
+const HANDOFF_MAX_BYTES = 64 * 1024;
 
 export interface DesktopHandoff {
   version: number;
@@ -25,7 +26,7 @@ function isLoopbackUrl(url: URL): boolean {
 }
 
 export function processIsAlive(pid: number | undefined): boolean {
-  if (!pid || pid <= 0) return true; // unknown pids are not treated as dead
+  if (!pid || pid <= 0) return false;
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
@@ -52,40 +53,46 @@ export function defaultHandoffPaths(): string[] {
 
 /**
  * Read and validate a Desktop handoff file. An explicit path (or the env var)
- * wins; otherwise the platform-default locations are tried in order, so a
- * stock Desktop installation is discovered with zero configuration.
- * Validation covers: file presence, JSON shape, format version, loopback URL,
- * live PID, and freshness. The file itself is written by the Desktop (or a
- * test fixture) into the current user's own config directory; it never
- * contains credentials, only a loopback URL and a short-lived launch id that
- * the Desktop will challenge over HTTP.
+ * wins; otherwise every platform-default location is tried in order. An
+ * invalid stale first default must not mask a later valid default.
  */
 export async function readHandoff(explicitPath?: string): Promise<HandoffValidation> {
   const configured = explicitPath ?? process.env[HANDOFF_ENV];
   if (configured) return validateHandoffFile(configured);
+
+  let firstInvalid: HandoffValidation | undefined;
   for (const fallback of defaultHandoffPaths()) {
-    try { await fs.stat(fallback); } catch { continue; }
-    return validateHandoffFile(fallback);
+    const result = await validateHandoffFile(fallback);
+    if (result.valid) return result;
+    if (result.reason !== 'handoff_missing' && !firstInvalid) firstInvalid = result;
   }
-  return { valid: false, reason: 'no_handoff_configured' };
+  return firstInvalid ?? { valid: false, reason: 'no_handoff_configured' };
 }
 
 async function validateHandoffFile(handoffPath: string): Promise<HandoffValidation> {
-  // Ownership first: a file planted by another uid is untrusted no matter
-  // what its contents say. A missing file is still "missing", not untrusted.
+  let stat: Awaited<ReturnType<typeof fs.lstat>>;
   try {
-    await fs.stat(handoffPath);
+    stat = await fs.lstat(handoffPath);
   } catch {
     return { valid: false, reason: 'handoff_missing', path: handoffPath };
   }
+  if (stat.isSymbolicLink() || !stat.isFile()) return { valid: false, reason: 'handoff_invalid_file_type', path: handoffPath };
+  if (stat.size > HANDOFF_MAX_BYTES) return { valid: false, reason: 'handoff_too_large', path: handoffPath };
+
   try {
     await verifyHandoffOwnership(handoffPath);
   } catch (error) {
-    const reason = error instanceof Error && /permissions/i.test(error.message)
+    const message = error instanceof Error ? error.message : '';
+    const reason = /permissions/i.test(message)
       ? 'handoff_insecure_permissions'
-      : 'handoff_untrusted_owner';
+      : /symbolic|regular file/i.test(message)
+        ? 'handoff_invalid_file_type'
+        : /large|size/i.test(message)
+          ? 'handoff_too_large'
+          : 'handoff_untrusted_owner';
     return { valid: false, reason, path: handoffPath };
   }
+
   let raw: string;
   try { raw = await fs.readFile(handoffPath, 'utf8'); } catch { return { valid: false, reason: 'handoff_missing', path: handoffPath }; }
   let value: unknown;
@@ -110,29 +117,35 @@ async function validateHandoffFile(handoffPath: string): Promise<HandoffValidati
 }
 
 /**
- * Write a handoff file (used by tests and available to the Desktop). The file
- * lives under the current user's config directory so it is never shared across
- * user boundaries.
+ * Write a handoff file atomically in the current user's config directory.
+ * A same-directory owner-only temporary file prevents partial JSON from being
+ * observed and avoids following a pre-existing symlink at the destination.
  */
 export async function writeHandoff(handoff: Omit<DesktopHandoff, 'version'> & { version?: number }, explicitPath?: string): Promise<string> {
   const target = explicitPath ?? process.env[HANDOFF_ENV] ?? defaultHandoffPaths()[0] ?? path.join(os.homedir(), '.config', 'freebuff-desktop', 'mcp-handoff.json');
   await fs.mkdir(path.dirname(target), { recursive: true });
-  // The handoff carries a live launch id: owner-only permissions on POSIX so
-  // other local users cannot steal it. (Windows relies on the user-profile
-  // ACL: see docs/compatibility.md for the producer contract.)
-  await fs.writeFile(target, JSON.stringify({ version: HANDOFF_VERSION, ...handoff }, null, 2), { encoding: 'utf8', mode: 0o600 });
-  if (process.platform !== 'win32') await fs.chmod(target, 0o600);
+  const tmp = `${target}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  try {
+    await fs.writeFile(tmp, JSON.stringify({ version: HANDOFF_VERSION, ...handoff }, null, 2), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    if (process.platform !== 'win32') await fs.chmod(tmp, 0o600);
+    await fs.rename(tmp, target);
+  } finally {
+    await fs.rm(tmp, { force: true }).catch(() => undefined);
+  }
   await verifyHandoffOwnership(target);
   return target;
 }
 
 /**
- * Confirm a handoff file is owned by the current user. A file planted by
- * another uid must never be trusted, even if its contents validate.
+ * Confirm a handoff is a small regular file owned by the current user. On
+ * POSIX, group/other access is forbidden because the file carries a live
+ * launch id. Windows relies on the current-user profile ACL contract.
  */
 export async function verifyHandoffOwnership(handoffPath: string): Promise<void> {
+  const stat = await fs.lstat(handoffPath);
+  if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`Refusing handoff path that is not a regular file (${handoffPath}).`);
+  if (stat.size > HANDOFF_MAX_BYTES) throw new Error(`Refusing handoff file larger than ${HANDOFF_MAX_BYTES} bytes (${handoffPath}).`);
   if (process.platform === 'win32' || typeof process.getuid !== 'function') return;
-  const stat = await fs.stat(handoffPath);
   if (stat.uid !== process.getuid?.()) {
     throw new Error(`Refusing handoff file owned by uid ${stat.uid}, expected ${process.getuid?.()} (${handoffPath}).`);
   }
