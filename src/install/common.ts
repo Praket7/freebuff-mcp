@@ -33,12 +33,31 @@ export function tomlQuote(value: string): string {
   return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t')}"`;
 }
 
-/** Write atomically (temp file + rename) so a crash never leaves half a config. */
+/**
+ * Write atomically without widening config-file permissions. Existing regular
+ * files keep their mode; new configs default to owner-only on POSIX. Symlinked
+ * config targets are refused rather than silently replacing the link.
+ */
 async function atomicWriteFile(target: string, content: string): Promise<void> {
   await fs.mkdir(path.dirname(target), { recursive: true });
-  const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
-  await fs.writeFile(tmp, content, 'utf8');
-  await fs.rename(tmp, target);
+  let mode = 0o600;
+  try {
+    const existing = await fs.lstat(target);
+    if (existing.isSymbolicLink()) throw new Error(`Refusing to replace symlinked config file ${target}.`);
+    if (!existing.isFile()) throw new Error(`Refusing to replace non-regular config path ${target}.`);
+    mode = existing.mode & 0o777;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+  }
+
+  const tmp = `${target}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  try {
+    await fs.writeFile(tmp, content, { encoding: 'utf8', mode, flag: 'wx' });
+    if (process.platform !== 'win32') await fs.chmod(tmp, mode);
+    await fs.rename(tmp, target);
+  } finally {
+    await fs.rm(tmp, { force: true }).catch(() => undefined);
+  }
 }
 
 export function codexConfigText(): string {
@@ -55,8 +74,6 @@ enabled = true
 
 export function claudeConfigJson(): string {
   const { command, args } = executableCommand();
-  // Per-server timeout in ms: run_turn can legitimately wait out a long
-  // Freebuff turn, so the default must cover it rather than killing the server.
   return JSON.stringify({ freebuff: { type: 'stdio', command, args, env: {}, timeout: 3_600_000 } }, null, 2);
 }
 
@@ -113,10 +130,7 @@ export async function writeClaudeConfig(plan: InstallPlan): Promise<{ written: b
     }
     existing = parsed as Record<string, unknown>;
   } catch (error) {
-    // A malformed existing file must never be silently replaced: that would
-    // destroy the user's unrelated configuration.
     if (hadFile) return { written: false, message: `Refusing to overwrite the malformed JSON in ${plan.configPath} (${error instanceof Error ? error.message : 'parse error'}); fix or remove it first. No changes made.` };
-    /* create below */
   }
   const mcpServers = (existing.mcpServers && typeof existing.mcpServers === 'object' && !Array.isArray(existing.mcpServers) ? existing.mcpServers : {}) as Record<string, unknown>;
   const parsed = JSON.parse(plan.display) as Record<string, unknown>;
