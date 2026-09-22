@@ -2,6 +2,13 @@ name: CI
 on:
   push:
   pull_request:
+
+# Keep only the newest CI run per branch/ref. This prevents stale matrices from
+# monopolizing hosted-runner capacity after a follow-up fix is pushed.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     strategy:
