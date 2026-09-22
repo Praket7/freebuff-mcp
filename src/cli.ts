@@ -7,7 +7,7 @@ import { installClaude } from './install/claude.js';
 import { findFreebuffCli } from './pty.js';
 import { DesktopBackend } from './backends/desktop-backend.js';
 import { CliBackend } from './backends/cli-backend.js';
-import { nodePtyVersion } from './diagnostics.js';
+import { anyBackendCapability, nodePtyVersion } from './diagnostics.js';
 import { VERSION } from './version.js';
 
 const USAGE = `freebuff-mcp — MCP bridge for locally installed Freebuff Desktop and CLI
@@ -133,11 +133,11 @@ async function collectDoctor(): Promise<DoctorReport> {
     capabilities: {
       read: desktopDetected || Boolean(cliPath),
       write: desktopAuthorized || (cliCaps?.canSendMessage ?? false),
-      createSession: desktopCaps?.canCreateSession ?? (cliCaps?.canCreateSession ?? false),
-      stop: desktopCaps?.canStop ?? (cliCaps?.canStop ?? false),
-      resume: desktopCaps?.canResume ?? (cliCaps?.canResume ?? false),
-      model: desktopCaps?.canSetModel ?? (cliCaps?.canSetModel ?? false),
-      reasoning: desktopCaps?.canSetReasoning ?? (cliCaps?.canSetReasoning ?? false),
+      createSession: anyBackendCapability(desktopCaps?.canCreateSession, cliCaps?.canCreateSession),
+      stop: anyBackendCapability(desktopCaps?.canStop, cliCaps?.canStop),
+      resume: anyBackendCapability(desktopCaps?.canResume, cliCaps?.canResume),
+      model: anyBackendCapability(desktopCaps?.canSetModel, cliCaps?.canSetModel),
+      reasoning: anyBackendCapability(desktopCaps?.canSetReasoning, cliCaps?.canSetReasoning),
     },
     projectRoot: process.env.FREEBUFF_PROJECT_ROOT ?? process.cwd(),
     pty: { available: Boolean(cliPath), nodePtyVersion: ptyVersion },

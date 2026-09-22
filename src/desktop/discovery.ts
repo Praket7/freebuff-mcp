@@ -115,7 +115,7 @@ export async function discoverDesktopCandidates(): Promise<{ candidates: Desktop
       const freshnessValue = value.timestamp ?? value.updatedAt ?? value.updated_at;
       const freshness = typeof freshnessValue === 'number' ? freshnessValue : typeof freshnessValue === 'string' ? Date.parse(freshnessValue) : undefined;
       if (freshness && Date.now() - freshness > FRESHNESS_MS) continue;
-      if (!processIsAlive(pid)) continue;
+      if (!pid || !processIsAlive(pid)) continue;
       push({ url, launchId, pid, source: 'readiness' });
     } catch { /* optional metadata */ }
   }

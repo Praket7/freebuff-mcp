@@ -24,7 +24,7 @@ Feature support by platform, client, and backend. All entries reflect tested beh
 | stdio server (`serve`) | ✅ | ✅ | Recommended default |
 | Stable tool catalog | ✅ | ✅ | Unavailable backends yield structured errors, not missing tools |
 | `run_turn` progress | ✅ (request progress) | ✅ (request progress) | Coalesced, request-scoped notifications |
-| Cancellation | ✅ | ✅ | `notifications/cancelled` aborts the backend |
+| Cancellation | ✅ | ✅ | Transport-native request cancellation aborts the backend; modern HTTP closes the request SSE stream |
 | Resources | ✅ | ✅ | Throttled update notifications |
 | `startup_timeout_sec` / `tool_timeout_sec` | ✅ via installer | n/a | Codex config.toml only |
 | `claude mcp add` / `.mcp.json` | n/a | ✅ via installer | user + project scope |
@@ -60,7 +60,7 @@ so treat the writable path as provisional until real-Desktop smoke proves it:
 - Windows: `%APPDATA%\Freebuff\mcp-handoff.json` (user-profile ACLs apply)
 - Schema: `{ version: 1, url, launchId, pid, expiresAt }`, loopback URL only.
 - POSIX files must be mode `0600` and owned by the current uid; the bridge
-  writes them that way and rejects foreign-owned files on read.
+  writes them that way and rejects foreign-owned or group/world-readable files on read.
 
 Every adapter runs on the same canonical discovery, SSE client, and bounded event store; none of them duplicate Desktop discovery or event handling. `serve-v1` exposes the legacy tool names (`get_thread_progress_summary`, `watch_active_threads`, …) on top of that shared layer, and `serve` additionally exposes `get_thread_progress_summary` and `get_diff`.
 

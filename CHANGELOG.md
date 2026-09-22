@@ -1,6 +1,17 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.1 (2026-09-21)
+
+Security, routing, and release-hygiene hardening after the 0.2.0 publication.
+
+- Route direct thread/message reads by the real owning backend so a connected Desktop cannot steal CLI conversation reads.
+- Reject group/world-readable POSIX handoff files and repair handoff mode to 0600 when writing.
+- Require readiness metadata to include a live positive PID.
+- Merge doctor capabilities across Desktop and CLI fallback with logical OR semantics.
+- Remove legacy credential-file inspection and stop deprecated serve-v1 from advertising unverified CLI write capability.
+- Expand protected project-file rules for common credential files/directories and add focused regressions.
+
+## 0.2.0 (2026-09-21)
 
 Production rebuild around one canonical session/turn/event lifecycle shared by every adapter.
 

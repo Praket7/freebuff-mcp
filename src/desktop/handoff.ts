@@ -80,8 +80,11 @@ async function validateHandoffFile(handoffPath: string): Promise<HandoffValidati
   }
   try {
     await verifyHandoffOwnership(handoffPath);
-  } catch {
-    return { valid: false, reason: 'handoff_untrusted_owner', path: handoffPath };
+  } catch (error) {
+    const reason = error instanceof Error && /permissions/i.test(error.message)
+      ? 'handoff_insecure_permissions'
+      : 'handoff_untrusted_owner';
+    return { valid: false, reason, path: handoffPath };
   }
   let raw: string;
   try { raw = await fs.readFile(handoffPath, 'utf8'); } catch { return { valid: false, reason: 'handoff_missing', path: handoffPath }; }
@@ -118,6 +121,7 @@ export async function writeHandoff(handoff: Omit<DesktopHandoff, 'version'> & { 
   // other local users cannot steal it. (Windows relies on the user-profile
   // ACL: see docs/compatibility.md for the producer contract.)
   await fs.writeFile(target, JSON.stringify({ version: HANDOFF_VERSION, ...handoff }, null, 2), { encoding: 'utf8', mode: 0o600 });
+  if (process.platform !== 'win32') await fs.chmod(target, 0o600);
   await verifyHandoffOwnership(target);
   return target;
 }
@@ -131,5 +135,9 @@ export async function verifyHandoffOwnership(handoffPath: string): Promise<void>
   const stat = await fs.stat(handoffPath);
   if (stat.uid !== process.getuid?.()) {
     throw new Error(`Refusing handoff file owned by uid ${stat.uid}, expected ${process.getuid?.()} (${handoffPath}).`);
+  }
+  const permissions = stat.mode & 0o777;
+  if ((permissions & 0o077) !== 0) {
+    throw new Error(`Refusing handoff file with permissions ${permissions.toString(8)}; group/other access is not allowed (${handoffPath}).`);
   }
 }

@@ -223,10 +223,53 @@ export class CompositeBackend implements FreebuffBackend {
    */
   async listProjects(): Promise<Json> { return sanitizeFreebuff(await this.readVia('listProjects', () => [])) as Json; }
   async listThreads(): Promise<Json> { return sanitizeFreebuff(await this.readVia('listThreads', () => [])) as Json; }
-  async getThread(backendSessionId: string): Promise<Json> { return sanitizeFreebuff(await this.readVia('getThread', () => { throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, 'No backend can read this thread.', 'Start Freebuff Desktop or pass a CLI conversation id that exists in the chat store.'); }, backendSessionId)) as Json; }
-  async getMessages(backendSessionId: string): Promise<Json> { return sanitizeFreebuff(await this.readVia('getMessages', () => [], backendSessionId)) as Json; }
 
-  private async readVia(method: 'listProjects' | 'listThreads' | 'getThread' | 'getMessages', whenMissing: () => unknown, ...args: string[]): Promise<unknown> {
+  /** Return a backend already known to own this real thread/conversation id. */
+  private rememberedBackendForId(backendSessionId: string): FreebuffBackend | undefined {
+    for (const entry of this.sessions.values()) {
+      if (entry.session.id === backendSessionId || entry.session.backendSessionId === backendSessionId) return entry.backend;
+    }
+    return undefined;
+  }
+
+  /**
+   * Resolve direct reads by identity, not by the globally preferred read backend.
+   * A connected Desktop must not steal reads for a real CLI conversation id.
+   * CLI ownership is proven by its chat store; otherwise a connected Desktop
+   * remains the fallback owner.
+   */
+  private async backendForReadId(backendSessionId: string): Promise<FreebuffBackend> {
+    const remembered = this.rememberedBackendForId(backendSessionId);
+    if (remembered) return remembered;
+    if (this.forced) return this.cli;
+    await this.refreshProbe();
+    if (this.cliAvailable && typeof this.cli.getThread === 'function') {
+      try {
+        await this.cli.getThread(backendSessionId);
+        return this.cli;
+      } catch {
+        // Not a known CLI conversation; fall through to Desktop when connected.
+      }
+    }
+    const connection = this.desktopCaps?.connection;
+    if (connection === 'connected_writable' || connection === 'connected_read_only') return this.desktop;
+    if (this.cliAvailable) return this.cli;
+    throw new BridgeError(ErrorCodes.NOT_INSTALLED, 'No Freebuff backend is available to read this thread.', 'Start Freebuff Desktop or install the Freebuff CLI, then retry.');
+  }
+
+  async getThread(backendSessionId: string): Promise<Json> {
+    const backend = await this.backendForReadId(backendSessionId);
+    if (!backend.getThread) throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, `The ${backend.kind} backend cannot read threads.`);
+    return sanitizeFreebuff(await backend.getThread(backendSessionId)) as Json;
+  }
+
+  async getMessages(backendSessionId: string): Promise<Json> {
+    const backend = await this.backendForReadId(backendSessionId);
+    if (!backend.getMessages) return [] as Json;
+    return sanitizeFreebuff(await backend.getMessages(backendSessionId)) as Json;
+  }
+
+  private async readVia(method: 'listProjects' | 'listThreads', whenMissing: () => unknown, ...args: string[]): Promise<unknown> {
     const kind = await this.selectFor('read');
     const backend = this.backendFor(kind);
     const fn = (backend as unknown as Record<string, unknown>)[method] as ((...a: string[]) => Promise<unknown>) | undefined;

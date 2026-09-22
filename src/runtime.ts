@@ -13,7 +13,7 @@ import {
   ThreadSummary,
 } from './types.js';
 import { assertSafeId, blocked, redact, safeProjectPath, safeTextContent, sanitizeFreebuff } from './security.js';
-import { CliPtyManager, findFreebuffCli } from './pty.js';
+import { CliPtyManager, cliTurnStateString, findFreebuffCli } from './pty.js';
 // Canonical Desktop discovery and live-event plumbing. The legacy MCP/HTTP
 // adapters reuse exactly these implementations, so Desktop discovery (handoff
 // file, explicit URL, readiness metadata, process env, log hints, and the
@@ -56,7 +56,6 @@ export interface Runtime {
   createSession?(cwd: string): Promise<string>;
 }
 
-async function readJson(file: string): Promise<Json | undefined> { try { return JSON.parse(await fs.readFile(file, 'utf8')) as Json; } catch { return undefined; } }
 function envRoot(): string { return process.env.FREEBUFF_PROJECT_ROOT ?? process.cwd(); }
 function asRecord(value: unknown): Record<string, unknown> | null { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null; }
 function asString(value: unknown): string | undefined { return typeof value === 'string' && value.length > 0 ? value : undefined; }
@@ -75,7 +74,6 @@ async function cliHistory(root: string): Promise<Array<{ id: string; meta: any; 
 
   return out.sort((a, b) => a.id < b.id ? 1 : -1);
 }
-function candidates(): string[] { const home = os.homedir(); return [path.join(home, '.config', 'manicode', 'credentials.json'), path.join(home, 'AppData', 'Roaming', 'manicode', 'credentials.json')]; }
 
 // ---------------------------------------------------------------------------
 // Canonical bridge events -> legacy progress events
@@ -553,11 +551,15 @@ export class CliPtyRuntime implements Runtime {
 
   async capabilities(): Promise<Capabilities> {
     const cli = await findFreebuffCli();
+    const available = Boolean(cli);
     return {
-      product: 'cli', signedIn: 'unknown', orchestrator: false, readOnly: !cli,
-      status: cli ? 'cli_ready' : 'cli_unavailable', liveProgress: 'unavailable', selectedRuntime: 'cli',
-      endpoints: cli ? ['managed PTY'] : [],
-      notes: [cli ? `CLI available and selected at ${path.basename(cli)}. Desktop was not selected.` : 'CLI was selected but is not installed or not on PATH.'],
+      product: 'cli', signedIn: 'unknown', orchestrator: false, readOnly: true,
+      status: available ? 'cli_ready' : 'cli_unavailable', liveProgress: 'unavailable', selectedRuntime: 'cli',
+      actions: { sendMessage: false, stop: false, resume: false, setModel: false, setReasoning: false },
+      endpoints: available ? ['managed PTY (legacy read-only catalog)'] : [],
+      notes: [available
+        ? `CLI available at ${path.basename(cli!)}. Deprecated serve-v1 does not advertise CLI writes without authenticated PTY proof; use \`freebuff-mcp serve\` for the canonical writable CLI backend.`
+        : 'CLI was selected but is not installed or not on PATH.'],
     };
   }
 
@@ -567,7 +569,7 @@ export class CliPtyRuntime implements Runtime {
     return (await cliHistory(this.root)).map((c) => ({
       id: c.id, projectId: this.root,
       title: typeof c.meta.firstPrompt === 'string' ? c.meta.firstPrompt : 'Managed Freebuff CLI session',
-      state: typeof c.state?.sessionState?.mainAgentState === 'object' ? 'completed' : undefined,
+      state: c.state && typeof c.state === 'object' ? cliTurnStateString(c.state as Record<string, unknown>) : undefined,
       metadata: { messageCount: c.meta.messageCount, conversationId: c.id },
     }));
   }
@@ -632,15 +634,22 @@ export class HybridRuntime implements Runtime {
   constructor(private desktop: DesktopOrchestratorRuntime, cli?: CliPtyRuntime) { if (cli) this.cli = cli; }
 
   async capabilities(): Promise<Capabilities> {
-    const caps = await this.desktop.capabilities(); this.cliAvailable = Boolean(await findFreebuffCli());
+    const caps = await this.desktop.capabilities();
+    this.cliAvailable = Boolean(await findFreebuffCli());
     if (!caps.orchestrator || !this.cliAvailable) return caps;
+    if (caps.readOnly) {
+      return {
+        ...caps, readOnly: true, selectedRuntime: 'hybrid',
+        actions: { sendMessage: false, stop: false, resume: false, setModel: false, setReasoning: false },
+        endpoints: [...caps.endpoints, 'managed CLI PTY present (legacy writes not advertised)'],
+        notes: [...caps.notes, 'CLI fallback is installed, but deprecated serve-v1 does not advertise writes from binary presence alone. Use the canonical serve command for authenticated CLI fallback.'],
+      };
+    }
     return {
-      ...caps, readOnly: false,
-      selectedRuntime: 'hybrid',
-      status: caps.readOnly ? 'desktop_read_only_cli_writable' : caps.status,
-      actions: { sendMessage: true, stop: !caps.readOnly, resume: !caps.readOnly, setModel: !caps.readOnly, setReasoning: !caps.readOnly },
+      ...caps, readOnly: false, selectedRuntime: 'hybrid',
+      actions: { sendMessage: true, stop: true, resume: true, setModel: true, setReasoning: true },
       endpoints: [...caps.endpoints, 'managed CLI PTY fallback'],
-      notes: [...caps.notes, caps.readOnly ? 'Desktop reads remain authoritative; send_message uses an exact-ID CLI fallback.' : 'Desktop writes are authorized; CLI PTY is retained as recovery.'],
+      notes: [...caps.notes, 'Desktop writes are authorized; CLI PTY is retained as recovery.'],
     };
   }
 
@@ -696,15 +705,4 @@ export async function detectRuntime(): Promise<Runtime> {
   if ((await desktop.capabilities()).orchestrator) return desktop;
   if (await findFreebuffCli()) return new CliPtyRuntime();
   return new ReadOnlyRuntime();
-}
-
-export async function localInstallInfo(): Promise<Json> {
-  const found: Array<{ path: string; signedIn: boolean }> = [];
-  for (const c of candidates()) {
-    const j = await readJson(c);
-    const o = j && typeof j === 'object' && !Array.isArray(j) ? j as Record<string, Json> : undefined;
-    const d = o?.default && typeof o.default === 'object' && !Array.isArray(o.default) ? o.default as Record<string, Json> : undefined;
-    if (o) found.push({ path: c, signedIn: Boolean(d?.authToken || o.authToken) });
-  }
-  return { cli: Boolean(await findFreebuffCli()), credentials: found };
 }

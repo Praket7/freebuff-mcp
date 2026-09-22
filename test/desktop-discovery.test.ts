@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { readHandoff, writeHandoff, HANDOFF_ENV } from '../src/desktop/handoff.js';
-import { invalidateDiscoveryCache } from '../src/desktop/discovery.js';
+import { discoverDesktopCandidates, invalidateDiscoveryCache } from '../src/desktop/discovery.js';
 import { DesktopBackend } from '../src/backends/desktop-backend.js';
 
 const previousEnv = { ...process.env };
@@ -15,9 +15,9 @@ async function inHandoffEnv<T>(handoff: Record<string, unknown> | null, fn: () =
   if (handoff === null) {
     // leave file missing
   } else if (typeof handoff === 'object' && handoff.__raw) {
-    await fs.writeFile(file, String(handoff.__raw), 'utf8');
+    await fs.writeFile(file, String(handoff.__raw), { encoding: 'utf8', mode: 0o600 });
   } else {
-    await fs.writeFile(file, JSON.stringify(handoff), 'utf8');
+    await fs.writeFile(file, JSON.stringify(handoff), { encoding: 'utf8', mode: 0o600 });
   }
   try {
     return await fn();
@@ -200,5 +200,52 @@ test('handoff: written files are owner-only (0600 on POSIX)', async () => {
     }
   } finally {
     await fs.unlink(file).catch(() => undefined);
+  }
+});
+
+
+test('handoff: POSIX rejects loose permissions and writeHandoff repairs an existing file to 0600', async () => {
+  if (process.platform === 'win32') return;
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'freebuff-handoff-mode-'));
+  const file = path.join(dir, 'mcp-handoff.json');
+  try {
+    await writeHandoff(validHandoff() as any, file);
+    await fs.chmod(file, 0o644);
+    const rejected = await readHandoff(file);
+    assert.equal(rejected.valid, false);
+    assert.equal(rejected.reason, 'handoff_insecure_permissions');
+
+    await writeHandoff(validHandoff({ launchId: 'repaired' }) as any, file);
+    const stat = await fs.stat(file);
+    assert.equal(stat.mode & 0o777, 0o600);
+    const accepted = await readHandoff(file);
+    assert.equal(accepted.valid, true);
+    assert.equal(accepted.handoff?.launchId, 'repaired');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('discovery: readiness metadata without a PID is ignored', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'freebuff-readiness-pid-'));
+  const file = path.join(dir, 'readiness.json');
+  const previousReadiness = process.env.FREEBUFF_READINESS_FILE;
+  const previousUrl = process.env.FREEBUFF_ORCHESTRATOR_URL;
+  const previousHandoff = process.env[HANDOFF_ENV];
+  const missingPidUrl = 'http://127.0.0.1:65432';
+  try {
+    await fs.writeFile(file, JSON.stringify({ url: missingPidUrl, timestamp: Date.now() }), 'utf8');
+    process.env.FREEBUFF_READINESS_FILE = file;
+    process.env.FREEBUFF_ORCHESTRATOR_URL = 'http://127.0.0.1:65431';
+    process.env[HANDOFF_ENV] = path.join(dir, 'missing-handoff.json');
+    invalidateDiscoveryCache();
+    const { candidates } = await discoverDesktopCandidates();
+    assert.equal(candidates.some((candidate) => candidate.url === missingPidUrl), false);
+  } finally {
+    invalidateDiscoveryCache();
+    if (previousReadiness === undefined) delete process.env.FREEBUFF_READINESS_FILE; else process.env.FREEBUFF_READINESS_FILE = previousReadiness;
+    if (previousUrl === undefined) delete process.env.FREEBUFF_ORCHESTRATOR_URL; else process.env.FREEBUFF_ORCHESTRATOR_URL = previousUrl;
+    if (previousHandoff === undefined) delete process.env[HANDOFF_ENV]; else process.env[HANDOFF_ENV] = previousHandoff;
+    await fs.rm(dir, { recursive: true, force: true });
   }
 });

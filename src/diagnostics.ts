@@ -9,3 +9,9 @@ export async function nodePtyVersion(): Promise<string | null> {
     return null;
   }
 }
+
+
+/** A false capability on one backend must never mask a true fallback capability. */
+export function anyBackendCapability(...values: Array<boolean | null | undefined>): boolean {
+  return values.some((value) => value === true);
+}

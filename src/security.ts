@@ -1,7 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 
-export const blocked = /^(\.env($|\.)|\.npmrc$|\.pypirc$|\.netrc$|credentials?\.json$|secrets?\.(ya?ml|json|toml)$|.*\.(pem|key|p12|pfx|jks|kdbx)$|id_(rsa|ed25519|ecdsa|dsa)$)/i;
+export const blocked = /^(\.env($|\.)|\.npmrc$|\.pypirc$|\.netrc$|\.git-credentials$|(\.aws|\.ssh|\.gnupg|\.azure|\.kube|\.docker)$|credentials?\.json$|secrets?\.(ya?ml|json|toml)$|.*\.(pem|key|p12|pfx|jks|kdbx)$|id_(rsa|ed25519|ecdsa|dsa)$)/i;
 export const MAX_READ_BYTES = 1_000_000;
 
 // Key-name based redaction: any key that looks credential-like.

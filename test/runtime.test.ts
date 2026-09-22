@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { DesktopOrchestratorRuntime, detectRuntime, discoverDesktopCandidate } from '../src/runtime.js';
+import { CliPtyRuntime, DesktopOrchestratorRuntime, detectRuntime, discoverDesktopCandidate } from '../src/runtime.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -167,4 +167,21 @@ test('the legacy runtime reuses the canonical event store, not a private copy', 
     assert.equal(snapshot.connected, false);
     assert.equal(snapshot.stale, true);
   } finally { runtime.dispose(); }
+});
+
+
+test('deprecated v1 CLI runtime does not advertise writes from binary presence alone', async () => {
+  const previous = process.env.FREEBUFF_CLI_PATH;
+  process.env.FREEBUFF_CLI_PATH = process.execPath;
+  const runtime = new CliPtyRuntime();
+  try {
+    const caps = await runtime.capabilities();
+    assert.equal(caps.readOnly, true);
+    assert.equal(caps.actions?.sendMessage, false);
+    assert.equal(caps.actions?.stop, false);
+    assert.match(caps.notes.join(' '), /does not advertise CLI writes/i);
+  } finally {
+    runtime.dispose();
+    if (previous === undefined) delete process.env.FREEBUFF_CLI_PATH; else process.env.FREEBUFF_CLI_PATH = previous;
+  }
 });
