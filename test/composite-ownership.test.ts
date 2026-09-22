@@ -201,38 +201,22 @@ test('ownership: turns on registered sessions keep using the owner backend and h
   });
 });
 
-test('ownership: direct id reads resolve CLI conversations before falling back to a connected Desktop', async () => {
-  await withCliBinary(async () => {
-    const desktopCalls: string[] = [];
-    const cliCalls: CliStubCalls = { create: [], send: [], read: [] };
-    const baseCli = cliStub(cliCalls);
-    const cli = {
-      ...baseCli,
-      getThread: async (id: string) => {
-        cliCalls.read.push(`getThread:${id}`);
-        if (id !== 'cli-conv-1') throw new Error('CLI conversation not found');
-        return { id, title: 'CLI conversation' };
-      },
-      getMessages: async (id: string) => {
-        cliCalls.read.push(`getMessages:${id}`);
-        return [{ role: 'user', parts: [{ type: 'text', text: 'from cli' }] }];
-      },
-    };
-    const desktop = {
-      ...desktopStub({ connection: 'connected_writable', calls: desktopCalls }),
-      getThread: async (id: string) => { desktopCalls.push(`desktop.getThread:${id}`); return { id, title: 'Desktop thread' }; },
-      getMessages: async (id: string) => { desktopCalls.push(`desktop.getMessages:${id}`); return []; },
-    };
-    const composite = new CompositeBackend({ desktop: desktop as never, cli: cli as never });
 
-    const cliThread = await composite.getThread('cli-conv-1') as { title?: string };
-    assert.equal(cliThread.title, 'CLI conversation');
-    const cliMessages = await composite.getMessages('cli-conv-1') as unknown[];
-    assert.equal(cliMessages.length, 1);
-    assert.equal(desktopCalls.length, 0, 'connected Desktop must not steal reads for a proven CLI conversation');
+test('ownership: direct reads honor a remembered CLI owner even when Desktop is connected', async () => {
+  const desktopCalls: string[] = [];
+  const cliCalls: CliStubCalls = { create: [], send: [], read: [] };
+  const desktop = {
+    ...desktopStub({ connection: 'connected_writable', calls: desktopCalls }),
+    getThread: async (id: string) => { desktopCalls.push(`desktop.getThread:${id}`); return { id, title: 'Desktop thread' }; },
+    getMessages: async (id: string) => { desktopCalls.push(`desktop.getMessages:${id}`); return []; },
+  };
+  const composite = new CompositeBackend({ desktop: desktop as never, cli: cliStub(cliCalls) as never });
+  composite.useExisting('cli', 'cli-conv-1', '/tmp/p');
 
-    const desktopThread = await composite.getThread('desktop-thread-1') as { title?: string };
-    assert.equal(desktopThread.title, 'Desktop thread', 'unknown CLI ids fall back to the connected Desktop');
-    assert.ok(desktopCalls.includes('desktop.getThread:desktop-thread-1'));
-  });
+  const cliThread = await composite.getThread('cli-conv-1') as { title?: string };
+  assert.equal(cliThread.title, 'CLI conversation');
+  const cliMessages = await composite.getMessages('cli-conv-1') as unknown[];
+  assert.equal(cliMessages.length, 1);
+  assert.deepEqual(cliCalls.read, ['getThread:cli-conv-1', 'getMessages:cli-conv-1']);
+  assert.equal(desktopCalls.length, 0, 'connected Desktop must not steal reads for a remembered CLI conversation');
 });

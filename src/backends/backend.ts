@@ -243,14 +243,11 @@ export class CompositeBackend implements FreebuffBackend {
     if (remembered) return remembered;
     if (this.forced) return this.cli;
     await this.refreshProbe();
-    if (this.cliAvailable && typeof this.cli.getThread === 'function') {
-      try {
-        await this.cli.getThread(backendSessionId);
-        return this.cli;
-      } catch {
-        // Not a known CLI conversation; fall through to Desktop when connected.
-      }
-    }
+    const cwd = process.env.FREEBUFF_PROJECT_ROOT ?? process.cwd();
+    const isCliConversation = this.cliAvailable
+      ? await cliConversationExists(cwd, backendSessionId).catch(() => false)
+      : false;
+    if (isCliConversation) return this.cli;
     const connection = this.desktopCaps?.connection;
     if (connection === 'connected_writable' || connection === 'connected_read_only') return this.desktop;
     if (this.cliAvailable) return this.cli;
