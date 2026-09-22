@@ -243,9 +243,9 @@ export class CompositeBackend implements FreebuffBackend {
     if (remembered) return remembered;
     if (this.forced) return this.cli;
     await this.refreshProbe();
-    const cwd = process.env.FREEBUFF_PROJECT_ROOT ?? process.cwd();
-    const isCliConversation = this.cliAvailable
-      ? await cliConversationExists(cwd, backendSessionId).catch(() => false)
+    const cliOwner = this.cli as unknown as { ownsSessionId?: (id: string) => Promise<boolean> };
+    const isCliConversation = this.cliAvailable && typeof cliOwner.ownsSessionId === 'function'
+      ? await cliOwner.ownsSessionId(backendSessionId).catch(() => false)
       : false;
     if (isCliConversation) return this.cli;
     const connection = this.desktopCaps?.connection;

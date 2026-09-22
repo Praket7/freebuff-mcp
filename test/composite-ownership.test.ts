@@ -220,3 +220,24 @@ test('ownership: direct reads honor a remembered CLI owner even when Desktop is 
   assert.deepEqual(cliCalls.read, ['getThread:cli-conv-1', 'getMessages:cli-conv-1']);
   assert.equal(desktopCalls.length, 0, 'connected Desktop must not steal reads for a remembered CLI conversation');
 });
+
+
+test('ownership: explicit CLI ownership hook routes an unremembered direct id before Desktop fallback', async () => {
+  await withCliBinary(async () => {
+    const desktopCalls: string[] = [];
+    const cliCalls: CliStubCalls = { create: [], send: [], read: [] };
+    const cli = {
+      ...cliStub(cliCalls),
+      ownsSessionId: async (id: string) => id === 'cli-owned-direct',
+    };
+    const desktop = {
+      ...desktopStub({ connection: 'connected_writable', calls: desktopCalls }),
+      getThread: async (id: string) => { desktopCalls.push(`desktop.getThread:${id}`); return { id, title: 'Desktop thread' }; },
+    };
+    const composite = new CompositeBackend({ desktop: desktop as never, cli: cli as never });
+    const thread = await composite.getThread('cli-owned-direct') as { title?: string };
+    assert.equal(thread.title, 'CLI conversation');
+    assert.deepEqual(cliCalls.read, ['getThread:cli-owned-direct']);
+    assert.equal(desktopCalls.length, 0);
+  });
+});

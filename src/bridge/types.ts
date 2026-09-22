@@ -275,6 +275,8 @@ export interface FreebuffBackend {
   listThreads?(): Promise<unknown>;
   getThread?(backendSessionId: string): Promise<unknown>;
   getMessages?(backendSessionId: string): Promise<unknown>;
+  /** True only when this backend can prove it owns the supplied real session id. */
+  ownsSessionId?(backendSessionId: string): Promise<boolean>;
   /**
    * Optional live event-stream health, so adapters report progress honestly
    * instead of guessing. Backends with a persistent stream (Desktop) implement

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { CliPtyManager, findFreebuffCli, findLatestCliConversationId, readCliConversationMessages, readCliConversationSnapshot, readCliRunState, readCliTurnMarkers, cliTurnStateString, findChatDir, waitForCliTurnEnd, type CliTurnMarkers } from '../pty.js';
+import { CliPtyManager, cliConversationExists, findFreebuffCli, findLatestCliConversationId, readCliConversationMessages, readCliConversationSnapshot, readCliRunState, readCliTurnMarkers, cliTurnStateString, findChatDir, waitForCliTurnEnd, type CliTurnMarkers } from '../pty.js';
 import { assertSafeId, redact } from '../security.js';
 import { BackendCapabilities, BackendEventInput, BackendSession, BackendTurnResult, BridgeError, ErrorCodes, FreebuffBackend } from '../bridge/types.js';
 
@@ -122,11 +122,8 @@ export class CliBackend implements FreebuffBackend {
     const safe = assertSafeId(id);
     const conversation = await findLatestCliConversationId(cwd, 0);
     if (conversation === safe) return true;
-    // Check full history via the manager's chat-store scan.
-    try {
-      const { cliConversationExists } = await import('../pty.js');
-      return await cliConversationExists(cwd, safe);
-    } catch { return false; }
+    // Check full history via the chat-store scan.
+    try { return await cliConversationExists(cwd, safe); } catch { return false; }
   }
 
   async sendMessage({ session, text, signal, onEvent }: { session: BackendSession; text: string; signal?: AbortSignal; onEvent?: (event: BackendEventInput) => void | Promise<void> }): Promise<BackendTurnResult> {
@@ -272,6 +269,23 @@ export class CliBackend implements FreebuffBackend {
       if (oldest.done || oldest.value === this.projectRoot) break;
       this.knownRoots.delete(oldest.value);
     }
+  }
+
+  /**
+   * Prove ownership without performing the requested read. Registered ids are
+   * authoritative; otherwise scan only project roots this backend has already
+   * served. This avoids both duplicate reads and global cwd guesses.
+   */
+  async ownsSessionId(backendSessionId: string): Promise<boolean> {
+    const safe = assertSafeId(backendSessionId);
+    if (this.conversationRoots.has(safe)) return true;
+    for (const root of this.knownRoots) {
+      if (await cliConversationExists(root, safe).catch(() => false)) {
+        this.registerConversationRoot(safe, root);
+        return true;
+      }
+    }
+    return false;
   }
 
   /** Candidate chat-store roots for a conversation: its owner first, then the default. */
