@@ -1,0 +1,65 @@
+name: CI Fallback
+on:
+  push:
+  workflow_dispatch:
+
+# Alternate hosted-runner pools used when the standard CI matrix is queued.
+concurrency:
+  group: ci-fallback-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-slim
+            node: 20
+          - os: ubuntu-slim
+            node: 22
+          - os: ubuntu-slim
+            node: 24
+          - os: windows-2025-vs2026
+            node: 20
+          - os: windows-2025-vs2026
+            node: 22
+          - os: windows-2025-vs2026
+            node: 24
+          - os: macos-15
+            node: 20
+          - os: macos-15
+            node: 22
+          - os: macos-15
+            node: 24
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ matrix.node == 20 && 9 || 11 }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm typecheck:test
+      - run: pnpm test
+      - run: pnpm build
+      - run: pnpm pack --pack-destination work
+      - name: Package smoke test
+        shell: bash
+        run: |
+          cd work
+          TGZ=$(ls freebuff-mcp-*.tgz | head -1)
+          npm install --no-save --prefix "$PWD/smoke" "$PWD/$TGZ"
+          node "$PWD/smoke/node_modules/freebuff-mcp/dist/src/cli.js" version
+          set +e
+          node "$PWD/smoke/node_modules/freebuff-mcp/dist/src/cli.js" doctor --json > doctor.json
+          DOCTOR_STATUS=$?
+          set -e
+          DOCTOR_STATUS="$DOCTOR_STATUS" node -e "const r=require('./doctor.json'); if(typeof r.ok!=='boolean') process.exit(2); if(r.ok&&Number(process.env.DOCTOR_STATUS)!==0) process.exit(2); if(!r.ok&&Number(process.env.DOCTOR_STATUS)!==1) process.exit(2);"
+          node "$PWD/smoke/node_modules/freebuff-mcp/dist/src/cli.js" install codex | head -3
+          node "$PWD/smoke/node_modules/freebuff-mcp/dist/src/cli.js" install claude | head -3
