@@ -80,13 +80,11 @@ test('desktop: idempotent control routes retry safely after an ambiguous drop', 
   const backend = new DesktopBackend();
   try {
     const session = { id: 'bridge-1', backend: 'desktop' as const, backendSessionId: desktop.threadId, cwd: desktop.projectPath };
-    // /stop: first attempt commits then drops; the safe retry confirms it.
     await backend.stop(session);
     const stops = desktop.calls.filter((c) => c.method === 'POST' && c.path.endsWith('/stop')).length;
     assert.equal(stops, 2, `idempotent stop retried once (saw ${stops})`);
     assert.equal(desktop.threads.get(desktop.threadId)?.turnState, 'idle', 'stop took effect');
 
-    // /agent: same story — reapplying the same model has no extra effect.
     await backend.setModel(session, 'fixture-model-2');
     const agents = desktop.calls.filter((c) => c.method === 'POST' && c.path.endsWith('/agent')).length;
     assert.equal(agents, 2, `idempotent setModel retried once (saw ${agents})`);
@@ -104,12 +102,10 @@ test('desktop: /resume and /effort replay-safe after an ambiguous drop', async (
   const backend = new DesktopBackend();
   try {
     const session = { id: 'bridge-1', backend: 'desktop' as const, backendSessionId: desktop.threadId, cwd: desktop.projectPath };
-    // /resume: first attempt commits then drops; retry is safe and idempotent.
     await backend.resume(session);
     const resumes = desktop.calls.filter((c) => c.method === 'POST' && c.path.endsWith('/resume')).length;
     assert.equal(resumes, 2, `idempotent resume retried once (saw ${resumes})`);
 
-    // /effort: same story — setting effort twice has no extra side effect.
     await backend.setReasoning(session, 'high');
     const efforts = desktop.calls.filter((c) => c.method === 'POST' && c.path.endsWith('/effort')).length;
     assert.equal(efforts, 2, `idempotent effort retried once (saw ${efforts})`);
@@ -166,7 +162,11 @@ test('desktop: SSE failures on a dead port trigger rediscovery onto the new port
     if (/\/api\/thread\/[^/]+$/.test(url)) return new Response(JSON.stringify(threadPayload('t')), { status: 200 }) as Response;
     throw new Error(`unexpected ${url}`);
   }) as typeof fetch;
-  const writeHandoff = (url: string) => fs.writeFile(handoffFile, JSON.stringify({ version: 1, url, launchId: 'lid', pid: process.pid, expiresAt: new Date(Date.now() + 60_000).toISOString() }), 'utf8');
+  const writeHandoff = (url: string) => fs.writeFile(
+    handoffFile,
+    JSON.stringify({ version: 1, url, launchId: 'lid', pid: process.pid, expiresAt: new Date(Date.now() + 60_000).toISOString() }),
+    { encoding: 'utf8', mode: 0o600 },
+  );
   const { invalidateDiscoveryCache } = await import('../src/desktop/discovery.js');
   try {
     invalidateDiscoveryCache();
@@ -174,7 +174,6 @@ test('desktop: SSE failures on a dead port trigger rediscovery onto the new port
     const backend = new DesktopBackend({ streamFailureThreshold: 2 });
     const caps = await backend.probe();
     assert.equal(caps.connection, 'connected_writable', 'initial link is on the old port');
-    // The Desktop "restarts" on URL2 and rewrites its handoff file.
     await writeHandoff(URL2);
     const deadline = Date.now() + 10_000;
     while (eventsHits.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
@@ -205,7 +204,11 @@ test('handoff: platform-default locations are discovered with no env configured'
     const target = defaultHandoffPaths()[0];
     assert.ok(target, 'this platform has a default handoff path');
     await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.writeFile(target, JSON.stringify({ version: 1, url: 'http://127.0.0.1:55991', launchId: 'lid', pid: process.pid, expiresAt: new Date(Date.now() + 60_000).toISOString() }), 'utf8');
+    await fs.writeFile(
+      target,
+      JSON.stringify({ version: 1, url: 'http://127.0.0.1:55991', launchId: 'lid', pid: process.pid, expiresAt: new Date(Date.now() + 60_000).toISOString() }),
+      { encoding: 'utf8', mode: 0o600 },
+    );
     const result = await readHandoff();
     assert.equal(result.valid, true, `default handoff discovered: ${result.reason ?? ''}`);
     assert.equal(result.handoff?.launchId, 'lid');
