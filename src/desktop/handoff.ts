@@ -162,7 +162,7 @@ function verifyHandoffStat(stat: Awaited<ReturnType<typeof fs.lstat>>, handoffPa
   if (stat.uid !== process.getuid?.()) {
     throw new Error(`Refusing handoff file owned by uid ${stat.uid}, expected ${process.getuid?.()} (${handoffPath}).`);
   }
-  const permissions = stat.mode & 0o777;
+  const permissions = Number(stat.mode) & 0o777;
   if ((permissions & 0o077) !== 0) {
     throw new Error(`Refusing handoff file with permissions ${permissions.toString(8)}; group/other access is not allowed (${handoffPath}).`);
   }
