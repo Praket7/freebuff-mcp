@@ -7,6 +7,92 @@ import { assertSafeId } from './security.js';
 
 export interface CliSessionSnapshot { id: string; conversationId?: string; pid: number; output: string; exited: boolean; exitCode?: number; }
 
+const CLI_ROWS = 48;
+const CLI_COLS = 160;
+
+// ponytail: readiness uses these VT controls; add xterm-headless if the CLI adopts others.
+/** Minimal VT screen state for readiness checks; raw PTY history is not the visible screen. */
+export class CliTerminalScreen {
+  private lines = Array.from({ length: CLI_ROWS }, () => Array<string>(CLI_COLS).fill(' '));
+  private row = 0;
+  private col = 0;
+  private mode: 'text' | 'escape' | 'csi' | 'osc' | 'osc-escape' = 'text';
+  private csi = '';
+  private savedRow = 0;
+  private savedCol = 0;
+
+  write(chunk: string): void {
+    for (const char of chunk) {
+      if (this.mode === 'osc') { if (char === '\x07') this.mode = 'text'; else if (char === '\x1b') this.mode = 'osc-escape'; continue; }
+      if (this.mode === 'osc-escape') { this.mode = char === '\\' ? 'text' : 'osc'; continue; }
+      if (this.mode === 'escape') {
+        this.mode = 'text';
+        if (char === '[') { this.mode = 'csi'; this.csi = ''; }
+        else if (char === ']') this.mode = 'osc';
+        else if (char === '7') { this.savedRow = this.row; this.savedCol = this.col; }
+        else if (char === '8') { this.row = this.savedRow; this.col = this.savedCol; }
+        else if (char === 'D') this.down(1);
+        else if (char === 'M') this.row = Math.max(0, this.row - 1);
+        else if (char === 'E') { this.down(1); this.col = 0; }
+        continue;
+      }
+      if (this.mode === 'csi') {
+        if (char >= '@' && char <= '~') { this.applyCsi(char); this.mode = 'text'; }
+        else this.csi += char;
+        continue;
+      }
+      if (char === '\x1b') this.mode = 'escape';
+      else if (char === '\r') this.col = 0;
+      else if (char === '\n') this.down(1);
+      else if (char === '\b') this.col = Math.max(0, this.col - 1);
+      else if (char === '\t') this.col = Math.min(CLI_COLS - 1, (this.col + 8) & ~7);
+      else if (char >= ' ' && char !== '\x7f') {
+        if (this.col >= CLI_COLS) { this.col = 0; this.down(1); }
+        this.lines[this.row]![this.col++] = char;
+      }
+    }
+  }
+
+  text(): string { return this.lines.map((line) => line.join('').trimEnd()).join('\n'); }
+
+  private down(count: number): void { this.row = Math.min(CLI_ROWS - 1, this.row + count); }
+
+  private applyCsi(final: string): void {
+    const params = this.csi.replace(/^[?>!]+/, '').split(';').map((n) => Number(n) || 0);
+    const n = (index = 0): number => params[index] || 1;
+    switch (final) {
+      case 'A': this.row = Math.max(0, this.row - n()); break;
+      case 'B': this.down(n()); break;
+      case 'C': this.col = Math.min(CLI_COLS - 1, this.col + n()); break;
+      case 'D': this.col = Math.max(0, this.col - n()); break;
+      case 'E': this.down(n()); this.col = 0; break;
+      case 'F': this.row = Math.max(0, this.row - n()); this.col = 0; break;
+      case 'G': this.col = Math.max(0, Math.min(CLI_COLS - 1, n() - 1)); break;
+      case 'H': case 'f': this.row = Math.max(0, Math.min(CLI_ROWS - 1, n() - 1)); this.col = Math.max(0, Math.min(CLI_COLS - 1, n(1) - 1)); break;
+      case 'd': this.row = Math.max(0, Math.min(CLI_ROWS - 1, n() - 1)); break;
+      case 'J':
+        if (params[0] === 2 || params[0] === 3) this.lines = Array.from({ length: CLI_ROWS }, () => Array<string>(CLI_COLS).fill(' '));
+        else if (params[0] === 0) { this.lines[this.row]!.fill(' ', this.col); for (let r = this.row + 1; r < CLI_ROWS; r++) this.lines[r]!.fill(' '); }
+        else { for (let r = 0; r < this.row; r++) this.lines[r]!.fill(' '); this.lines[this.row]!.fill(' ', 0, this.col + 1); }
+        break;
+      case 'K':
+        if (params[0] === 0) this.lines[this.row]!.fill(' ', this.col);
+        else if (params[0] === 1) this.lines[this.row]!.fill(' ', 0, this.col + 1);
+        else if (params[0] === 2) this.lines[this.row]!.fill(' ');
+        break;
+      case 's': this.savedRow = this.row; this.savedCol = this.col; break;
+      case 'u': this.row = this.savedRow; this.col = this.savedCol; break;
+    }
+  }
+}
+
+const CLI_READY_PROMPT = /Enter a coding task or \/ for commands/i;
+const CLI_CONNECTING = /\bConnecting\b/i;
+
+export function cliTerminalIsReady(screen: string): boolean {
+  return CLI_READY_PROMPT.test(screen) && !CLI_CONNECTING.test(screen);
+}
+
 function cliCandidates(): string[] {
   const home = os.homedir();
   const pathEntries = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean).flatMap((entry) => [path.join(entry, process.platform === 'win32' ? 'freebuff.exe' : 'freebuff'), path.join(entry, 'freebuff')]);
@@ -278,13 +364,20 @@ export async function waitForCliTurnEnd(
 }
 
 export class CliPtyManager {
-  private sessions = new Map<string, { term: pty.IPty; cwd: string; startedAt: number; conversationId?: string; output: string; exited: boolean; exitCode?: number }>();
+  private sessions = new Map<string, { term: pty.IPty; cwd: string; startedAt: number; conversationId?: string; output: string; screen: CliTerminalScreen; exited: boolean; exitCode?: number }>();
   async start(id: string, cwd: string, continueId?: string): Promise<CliSessionSnapshot> {
     const safeId = assertSafeId(id);
     const existing = this.sessions.get(safeId);
     if (existing?.exited) { this.sessions.delete(safeId); }
     if (this.sessions.size >= 16 && !existing) throw new Error('FREEBUFF_CLI_SESSION_LIMIT');
-    if (existing) return { id: safeId, pid: existing.term.pid, output: existing.output, exited: existing.exited, exitCode: existing.exitCode };
+    if (existing) {
+      if (!existing.exited && !cliTerminalIsReady(existing.screen.text())) {
+        this.kill(safeId);
+        this.sessions.delete(safeId);
+        throw new Error('FREEBUFF_CLI_NOT_READY: the CLI is no longer interactive. Check CLI connectivity, then retry.');
+      }
+      return { id: safeId, pid: existing.term.pid, output: existing.output, exited: existing.exited, exitCode: existing.exitCode };
+    }
     const file = await findFreebuffCli();
     if (!file) throw new Error('FREEBUFF_CLI_NOT_INSTALLED');
     const args = ['--cwd', cwd];
@@ -292,19 +385,25 @@ export class CliPtyManager {
     const startedAt = Date.now();
     let term: pty.IPty;
     try { term = pty.spawn(file, args, { name: 'xterm-256color', cols: 160, rows: 48, cwd, ...(process.platform === 'win32' ? { useConpty: true } : {}), env: { ...process.env, TERM: 'xterm-256color' } }); } catch (error) { throw describePtyLaunchError(error, file, cwd); }
-    const state = { term, cwd, startedAt, conversationId: continueId, output: '', exited: false, exitCode: undefined as number | undefined };
+    const state = { term, cwd, startedAt, conversationId: continueId, output: '', screen: new CliTerminalScreen(), exited: false, exitCode: undefined as number | undefined };
     this.sessions.set(safeId, state);
-    term.onData((data) => { state.output = (state.output + data).slice(-2_000_000); });
+    term.onData((data) => { state.output = (state.output + data).slice(-2_000_000); state.screen.write(data); });
     term.onExit(({ exitCode }) => { state.exited = true; state.exitCode = exitCode; const timer = setTimeout(() => { if (this.sessions.get(safeId) === state) this.sessions.delete(safeId); }, 300_000); timer.unref?.(); });
     const deadline = Date.now() + 12_000;
-    while (Date.now() < deadline && !/Enter a coding task or \/ for commands/i.test(state.output) && !/Not authenticated|Press ENTER to login/i.test(state.output)) await new Promise<void>((resolve) => setTimeout(resolve, 250));
+    while (Date.now() < deadline && !state.exited && !cliTerminalIsReady(state.screen.text()) && !/Not authenticated|Press ENTER to login/i.test(state.output)) await new Promise<void>((resolve) => setTimeout(resolve, 250));
     if (/Freebuff is already running/i.test(state.output) && process.env.FREEBUFF_CLI_TAKEOVER === '1') {
       term.write('\r');
       const takeoverDeadline = Date.now() + 8_000;
-      while (Date.now() < takeoverDeadline && !/Enter a coding task or \/ for commands/i.test(state.output)) await new Promise<void>((resolve) => setTimeout(resolve, 250));
+      while (Date.now() < takeoverDeadline && !state.exited && !cliTerminalIsReady(state.screen.text())) await new Promise<void>((resolve) => setTimeout(resolve, 250));
     }
-    if (/Freebuff is already running/i.test(state.output) && !/Enter a coding task or \/ for commands/i.test(state.output)) { term.kill(); this.sessions.delete(safeId); throw new Error('FREEBUFF_CLI_ALREADY_RUNNING'); }
-    if (/Not authenticated|Press ENTER to login/i.test(state.output)) { term.kill(); this.sessions.delete(safeId); throw new Error('FREEBUFF_CLI_NOT_AUTHENTICATED'); }
+    if (/Freebuff is already running/i.test(state.output) && !cliTerminalIsReady(state.screen.text())) { this.kill(safeId); this.sessions.delete(safeId); throw new Error('FREEBUFF_CLI_ALREADY_RUNNING'); }
+    if (/Not authenticated|Press ENTER to login/i.test(state.output)) { this.kill(safeId); this.sessions.delete(safeId); throw new Error('FREEBUFF_CLI_NOT_AUTHENTICATED'); }
+    if (state.exited) { this.sessions.delete(safeId); throw new Error('FREEBUFF_CLI_SESSION_EXITED'); }
+    if (!cliTerminalIsReady(state.screen.text())) {
+      this.kill(safeId);
+      this.sessions.delete(safeId);
+      throw new Error('FREEBUFF_CLI_NOT_READY: the CLI did not leave its Connecting screen and become interactive within 12 seconds. Check CLI connectivity, then retry.');
+    }
     state.conversationId ??= (await findLatestCliConversationId(cwd, startedAt - 1000)) ?? undefined;
     return { id: safeId, conversationId: state.conversationId, pid: term.pid, output: state.output, exited: state.exited, exitCode: state.exitCode };
   }

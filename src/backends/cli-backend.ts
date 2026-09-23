@@ -29,7 +29,7 @@ export class CliBackend implements FreebuffBackend {
   private createLocks = new Map<string, Promise<BackendSession>>();
   private pending = new Map<string, PendingTurn>();
   /**
-   * True once a PTY session has actually started (readiness prompt observed,
+   * True once a PTY session has actually started (connected interactive prompt observed,
    * authentication challenges passed). A binary on disk proves installation,
    * never login — so writes are reported `unknown` until this flips.
    */
