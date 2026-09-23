@@ -13,6 +13,7 @@ Security, routing, and release-hygiene hardening after the 0.2.0 publication.
 - Expand protected project-file rules for common credential files/directories, make handoff reads race-resistant, bound readiness/log discovery reads, and add focused regressions.
 - Keep a healthy Desktop available read-only when a stale or rejected launch id fails write authorization.
 - Bound remembered CLI project roots correctly while retaining the default root.
+- Redact generic and structured bridge error text, including diff fallback errors, before it reaches MCP clients.
 
 ## 0.2.0 (2026-09-21)
 

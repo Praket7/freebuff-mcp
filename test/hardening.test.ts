@@ -7,6 +7,7 @@ import { installClaude } from '../src/install/claude.js';
 import { claudeConfigPaths } from '../src/install/common.js';
 import { HANDOFF_ENV, processIsAlive, readHandoff, writeHandoff } from '../src/desktop/handoff.js';
 import { discoverDesktopCandidate, discoverDesktopCandidates, invalidateDiscoveryCache } from '../src/desktop/discovery.js';
+import { BridgeError, ErrorCodes, toErrorShape } from '../src/bridge/types.js';
 
 function validHandoff(url = 'http://127.0.0.1:65520') {
   return {
@@ -269,4 +270,21 @@ test('CLI hardening: known project roots stay bounded while retaining the defaul
   } finally {
     cli.dispose();
   }
+});
+
+
+test('error hardening: structured errors redact secrets from messages and recovery text', () => {
+  const generic = toErrorShape(new Error('request failed authorization=super-secret-token'));
+  assert.doesNotMatch(generic.message, /super-secret-token/);
+  assert.match(generic.message, /REDACTED/);
+
+  const bridge = new BridgeError(
+    ErrorCodes.BACKEND_UNAVAILABLE,
+    'upstream said Bearer abcdefghijklmnop',
+    'retry with api_key=another-secret-value',
+  ).toShape();
+  assert.doesNotMatch(bridge.message, /abcdefghijklmnop/);
+  assert.doesNotMatch(bridge.recovery ?? '', /another-secret-value/);
+  assert.match(bridge.message, /REDACTED/);
+  assert.match(bridge.recovery ?? '', /REDACTED/);
 });

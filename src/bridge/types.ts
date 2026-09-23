@@ -1,3 +1,5 @@
+import { redactString } from '../security.js';
+
 // Canonical bridge data model shared by every protocol adapter (MCP v2, legacy
 // MCP, ACP) and every backend adapter (Desktop, CLI PTY).
 //
@@ -160,7 +162,9 @@ export class BridgeError extends Error {
     this.recovery = recovery;
   }
   toShape(): BridgeErrorShape {
-    return { ok: false as const, code: this.code, message: this.message, ...(this.recovery ? { recovery: this.recovery } : {}) };
+    const message = redactString(this.message);
+    const recovery = this.recovery ? redactString(this.recovery) : undefined;
+    return { ok: false as const, code: this.code, message, ...(recovery ? { recovery } : {}) };
   }
 }
 
@@ -171,10 +175,11 @@ export function isBridgeError(error: unknown): error is BridgeError {
 /** Convert any thrown value into a structured, secret-free error payload. */
 export function toErrorShape(error: unknown): BridgeErrorShape {
   if (isBridgeError(error)) return error.toShape();
-  const message = error instanceof Error ? error.message : String(error);
-  if (/Not authenticated|Press ENTER to login/i.test(message)) return new BridgeError(ErrorCodes.CLI_NOT_AUTHENTICATED, 'The Freebuff CLI is not authenticated.', 'Run the Freebuff CLI once and sign in, then retry.').toShape();
-  if (/already running/i.test(message)) return new BridgeError(ErrorCodes.CLI_ALREADY_RUNNING, 'Freebuff CLI is already running in this project.', 'Close the other Freebuff CLI session or set FREEBUFF_CLI_TAKEOVER=1, then retry.').toShape();
-  if (/launch failed|posix_spawnp/i.test(message)) return new BridgeError(ErrorCodes.PTY_LAUNCH_FAILED, message, 'Verify the Freebuff CLI is installed and executable; see freebuff-mcp doctor.').toShape();
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  if (/Not authenticated|Press ENTER to login/i.test(rawMessage)) return new BridgeError(ErrorCodes.CLI_NOT_AUTHENTICATED, 'The Freebuff CLI is not authenticated.', 'Run the Freebuff CLI once and sign in, then retry.').toShape();
+  if (/already running/i.test(rawMessage)) return new BridgeError(ErrorCodes.CLI_ALREADY_RUNNING, 'Freebuff CLI is already running in this project.', 'Close the other Freebuff CLI session or set FREEBUFF_CLI_TAKEOVER=1, then retry.').toShape();
+  const message = redactString(rawMessage);
+  if (/launch failed|posix_spawnp/i.test(rawMessage)) return new BridgeError(ErrorCodes.PTY_LAUNCH_FAILED, message, 'Verify the Freebuff CLI is installed and executable; see freebuff-mcp doctor.').toShape();
   return { ok: false as const, code: ErrorCodes.BACKEND_UNAVAILABLE, message };
 }
 

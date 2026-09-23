@@ -321,7 +321,7 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
         else if (result?.tooLarge === true) entry.tooLarge = true;
         else if (typeof result?.error === 'string') entry.error = String(redact(result.error));
         else unavailable += 1;
-      } catch (error) { entry.error = error instanceof Error ? error.message : 'diff unavailable'; unavailable += 1; }
+      } catch (error) { entry.error = String(redact(error instanceof Error ? error.message : 'diff unavailable')); unavailable += 1; }
       files.push(entry);
     }
 
