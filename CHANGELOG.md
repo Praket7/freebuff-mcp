@@ -4,6 +4,8 @@
 
 Security, routing, and release-hygiene hardening after the 0.2.0 publication.
 
+- Require the visible CLI PTY screen to leave `Connecting` before accepting a session; stop and clean up children that never become interactive.
+- Clean generated output before builds so deleted source files cannot leak into release tarballs.
 - Route direct thread/message reads by the real owning backend so a connected Desktop cannot steal CLI conversation reads.
 - Reject group/world-readable POSIX handoff files and repair handoff mode to 0600 when writing.
 - Require readiness metadata to include a live positive PID.
