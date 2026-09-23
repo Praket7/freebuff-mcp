@@ -133,8 +133,11 @@ test('discovery hardening: launch id is sent only to healthz and healthz must an
       throw new Error(`unexpected ${requestUrl}`);
     }) as typeof fetch;
     invalidateDiscoveryCache();
-    assert.equal(await discoverDesktopCandidate({ force: true }), null, 'HTTP 200 without ok:true does not authenticate the candidate');
-    assert.equal(seen.some((entry) => entry.url.endsWith('/api/projects')), false, 'read probe is skipped after failed write-auth challenge');
+    const readOnlyCandidate = await discoverDesktopCandidate({ force: true });
+    assert.equal(readOnlyCandidate?.url, url, 'healthy Desktop remains discoverable after write-auth rejection');
+    assert.equal(readOnlyCandidate?.launchId, undefined, 'rejected launch id is stripped so the candidate is read-only');
+    assert.equal(seen.some((entry) => entry.url.endsWith('/api/projects')), true, 'read availability is probed after failed write-auth challenge');
+    assert.equal(seen.find((entry) => entry.url.endsWith('/api/projects'))?.launchId, null, 'rejected launch id is never sent to the read probe');
   } finally {
     globalThis.fetch = originalFetch;
     invalidateDiscoveryCache();
@@ -248,5 +251,22 @@ test('discovery hardening: only a bounded tail of large log files is scanned', a
     if (previousHandoff === undefined) delete process.env[HANDOFF_ENV]; else process.env[HANDOFF_ENV] = previousHandoff;
     if (previousUrl === undefined) delete process.env.FREEBUFF_ORCHESTRATOR_URL; else process.env.FREEBUFF_ORCHESTRATOR_URL = previousUrl;
     await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+
+test('CLI hardening: known project roots stay bounded while retaining the default root', async () => {
+  const { CliBackend } = await import('../src/backends/cli-backend.js');
+  const base = path.join(os.tmpdir(), 'freebuff-root-bound-default');
+  const cli = new CliBackend(base);
+  try {
+    for (let i = 0; i < 150; i++) {
+      cli.registerConversationRoot(`conv-${i}`, path.join(os.tmpdir(), `freebuff-root-bound-${i}`));
+    }
+    const projects = await cli.listProjects() as Array<{ path?: string }>;
+    assert.ok(projects.length <= 100, `known roots bounded to 100, got ${projects.length}`);
+    assert.ok(projects.some((project) => project.path === base), 'default project root is retained');
+  } finally {
+    cli.dispose();
   }
 });

@@ -265,9 +265,14 @@ export class CliBackend implements FreebuffBackend {
       if (!oldest.done) this.conversationRoots.delete(oldest.value);
     }
     while (this.knownRoots.size > 100) {
-      const oldest = this.knownRoots.values().next();
-      if (oldest.done || oldest.value === this.projectRoot) break;
-      this.knownRoots.delete(oldest.value);
+      let removed = false;
+      for (const root of this.knownRoots) {
+        if (root === this.projectRoot) continue;
+        this.knownRoots.delete(root);
+        removed = true;
+        break;
+      }
+      if (!removed) break;
     }
   }
 

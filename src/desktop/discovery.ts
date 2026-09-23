@@ -196,24 +196,38 @@ export async function discoverDesktopCandidates(): Promise<{ candidates: Desktop
 
 async function probeCandidate(candidate: DesktopCandidate): Promise<DesktopCandidate | null> {
   const readHeaders: Record<string, string> = { accept: 'application/json' };
-  try {
-    if (candidate.launchId) {
+  let launchId = candidate.launchId;
+
+  // Write authorization and read availability are separate truths. A stale or
+  // rejected launch id must demote the candidate to read-only, not make an
+  // otherwise healthy Desktop disappear.
+  if (launchId) {
+    try {
       const health = await fetch(new URL('/healthz', candidate.url), {
         signal: AbortSignal.timeout(1500),
-        headers: { ...readHeaders, 'x-freebuff-launch-id': candidate.launchId },
+        headers: { ...readHeaders, 'x-freebuff-launch-id': launchId },
       });
-      if (!health.ok) return null;
-      const healthBody = await health.json().catch(() => null) as Record<string, unknown> | null;
-      if (!healthBody || healthBody.ok !== true) return null;
+      const healthBody = health.ok
+        ? await health.json().catch(() => null) as Record<string, unknown> | null
+        : null;
+      if (!health.ok || !healthBody || healthBody.ok !== true) launchId = undefined;
+    } catch {
+      launchId = undefined;
     }
+  }
 
-    // Read-only discovery does not need the write-authorizing launch id.
+  try {
+    // Read-only discovery never sends the write-authorizing launch id.
     const response = await fetch(new URL('/api/projects', candidate.url), { signal: AbortSignal.timeout(1500), headers: readHeaders });
     if (!response.ok) return null;
     const body = (await response.json()) as unknown;
     if (!body || typeof body !== 'object' || !Array.isArray((body as Record<string, unknown>).projects)) return null;
-    return candidate;
-  } catch { return null; }
+    if (launchId) return candidate;
+    const { launchId: _discarded, ...readOnlyCandidate } = candidate;
+    return readOnlyCandidate;
+  } catch {
+    return null;
+  }
 }
 
 export interface DiscoverLiveOptions { force?: boolean }
