@@ -10,7 +10,7 @@ Security, routing, and release-hygiene hardening after the 0.2.0 publication.
 - Treat readiness-file launch IDs as sensitive: on POSIX they are ignored unless the metadata file is current-user-owned and owner-only.
 - Merge doctor capabilities across Desktop and CLI fallback with logical OR semantics.
 - Remove legacy credential-file inspection and stop deprecated serve-v1 from advertising unverified CLI write capability.
-- Expand protected project-file rules for common credential files/directories and add focused regressions.
+- Expand protected project-file rules for common credential files/directories, make handoff reads race-resistant, bound readiness/log discovery reads, and add focused regressions.
 
 ## 0.2.0 (2026-09-21)
 

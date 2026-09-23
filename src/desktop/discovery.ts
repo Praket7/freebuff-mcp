@@ -40,8 +40,35 @@ export function isLoopbackCandidateUrl(url: string): boolean {
 const DISCOVERY_TTL_MS = 10_000;
 const FRESHNESS_MS = 10 * 60_000;
 const FUTURE_CLOCK_SKEW_MS = 60_000;
+const READINESS_MAX_BYTES = 64 * 1024;
+const LOG_TAIL_MAX_BYTES = 512 * 1024;
 
 function asString(value: unknown): string | undefined { return typeof value === 'string' && value.length > 0 ? value : undefined; }
+
+async function readRegularFileBounded(file: string, maxBytes: number, tail = false): Promise<string | undefined> {
+  let pathStat: Awaited<ReturnType<typeof fs.lstat>>;
+  try { pathStat = await fs.lstat(file); } catch { return undefined; }
+  if (pathStat.isSymbolicLink() || !pathStat.isFile()) return undefined;
+  if (!tail && pathStat.size > maxBytes) return undefined;
+
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  try {
+    handle = await fs.open(file, 'r');
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.dev !== pathStat.dev || opened.ino !== pathStat.ino) return undefined;
+    if (!tail && opened.size > maxBytes) return undefined;
+    const length = Math.min(opened.size, maxBytes);
+    if (length <= 0) return '';
+    if (!tail || opened.size <= maxBytes) return await handle.readFile('utf8');
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, opened.size - length);
+    return buffer.subarray(0, bytesRead).toString('utf8');
+  } catch {
+    return undefined;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
 
 function readinessFiles(): string[] {
   const home = os.homedir();
@@ -106,7 +133,9 @@ export async function discoverDesktopCandidates(): Promise<{ candidates: Desktop
   // 3. Readiness metadata (freshness + live pid required, loopback-gated).
   for (const file of readinessFiles()) {
     try {
-      const value = JSON.parse(await fs.readFile(file, 'utf8')) as Record<string, unknown>;
+      const raw = await readRegularFileBounded(file, READINESS_MAX_BYTES);
+      if (raw === undefined) continue;
+      const value = JSON.parse(raw) as Record<string, unknown>;
       const port = typeof value.port === 'number' || typeof value.port === 'string' ? Number(value.port) : undefined;
       const url = asString(value.url) ?? (port && port > 0 && port < 65536 ? `http://127.0.0.1:${port}` : undefined);
       if (!url || !isLoopbackCandidateUrl(url)) continue;
@@ -141,7 +170,8 @@ export async function discoverDesktopCandidates(): Promise<{ candidates: Desktop
   const logUrls: string[] = [];
   for (const log of logFiles()) {
     try {
-      const text = await fs.readFile(log, 'utf8');
+      const text = await readRegularFileBounded(log, LOG_TAIL_MAX_BYTES, true);
+      if (text === undefined) continue;
       for (const match of text.matchAll(/127\.0\.0\.1:(\d+)/g)) logUrls.push(`http://127.0.0.1:${match[1]}`);
     } catch { /* try next location */ }
   }

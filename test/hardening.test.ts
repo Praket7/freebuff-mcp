@@ -193,3 +193,60 @@ test('installer hardening: symlinked config targets are refused on POSIX', async
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+
+test('discovery hardening: oversized readiness metadata is ignored before JSON parsing', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'freebuff-readiness-large-'));
+  const file = path.join(dir, 'readiness.json');
+  const previousReadiness = process.env.FREEBUFF_READINESS_FILE;
+  const previousHandoff = process.env[HANDOFF_ENV];
+  const previousUrl = process.env.FREEBUFF_ORCHESTRATOR_URL;
+  const url = 'http://127.0.0.1:65523';
+  try {
+    const oversized = JSON.stringify({ url, pid: process.pid, timestamp: Date.now(), pad: 'x'.repeat(70 * 1024) });
+    await fs.writeFile(file, oversized, { encoding: 'utf8', mode: 0o600 });
+    process.env.FREEBUFF_READINESS_FILE = file;
+    process.env[HANDOFF_ENV] = path.join(dir, 'missing-handoff.json');
+    delete process.env.FREEBUFF_ORCHESTRATOR_URL;
+    invalidateDiscoveryCache();
+    const result = await discoverDesktopCandidates();
+    assert.equal(result.candidates.some((candidate) => candidate.url === url), false);
+  } finally {
+    invalidateDiscoveryCache();
+    if (previousReadiness === undefined) delete process.env.FREEBUFF_READINESS_FILE; else process.env.FREEBUFF_READINESS_FILE = previousReadiness;
+    if (previousHandoff === undefined) delete process.env[HANDOFF_ENV]; else process.env[HANDOFF_ENV] = previousHandoff;
+    if (previousUrl === undefined) delete process.env.FREEBUFF_ORCHESTRATOR_URL; else process.env.FREEBUFF_ORCHESTRATOR_URL = previousUrl;
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('discovery hardening: only a bounded tail of large log files is scanned', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'freebuff-log-tail-'));
+  const originalHomedir = os.homedir;
+  const previousReadiness = process.env.FREEBUFF_READINESS_FILE;
+  const previousHandoff = process.env[HANDOFF_ENV];
+  const previousUrl = process.env.FREEBUFF_ORCHESTRATOR_URL;
+  const oldUrl = 'http://127.0.0.1:61001';
+  const tailUrl = 'http://127.0.0.1:61002';
+  try {
+    (os as unknown as { homedir: () => string }).homedir = () => dir;
+    const log = path.join(dir, 'Library', 'Application Support', 'Freebuff', 'logs', 'orchestrator-stderr.log');
+    await fs.mkdir(path.dirname(log), { recursive: true });
+    const prefix = `${oldUrl}\n${'x'.repeat(600 * 1024)}\n`;
+    await fs.writeFile(log, `${prefix}${tailUrl}\n`, 'utf8');
+    process.env.FREEBUFF_READINESS_FILE = path.join(dir, 'missing-readiness.json');
+    process.env[HANDOFF_ENV] = path.join(dir, 'missing-handoff.json');
+    delete process.env.FREEBUFF_ORCHESTRATOR_URL;
+    invalidateDiscoveryCache();
+    const result = await discoverDesktopCandidates();
+    assert.equal(result.candidates.some((candidate) => candidate.url === oldUrl), false, 'old URL outside the bounded tail is ignored');
+    assert.equal(result.candidates.some((candidate) => candidate.url === tailUrl), true, 'recent URL in the bounded tail is retained');
+  } finally {
+    (os as unknown as { homedir: () => string }).homedir = originalHomedir;
+    invalidateDiscoveryCache();
+    if (previousReadiness === undefined) delete process.env.FREEBUFF_READINESS_FILE; else process.env.FREEBUFF_READINESS_FILE = previousReadiness;
+    if (previousHandoff === undefined) delete process.env[HANDOFF_ENV]; else process.env[HANDOFF_ENV] = previousHandoff;
+    if (previousUrl === undefined) delete process.env.FREEBUFF_ORCHESTRATOR_URL; else process.env.FREEBUFF_ORCHESTRATOR_URL = previousUrl;
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

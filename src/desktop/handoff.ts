@@ -70,17 +70,31 @@ export async function readHandoff(explicitPath?: string): Promise<HandoffValidat
 }
 
 async function validateHandoffFile(handoffPath: string): Promise<HandoffValidation> {
-  let stat: Awaited<ReturnType<typeof fs.lstat>>;
+  let pathStat: Awaited<ReturnType<typeof fs.lstat>>;
   try {
-    stat = await fs.lstat(handoffPath);
+    pathStat = await fs.lstat(handoffPath);
   } catch {
     return { valid: false, reason: 'handoff_missing', path: handoffPath };
   }
-  if (stat.isSymbolicLink() || !stat.isFile()) return { valid: false, reason: 'handoff_invalid_file_type', path: handoffPath };
-  if (stat.size > HANDOFF_MAX_BYTES) return { valid: false, reason: 'handoff_too_large', path: handoffPath };
+  if (pathStat.isSymbolicLink() || !pathStat.isFile()) return { valid: false, reason: 'handoff_invalid_file_type', path: handoffPath };
+  if (pathStat.size > HANDOFF_MAX_BYTES) return { valid: false, reason: 'handoff_too_large', path: handoffPath };
 
+  let raw: string;
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
   try {
-    await verifyHandoffOwnership(handoffPath);
+    handle = await fs.open(handoffPath, 'r');
+    const openedStat = await handle.stat();
+
+    // The path may have been replaced after lstat(). Verify that the opened
+    // descriptor is still the exact regular file we inspected, then validate
+    // ownership/permissions on that descriptor before reading its contents.
+    if (!openedStat.isFile()) return { valid: false, reason: 'handoff_invalid_file_type', path: handoffPath };
+    if (openedStat.dev !== pathStat.dev || openedStat.ino !== pathStat.ino) {
+      return { valid: false, reason: 'handoff_changed_during_read', path: handoffPath };
+    }
+    if (openedStat.size > HANDOFF_MAX_BYTES) return { valid: false, reason: 'handoff_too_large', path: handoffPath };
+    verifyHandoffStat(openedStat, handoffPath);
+    raw = await handle.readFile('utf8');
   } catch (error) {
     const message = error instanceof Error ? error.message : '';
     const reason = /permissions/i.test(message)
@@ -91,10 +105,10 @@ async function validateHandoffFile(handoffPath: string): Promise<HandoffValidati
           ? 'handoff_too_large'
           : 'handoff_untrusted_owner';
     return { valid: false, reason, path: handoffPath };
+  } finally {
+    await handle?.close().catch(() => undefined);
   }
 
-  let raw: string;
-  try { raw = await fs.readFile(handoffPath, 'utf8'); } catch { return { valid: false, reason: 'handoff_missing', path: handoffPath }; }
   let value: unknown;
   try { value = JSON.parse(raw); } catch { return { valid: false, reason: 'handoff_malformed_json', path: handoffPath }; }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return { valid: false, reason: 'handoff_malformed_json', path: handoffPath };
@@ -141,9 +155,8 @@ export async function writeHandoff(handoff: Omit<DesktopHandoff, 'version'> & { 
  * POSIX, group/other access is forbidden because the file carries a live
  * launch id. Windows relies on the current-user profile ACL contract.
  */
-export async function verifyHandoffOwnership(handoffPath: string): Promise<void> {
-  const stat = await fs.lstat(handoffPath);
-  if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`Refusing handoff path that is not a regular file (${handoffPath}).`);
+function verifyHandoffStat(stat: Awaited<ReturnType<typeof fs.lstat>>, handoffPath: string): void {
+  if (!stat.isFile()) throw new Error(`Refusing handoff path that is not a regular file (${handoffPath}).`);
   if (stat.size > HANDOFF_MAX_BYTES) throw new Error(`Refusing handoff file larger than ${HANDOFF_MAX_BYTES} bytes (${handoffPath}).`);
   if (process.platform === 'win32' || typeof process.getuid !== 'function') return;
   if (stat.uid !== process.getuid?.()) {
@@ -153,4 +166,10 @@ export async function verifyHandoffOwnership(handoffPath: string): Promise<void>
   if ((permissions & 0o077) !== 0) {
     throw new Error(`Refusing handoff file with permissions ${permissions.toString(8)}; group/other access is not allowed (${handoffPath}).`);
   }
+}
+
+export async function verifyHandoffOwnership(handoffPath: string): Promise<void> {
+  const stat = await fs.lstat(handoffPath);
+  if (stat.isSymbolicLink()) throw new Error(`Refusing handoff path that is not a regular file (${handoffPath}).`);
+  verifyHandoffStat(stat, handoffPath);
 }
