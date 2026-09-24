@@ -202,6 +202,12 @@ export class CompositeBackend implements FreebuffBackend {
     await backend.stop(session);
   }
 
+  async resume(session: BackendSession): Promise<BackendTurnResult> {
+    const backend = this.sessions.get(session.id)?.backend ?? await this.pickForSession(session);
+    if (!backend.resume) throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, `The ${backend.kind} backend cannot resume turns.`);
+    return backend.resume(session);
+  }
+
   /** Route model/reasoning changes to the backend that owns the session. */
   async setModel(session: BackendSession, model: string, harnessId = 'codebuff'): Promise<unknown> {
     const backend = this.sessions.get(session.id)?.backend ?? await this.pickForSession(session);

@@ -320,13 +320,51 @@ export class SessionManager {
     const target = turnId ?? session.activeTurnId;
     if (!target) return { aborted: false, stopped: false };
     const controller = this.controllers.get(target);
-    if (!controller) return { aborted: false, stopped: false };
+    if (!controller) {
+      const turn = this.turns.get(target);
+      if (!turn || turn.sessionId !== sessionId || turn.state !== 'waiting_for_user' || !this.backend.stop) return { aborted: false, stopped: false };
+      try {
+        await this.backend.stop(this.toBackendSession(session), target);
+        this.transitionWaitingTurn(session, turn, 'cancelled');
+        return { aborted: false, stopped: true };
+      } catch (error) {
+        return { aborted: false, stopped: false, stopError: error instanceof Error ? error.message : String(error) };
+      }
+    }
     // Aborting synchronously runs the turn's abort listener, which issues the
     // backend stop; capture that promise before awaiting so we report real truth.
     if (!controller.signal.aborted) controller.abort();
     const stopping = this.stopOutcomes.get(target);
     const outcome = stopping ? await stopping.catch((): StopOutcome => ({ stopped: false, error: 'stop outcome unavailable' })) : undefined;
     return { aborted: true, stopped: outcome?.stopped ?? false, ...(outcome?.error ? { stopError: outcome.error } : {}) };
+  }
+
+  /** Apply a backend-confirmed resume outcome to its existing canonical turn. */
+  reconcileResume(sessionId: string, result: BackendTurnResult): BridgeTurn | undefined {
+    const session = this.sessions.get(sessionId);
+    const turn = session?.activeTurnId ? this.turns.get(session.activeTurnId) : undefined;
+    if (!session || !turn || turn.state !== 'waiting_for_user') return undefined;
+    if (result.state === 'waiting_for_user' || result.state === 'running' || result.state === 'queued') return turn;
+    this.transitionWaitingTurn(session, turn, result.state, result);
+    return turn;
+  }
+
+  private transitionWaitingTurn(session: BridgeSession, turn: BridgeTurn, state: BridgeTurnState, result?: BackendTurnResult): void {
+    turn.state = state;
+    if (result?.result !== undefined) turn.result = result.result;
+    if (result?.error) turn.error = result.error;
+    if (result?.backendTurnId) turn.backendTurnId = result.backendTurnId;
+    turn.lastSequence = this.events.lastSequenceFor({ turnId: turn.id });
+    const threadId = session.backendSessionId ?? session.id;
+    this.events.setTurnState(threadId, session.id, turn.id, state, turn.error);
+    if (isTerminalTurnState(state)) {
+      turn.completedAt = new Date().toISOString();
+      if (session.activeTurnId === turn.id) session.activeTurnId = undefined;
+      session.state = 'ready';
+      this.events.setThreadLive(threadId, false);
+    } else {
+      session.state = state === 'waiting_for_user' ? 'waiting_for_user' : 'running';
+    }
   }
 
   /** Drop old terminal turns so long-lived processes cannot accumulate them. */

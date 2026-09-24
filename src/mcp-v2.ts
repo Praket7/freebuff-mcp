@@ -5,7 +5,7 @@ import { CompositeBackend } from './backends/backend.js';
 import { MAX_DIFF_FILES } from './backends/desktop-backend.js';
 import { SessionManager } from './bridge/session-manager.js';
 import { TurnManager } from './bridge/turn-manager.js';
-import { BridgeError, ErrorCodes, toErrorShape, BackendSession } from './bridge/types.js';
+import { BackendTurnResult, BridgeError, ErrorCodes, toErrorShape, BackendSession } from './bridge/types.js';
 import { Json } from './types.js';
 import { assertSafeId, redact } from './security.js';
 import { VERSION } from './version.js';
@@ -242,12 +242,11 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
     // the thread id; only the CLI harness takes `/resume` as a command.
     // Submitting `/resume` as Desktop prompt text would start a turn with that
     // literal text instead.
-    if (backendSession.backend === 'cli') {
-      const result = await adapter.backend.sendMessage({ session: backendSession, text: '/resume' });
-      return { ok: true, ...result } as Json;
-    }
-    await (adapter.backend.desktop as unknown as { resume(session: BackendSession): Promise<unknown> }).resume(backendSession);
-    return { ok: true };
+    const result = backendSession.backend === 'cli'
+      ? await adapter.backend.sendMessage({ session: backendSession, text: '/resume' })
+      : await (adapter.backend as unknown as { resume(session: BackendSession): Promise<BackendTurnResult> }).resume(backendSession);
+    if (session) adapter.sessions.reconcileResume(session.id, result);
+    return { ok: true, ...result } as Json;
   }));
 
   write('set_model', 'Set the model for an existing thread.', { threadId: id, model: z.string().min(1).max(200), harnessId: z.string().optional() }, async (args) => shapeError(async () => {

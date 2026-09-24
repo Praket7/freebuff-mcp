@@ -1,0 +1,1 @@
+{"name":"freebuff-mcp-explainer","private":true,"type":"module","scripts":{"render":"remotion render src/index.tsx FreebuffExplainer ../freebuff-mcp-explainer.mp4"},"dependencies":{"@remotion/cli":"4.0.506","react":"19.1.0","react-dom":"19.1.0","remotion":"4.0.506"}}

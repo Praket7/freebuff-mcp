@@ -50,6 +50,7 @@ export interface FakeDesktop {
 export interface FakeDesktopOptions {
   /** How long a turn stays `running` before it settles. */
   turnDelayMs?: number;
+  resumeTurn?: boolean;
   /** Record the turn as failed (`lastTurnOutcome: "error"`). */
   failTurn?: boolean;
   /** Launch id the Desktop expects on writes. */
@@ -239,6 +240,7 @@ const threads = new Map<string, Record<string, unknown>>([
         }
         if (method === 'POST' && suffix === '/resume') {
           if (dropAfterCommit('/resume')) return undefined;
+          if (options.resumeTurn) runTurn(id);
           return json(response, { ok: true });
         }
         if (method === 'POST' && suffix === '/agent') {
