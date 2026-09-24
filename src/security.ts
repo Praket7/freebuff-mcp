@@ -9,24 +9,23 @@ const SENSITIVE_KEY = /^(authorization|proxy-authorization|www-authenticate|bear
 const SENSITIVE_KEY_SUBSTRING = /token|secret|password|cookie|credential|authkey|privatekey|fingerprint/i;
 
 // Value-pattern based redaction for strings.
-const secretText = /(authorization\s*[:=]\s*|bearer\s+|access[_-]?token\s*["']?\s*[:=]\s*["']?|refresh[_-]?token\s*["']?\s*[:=]\s*["']?|api[_-]?key\s*["']?\s*[:=]\s*["']?|api-key\s*[:=]\s*|client[_-]?secret\s*["']?\s*[:=]\s*["']?|private[_-]?key\s*[:=]\s*|cookie\s*[:=]\s*|session[_-]?token\s*[:=]\s*)[^\s,;'"}]+/gi;
+const secretText = /(authorization\s*[:=]\s*|bearer\s+|(?:access|refresh|id)[_-]?token\s*["']?\s*[:=]\s*["']?|api[_-]?key\s*["']?\s*[:=]\s*["']?|client[_-]?secret\s*["']?\s*[:=]\s*["']?|private[_-]?key\s*[:=]\s*|cookie\s*[:=]\s*|session[_-]?token\s*[:=]\s*|(?:pass(?:word|wd|phrase)?|pwd)\s*[:=]\s*["']?)[^\s,;'"}]+/gi;
 // Query-string tokens (e.g. ?token=..., &api_key=...) when recognizable.
-const queryStringToken = /([?&](?:token|access_token|refresh_token|api_key|apikey|api-key|key|secret|password|sig|signature|session)")[^&\s"']*/gi;
-const queryStringToken2 = /([?&](?:token|access_token|refresh_token|api_key|apikey|api-key|key|secret|password|sig|signature|session)=)[^&\s"']+/gi;
+const queryStringToken = /([?&](?:token|access_token|refresh_token|api_key|apikey|api-key|key|secret|password|passwd|passphrase|pwd|sig|signature|session)")[^&\s"']*/gi;
+const queryStringToken2 = /([?&](?:token|access_token|refresh_token|api_key|apikey|api-key|key|secret|password|passwd|passphrase|pwd|sig|signature|session)=)[^&\s"']+/gi;
 const bearerHeader = /bearer\s+[\w.\-~+/=]{8,}/gi;
 
 export function redactString(value: string): string {
   let out = value.replace(bearerHeader, 'Bearer [REDACTED]');
   out = out.replace(secretText, (match) => `${match.split(/[:=]/)[0]?.trim() ?? match}=[REDACTED]`);
+  out = out.replace(/-----BEGIN ((?:[A-Z0-9]+ )*PRIVATE KEY)-----[\s\S]*?-----END \1-----/g, (_match, label: string) => `-----BEGIN ${label}-----[REDACTED]-----END ${label}-----`);
   out = out.replace(queryStringToken, '$1[REDACTED]');
   out = out.replace(queryStringToken2, '$1[REDACTED]');
   return out;
 }
 
 export function redact(value: unknown): unknown {
-  if (typeof value === 'string') {
-    return redactString(value.replace(/(authToken|access_token|authorization|cookie|fingerprintHash|api[_-]?key|client[_-]?secret|private[_-]?key)(["']?\s*[:=]\s*["']?)[^,"'\s}]+/gi, '$1$2[REDACTED]'));
-  }
+  if (typeof value === 'string') return redactString(value);
   if (Array.isArray(value)) return value.map(redact);
   if (value && typeof value === 'object') {
     return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [

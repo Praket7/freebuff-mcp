@@ -120,6 +120,19 @@ test('event store: concurrent threads do not leak events', () => {
   assert.ok(two.events.every((e) => e.threadId === 'thread-2'));
 });
 
+test('event store: nextSequence never moves past events omitted by page limits or filters', () => {
+  const store = new EventStore();
+  for (let i = 0; i < 4; i++) store.append({ sessionId: i === 3 ? 's2' : 's1', turnId: `t${i}`, threadId: 'shared', type: 'phase', message: `${i}` });
+  const first = store.progress('shared', 0, 2, 's1');
+  assert.deepEqual(first.events.map((event) => event.sequence), [1, 2]);
+  assert.equal(first.nextSequence, 2);
+  const second = store.progress('shared', first.nextSequence!, 2, 's1');
+  assert.deepEqual(second.events.map((event) => event.sequence), [3]);
+  assert.equal(second.nextSequence, 3);
+  const empty = store.progress('shared', 3, 2, 's1');
+  assert.equal(empty.nextSequence, 3, 'empty filtered pages retain the caller cursor');
+});
+
 test('event store: session and turn filters partition correctly', () => {
   const store = new EventStore();
   store.append({ sessionId: 's1', turnId: 't1', threadId: 'th1', type: 'phase' });

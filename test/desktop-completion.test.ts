@@ -97,12 +97,13 @@ test('desktop: idempotent control routes retry safely after an ambiguous drop', 
 });
 
 test('desktop: /resume and /effort replay-safe after an ambiguous drop', async () => {
-  const desktop = await startFakeDesktop({ dropAfterCommitSuffixes: ['/resume', '/effort'] });
+  const desktop = await startFakeDesktop({ dropAfterCommitSuffixes: ['/resume', '/effort'], resumeTurn: true, turnDelayMs: 20 });
   const restoreEnv = withEnv(desktop.url, desktop.launchId);
   const backend = new DesktopBackend();
   try {
     const session = { id: 'bridge-1', backend: 'desktop' as const, backendSessionId: desktop.threadId, cwd: desktop.projectPath };
-    await backend.resume(session);
+    const resumed = await backend.resume(session);
+    assert.equal(resumed.state, 'completed', 'resume is complete only after a finish transition');
     const resumes = desktop.calls.filter((c) => c.method === 'POST' && c.path.endsWith('/resume')).length;
     assert.equal(resumes, 2, `idempotent resume retried once (saw ${resumes})`);
 

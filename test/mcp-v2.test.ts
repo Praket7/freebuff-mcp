@@ -28,9 +28,7 @@ test('MCP v2: resume_thread uses the Desktop resume route instead of submitting 
   const calls: string[] = [];
   const backend = {
     kind: 'desktop' as const,
-    desktop: {
-      resume: async (session: { backendSessionId?: string }) => { calls.push(`resume:${session.backendSessionId}`); return { ok: true }; },
-    },
+    resume: async (session: { backendSessionId?: string }) => { calls.push(`resume:${session.backendSessionId}`); return { state: 'waiting_for_user' as const }; },
     probe: async () => ({ backend: 'desktop' as const, connection: 'connected_writable' as const, authorization: 'write_authorized' as const, liveProgress: 'connected' as const, canCreateSession: true, canSendMessage: true, canStop: true, canResume: true, canSetModel: true, canSetReasoning: true, notes: [] }),
     sendMessage: async () => { calls.push('sendMessage'); return { state: 'completed' as const }; },
     dispose: () => undefined,
@@ -43,12 +41,12 @@ test('MCP v2: resume_thread uses the Desktop resume route instead of submitting 
   const ctx = { mcpReq: { _meta: {}, signal: new AbortController().signal, notify: async () => undefined } };
   const result = await toolOf(server, 'resume_thread').handler({ sessionId: session.id, threadId: 'thread-abc' }, ctx);
   assert.equal(result.structuredContent?.ok, true);
-  assert.deepEqual(calls, ['resume:thread-abc'], 'the Desktop resume route is used and no prompt is submitted');
+  assert.deepEqual(calls, ['resume:thread-abc'], 'the backend resume operation is used and no prompt is submitted');
 
   // threadId is the required argument, so it must work on its own.
   const byThreadOnly = await toolOf(server, 'resume_thread').handler({ threadId: 'thread-xyz' }, ctx);
   assert.equal(byThreadOnly.structuredContent?.ok, true);
-  assert.deepEqual(calls, ['resume:thread-abc', 'resume:thread-xyz'], 'a bare threadId still resumes through the route');
+  assert.deepEqual(calls, ['resume:thread-abc', 'resume:thread-xyz'], 'a bare threadId still resumes through the backend');
 });
 
 type LooseTool = { handler: (args: unknown, ctx: unknown) => Promise<{ structuredContent?: Record<string, unknown> }> };

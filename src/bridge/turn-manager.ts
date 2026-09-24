@@ -60,16 +60,25 @@ export class TurnManager {
     const turn = this.getTurn(turnId);
     const deadline = Date.now() + Math.min(Math.max(timeoutMs, 0), 120_000);
     let cursor = afterSequence;
+    const maxEvents = Math.max(1, Math.min(limit, 100));
+    const delivered: TurnProgressSnapshot['events'] = [];
     for (;;) {
-      const snapshot = this.progressForTurn(turnId, cursor, limit);
-      if (snapshot.nextSequence && snapshot.nextSequence > cursor) cursor = snapshot.nextSequence;
+      const snapshot = this.progressForTurn(turnId, cursor, maxEvents - delivered.length);
+      delivered.push(...snapshot.events);
+      cursor = delivered.at(-1)?.sequence ?? cursor;
       const state = this.manager.getTurn(turnId)?.state;
-      if (state && isTerminalTurnState(state)) return snapshot;
-      if (state === 'waiting_for_user') return snapshot;
+      if (delivered.length >= maxEvents || (state && isTerminalTurnState(state)) || state === 'waiting_for_user') {
+        return { ...snapshot, turnId, sessionId: turn.sessionId, events: delivered, nextSequence: cursor };
+      }
       const remaining = deadline - Date.now();
-      if (remaining <= 0) return snapshot;
-      const waited = await this.events.wait(snapshot.threadId, cursor, Math.min(remaining, 5_000), limit, turn.sessionId, turnId);
-      if (waited.nextSequence && waited.nextSequence > cursor) cursor = waited.nextSequence;
+      if (remaining <= 0) return { ...snapshot, turnId, sessionId: turn.sessionId, events: delivered, nextSequence: cursor };
+      const waited = await this.events.wait(snapshot.threadId, cursor, Math.min(remaining, 5_000), maxEvents - delivered.length, turn.sessionId, turnId);
+      delivered.push(...waited.events);
+      cursor = delivered.at(-1)?.sequence ?? cursor;
+      const nextState = this.manager.getTurn(turnId)?.state;
+      if (delivered.length >= maxEvents || (nextState && isTerminalTurnState(nextState)) || nextState === 'waiting_for_user' || Date.now() >= deadline) {
+        return { ...waited, turnId, sessionId: turn.sessionId, events: delivered, nextSequence: cursor };
+      }
     }
   }
 }

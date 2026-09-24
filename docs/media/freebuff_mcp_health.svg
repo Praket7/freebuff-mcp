@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="310" viewBox="0 0 1200 310">
+<rect width="1200" height="310" rx="26" fill="#152734"/>
+<text x="54" y="78" fill="#f4f1e8" font-family="Arial,sans-serif" font-size="34" font-weight="700">What the automated checks prove</text>
+<text x="56" y="152" fill="#6de1d9" font-family="Arial,sans-serif" font-size="54" font-weight="700">210</text>
+<text x="58" y="194" fill="#b8cbd0" font-family="Arial,sans-serif" font-size="20">automated test cases</text>
+<path d="M342 125v110" stroke="#34515d" stroke-width="2"/>
+<text x="388" y="153" fill="#f4f1e8" font-family="Arial,sans-serif" font-size="24" font-weight="700">Synthetic backend checks</text>
+<text x="388" y="193" fill="#b8cbd0" font-family="Arial,sans-serif" font-size="19">Event paging, cancellation, secret masking, setup,</text>
+<text x="388" y="222" fill="#b8cbd0" font-family="Arial,sans-serif" font-size="19">plus protocol behavior use local test services.</text>
+<rect x="890" y="112" width="252" height="76" rx="18" fill="#4b3b36"/>
+<text x="920" y="145" fill="#ffd4b8" font-family="Arial,sans-serif" font-size="18" font-weight="700">LIVE CHECKS</text>
+<text x="920" y="171" fill="#f4d8c9" font-family="Arial,sans-serif" font-size="16">not yet run here</text>
+<text x="55" y="280" fill="#91aab1" font-family="Arial,sans-serif" font-size="16">Count reflects the passing local suite for this source revision. It does not prove real Desktop or CLI compatibility.</text>
+</svg>

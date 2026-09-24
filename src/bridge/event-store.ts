@@ -301,7 +301,10 @@ export class EventStore {
       currentState: turnState ?? [...all].reverse().find((x) => x.state)?.state,
       phase: [...all].reverse().find((x) => x.phase && (x.sequence > afterSequence))?.phase ?? meaningful?.phase,
       events,
-      nextSequence: this.lastSequenceFor({ threadId }),
+      // A cursor is an acknowledgement of delivered data. Returning the
+      // thread's newest sequence here can skip filtered events or events past
+      // this page's limit forever.
+      nextSequence: events.at(-1)?.sequence ?? afterSequence,
       // A thread explicitly marked live (a running CLI/PTY turn) is connected
       // regardless of the global flag; an explicitly finished one is not,
       // even when some other backend's stream is healthy. Every other thread

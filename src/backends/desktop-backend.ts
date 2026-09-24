@@ -393,12 +393,12 @@ export class DesktopBackend implements FreebuffBackend {
    * Polling reads fresh HTTP state while completion is unproven (the SSE cache
    * may be the same stale frame forever during an outage).
    */
-  private async waitForTurnEnd(threadId: string, before: ThreadTurnState, signal?: AbortSignal): Promise<ThreadTurnState | undefined> {
+  private async waitForTurnEnd(threadId: string, before: ThreadTurnState, signal?: AbortSignal, startGraceMs = this.options.turnStartGraceMs ?? TURN_START_GRACE_MS): Promise<ThreadTurnState | undefined> {
     const deadline = Date.now() + TURN_DEADLINE_MS;
     // If the turn never visibly starts (an instant turn, or a prompt the Desktop
     // discarded), don't hold the request open for the full deadline — but do
     // NOT treat the unproven idle state as completion either.
-    const startDeadline = Math.min(deadline, Date.now() + (this.options.turnStartGraceMs ?? TURN_START_GRACE_MS));
+    const startDeadline = Math.min(deadline, Date.now() + startGraceMs);
     let sawRunning = false;
     for (;;) {
       if (signal?.aborted) return this.threadStates.get(threadId);
@@ -612,8 +612,13 @@ export class DesktopBackend implements FreebuffBackend {
   async resume(session: BackendSession): Promise<BackendTurnResult> {
     await this.assertWritable();
     const threadId = assertSafeId(session.backendSessionId ?? session.id);
+    const before = await this.readThreadState(threadId, { fresh: true }).catch((): ThreadTurnState => ({ turnState: 'idle' }));
     const response = await this.request<unknown>('POST', `/api/thread/${encodeURIComponent(threadId)}/resume`, {});
-    return { state: 'completed', result: redact(response) };
+    // A resume acknowledgement does not itself prove that a turn started.
+    // Give the queue a short chance to move, then report uncertainty promptly.
+    const end = await this.waitForTurnEnd(threadId, before, undefined, 2_000);
+    const mapped = this.mapTurnOutcome(end, false);
+    return { state: mapped.state, result: redact(response), ...(mapped.error ? { error: mapped.error } : {}) };
   }
 
   async setModel(session: BackendSession, model: string, harnessId = 'codebuff'): Promise<unknown> {

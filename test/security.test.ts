@@ -16,6 +16,15 @@ test('redacts secrets in strings and rejects unsafe file content', () => {
   assert.throws(() => safeTextContent(Buffer.from('a\0b'), 'x.bin'), /Binary/);
   assert.throws(() => safeTextContent(Buffer.alloc(1_000_001), 'x'), /1 MB/);
 });
+test('redacts password lines, PEM keys, nested transcript text, errors, and URLs while keeping useful text', () => {
+  const pem = '-----BEGIN PRIVATE KEY-----\nSYNTHETIC_PEM_SECRET\n-----END PRIVATE KEY-----';
+  const text = safeTextContent(Buffer.from(`Notes remain readable\npassword=SYNTHETIC_PASSWORD\n${pem}\nDone`), 'notes.txt');
+  assert.match(text, /Notes remain readable/);
+  assert.match(text, /Done/);
+  assert.doesNotMatch(text, /SYNTHETIC_(PASSWORD|PEM_SECRET)/);
+  const clean = redact({ messages: [{ text: 'passwd: SYNTHETIC_PASSWD' }], error: 'password=SYNTHETIC_ERROR', url: 'https://example.test/?pwd=SYNTHETIC_URL' });
+  assert.doesNotMatch(JSON.stringify(clean), /SYNTHETIC_(PASSWD|ERROR|URL)/);
+});
 test('protected file rules cover common credential files and directories', () => {
   for (const name of ['.git-credentials', '.aws', '.ssh', '.gnupg', '.azure', '.kube', '.docker', '.npmrc', 'id_ed25519', 'client.pem']) {
     assert.equal(blocked.test(name), true, `${name} should be protected`);

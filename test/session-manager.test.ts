@@ -185,7 +185,7 @@ test('session manager: unknown session and unknown turn produce structured error
   assert.throws(() => turns.getTurn('missing'), (error: unknown) => error instanceof BridgeError && error.code === ErrorCodes.TURN_NOT_FOUND);
 });
 
-test('turn manager: waitForTurn returns terminal snapshot and cursor advances past 100 events', async () => {
+test('turn manager: bounded wait returns only delivered events and callers can fetch the next page', async () => {
   const manager = new SessionManager(fakeBackend());
   const turns = new TurnManager(manager);
   const session = await manager.createSession({ cwd: '/tmp/project' });
@@ -195,6 +195,40 @@ test('turn manager: waitForTurn returns terminal snapshot and cursor advances pa
   for (let i = 0; i < 120; i++) manager.events.append({ sessionId: session.id, turnId: handle.turn.id, threadId, type: 'phase', message: `step ${i}` });
   const snapshot = await turns.waitForTurn(handle.turn.id, 5000, 0, 100);
   assert.ok(snapshot.events.length <= 100);
-  assert.ok((snapshot.nextSequence ?? 0) > 100, 'cursor advanced beyond 100');
+  assert.equal(snapshot.events.length, 100);
+  assert.equal(snapshot.nextSequence, snapshot.events.at(-1)?.sequence, 'cursor matches the final delivered event');
+  const next = turns.progressForTurn(handle.turn.id, snapshot.nextSequence, 100);
+  assert.ok(next.events.length > 0, 'remaining events remain available');
+  assert.ok(!snapshot.events.some((event) => next.events.some((later) => later.sequence === event.sequence)), 'pages do not repeat events');
   await handle.done;
+});
+
+test('waiting turns reconcile only on confirmation and remain cancellable without a live request controller', async () => {
+  let stopCount = 0;
+  let sends = 0;
+  const backend = { ...fakeBackend(), sendMessage: async () => (++sends === 1 ? { state: 'waiting_for_user' as const } : { state: 'completed' as const }), stop: async () => { stopCount++; } } as FreebuffBackend;
+  const manager = new SessionManager(backend);
+  const session = await manager.createSession({ cwd: '/tmp/project' });
+  const turns = new TurnManager(manager);
+  const waiting = await turns.startTurn(session.id, { text: 'needs approval' });
+  assert.equal(session.activeTurnId, waiting.id);
+  assert.equal(manager.reconcileResume(session.id, { state: 'waiting_for_user' })?.state, 'waiting_for_user');
+  const stopped = await manager.cancelTurn(session.id, waiting.id);
+  assert.deepEqual(stopped, { aborted: false, stopped: true });
+  assert.equal(stopCount, 1);
+  assert.equal(waiting.state, 'cancelled');
+  assert.equal(session.activeTurnId, undefined);
+  const next = await turns.startTurn(session.id, { text: 'next work' });
+  assert.equal(next.state, 'completed');
+});
+
+test('a confirmed resume completes the existing waiting turn without submitting another prompt', async () => {
+  const manager = new SessionManager({ ...fakeBackend(), sendMessage: async () => ({ state: 'waiting_for_user' as const }) } as FreebuffBackend);
+  const session = await manager.createSession({ cwd: '/tmp/project' });
+  const turns = new TurnManager(manager);
+  const waiting = await turns.startTurn(session.id, { text: 'needs approval' });
+  manager.reconcileResume(session.id, { state: 'completed', result: { confirmed: true } });
+  assert.equal(waiting.state, 'completed');
+  assert.equal(session.activeTurnId, undefined);
+  assert.deepEqual(waiting.result, { confirmed: true });
 });
