@@ -1,6 +1,6 @@
 {
   "name": "freebuff-mcp",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "A secure MCP bridge for locally installed Freebuff Desktop and CLI sessions.",
   "keywords": [
     "mcp",
