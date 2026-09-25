@@ -12,7 +12,7 @@ export interface DesktopCandidate {
   launchId?: string;
   pid?: number;
   /** Where this candidate came from (used for diagnostics and ordering). */
-  source: 'handoff' | 'explicit' | 'readiness' | 'log' | 'listener';
+  source: 'handoff' | 'explicit' | 'readiness' | 'process' | 'log' | 'listener';
 }
 
 export interface DiscoveryResult {
@@ -109,10 +109,15 @@ function logFiles(): string[] {
  */
 export async function discoverDesktopCandidates(): Promise<{ candidates: DesktopCandidate[]; reason?: string }> {
   const candidates: DesktopCandidate[] = [];
-  const seen = new Set<string>();
   const push = (candidate: DesktopCandidate): void => {
-    if (seen.has(candidate.url)) return;
-    seen.add(candidate.url);
+    const existing = candidates.findIndex((item) => item.url === candidate.url);
+    if (existing >= 0) {
+      // A verified same-user orchestrator process can upgrade a URL-only
+      // hint for its exact listener without changing candidate ordering.
+      const previous = candidates[existing];
+      if (candidate.source === 'process' && candidate.launchId && previous && !previous.launchId) candidates[existing] = candidate;
+      return;
+    }
     candidates.push(candidate);
   };
 
@@ -130,7 +135,12 @@ export async function discoverDesktopCandidates(): Promise<{ candidates: Desktop
     }
   }
 
-  // 3. Readiness metadata (freshness + live pid required, loopback-gated).
+  // 3. Recover the rotating launch key from the exact same-user Freebuff
+  // orchestrator process. The key is never trusted by itself: its PID must own
+  // a loopback listener and probeCandidate must verify it against /healthz.
+  for (const candidate of await discoverLiveOrchestrator()) push(candidate);
+
+  // 4. Readiness metadata (freshness + live pid required, loopback-gated).
   for (const file of readinessFiles()) {
     try {
       const raw = await readRegularFileBounded(file, READINESS_MAX_BYTES);
@@ -160,12 +170,6 @@ export async function discoverDesktopCandidates(): Promise<{ candidates: Desktop
     } catch { /* optional metadata */ }
   }
 
-  // 4. Live orchestrator process scraping REMOVED: reading another process's
-  // environment via `ps eww` is not an explicitly supported Freebuff contract,
-  // and launch ids must come from the handoff/readiness files the Desktop
-  // itself writes. Discovery continues with log hints and the listener
-  // fallback below.
-
   // 5. Log-file port hints.
   const logUrls: string[] = [];
   for (const log of logFiles()) {
@@ -192,6 +196,37 @@ export async function discoverDesktopCandidates(): Promise<{ candidates: Desktop
   }
 
   return { candidates, reason: candidates.length ? undefined : 'no_candidates' };
+}
+
+async function discoverLiveOrchestrator(): Promise<DesktopCandidate[]> {
+  const currentUid = process.getuid?.();
+  if ((process.platform !== 'darwin' && process.platform !== 'linux') || currentUid === undefined) return [];
+  try {
+    const { stdout } = await execFileAsync('ps', ['-Ao', 'pid,uid,command'], { timeout: 2000, maxBuffer: 2 * 1024 * 1024 });
+    const candidates: DesktopCandidate[] = [];
+    for (const line of stdout.split('\n')) {
+      const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.+)$/);
+      const commandLine = match?.[3] ?? '';
+      if (!match || Number(match[2]) !== currentUid || !/(?:^|[\\/\s])orchestrator\.js(?:\s|$)/i.test(commandLine)) continue;
+      const pid = Number(match[1] ?? '');
+      if (!Number.isSafeInteger(pid) || pid <= 0) continue;
+      try {
+        // Ask for the environment of this one verified process only. Never
+        // dump the environment of every local process into MCP output or logs.
+        const { stdout: command } = await execFileAsync('ps', ['eww', '-p', String(pid), '-o', 'command='], { timeout: 1500, maxBuffer: 256 * 1024 });
+        if (!/(?:^|[\\/\s])orchestrator\.js(?:\s|$)/i.test(command)) continue;
+        const launchId = command.match(/(?:^|\s)FREEBUFF_LAUNCH_ID=([^\s]{8,512})(?=\s|$)/)?.[1];
+        if (!launchId) continue;
+        const { stdout: listeners } = await execFileAsync('lsof', ['-nP', '-a', '-p', String(pid), '-iTCP', '-sTCP:LISTEN'], { timeout: 1500, maxBuffer: 128 * 1024 });
+        const ports = [...listeners.matchAll(/\b(?:127\.0\.0\.1|\[?::1\]?):(\d+)\s+\(LISTEN\)/g)].map((item) => Number(item[1]));
+        for (const port of new Set(ports)) {
+          if (port > 0 && port < 65536) candidates.push({ url: `http://127.0.0.1:${port}`, launchId, pid, source: 'process' });
+        }
+      } catch { /* the process may exit or OS inspection may be restricted */ }
+      if (candidates.length >= 16) break;
+    }
+    return candidates;
+  } catch { return []; }
 }
 
 async function probeCandidate(candidate: DesktopCandidate): Promise<DesktopCandidate | null> {

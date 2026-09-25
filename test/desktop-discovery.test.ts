@@ -3,6 +3,8 @@ import test from 'node:test';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { readHandoff, writeHandoff, HANDOFF_ENV } from '../src/desktop/handoff.js';
 import { discoverDesktopCandidates, invalidateDiscoveryCache } from '../src/desktop/discovery.js';
 import { DesktopBackend } from '../src/backends/desktop-backend.js';
@@ -276,6 +278,48 @@ test('discovery: insecure POSIX readiness metadata never contributes a launch id
   } finally {
     invalidateDiscoveryCache();
     if (previousReadiness === undefined) delete process.env.FREEBUFF_READINESS_FILE; else process.env.FREEBUFF_READINESS_FILE = previousReadiness;
+    if (previousHandoff === undefined) delete process.env[HANDOFF_ENV]; else process.env[HANDOFF_ENV] = previousHandoff;
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('discovery: same-user orchestrator process recovers its launch id only for its loopback listener', async (t) => {
+  if ((process.platform !== 'darwin' && process.platform !== 'linux') || process.getuid === undefined) return t.skip('process environment discovery requires a POSIX user id');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'freebuff-live-orchestrator-'));
+  const script = path.join(dir, 'orchestrator.js');
+  const previousReadiness = process.env.FREEBUFF_READINESS_FILE;
+  const previousUrl = process.env.FREEBUFF_ORCHESTRATOR_URL;
+  const previousHandoff = process.env[HANDOFF_ENV];
+  let child: ReturnType<typeof spawn> | undefined;
+  try {
+    await fs.writeFile(script, `const http = require('node:http');\nconst server = http.createServer((req,res) => { if (req.url === '/healthz') { const ok = req.headers['x-freebuff-launch-id'] === 'test-launch-id-123'; res.writeHead(ok ? 200 : 401, {'content-type':'application/json'}); res.end(JSON.stringify({ok})); return; } if (req.url === '/api/projects') { res.writeHead(200, {'content-type':'application/json'}); res.end(JSON.stringify({projects:[]})); return; } res.writeHead(404).end(); });\nserver.listen(0, '127.0.0.1', () => process.stdout.write(String(server.address().port) + '\\n'));\n`, 'utf8');
+    child = spawn(process.execPath, [script], { env: { ...process.env, FREEBUFF_LAUNCH_ID: 'test-launch-id-123' }, stdio: ['ignore', 'pipe', 'ignore'] });
+    const port = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('fake Desktop did not start')), 3000);
+      child?.stdout?.once('data', (chunk: Buffer) => { clearTimeout(timer); resolve(chunk.toString().trim()); });
+      child?.once('error', (error) => { clearTimeout(timer); reject(error); });
+    });
+    process.env.FREEBUFF_READINESS_FILE = path.join(dir, 'missing-readiness.json');
+    process.env.FREEBUFF_ORCHESTRATOR_URL = `http://127.0.0.1:${port}`;
+    process.env[HANDOFF_ENV] = path.join(dir, 'missing-handoff.json');
+    invalidateDiscoveryCache();
+    const { candidates } = await discoverDesktopCandidates();
+    const candidate = candidates.find((item) => item.url === `http://127.0.0.1:${port}`);
+    assert.equal(candidate?.source, 'process');
+    assert.equal(candidate?.pid, child.pid);
+    assert.equal(candidate?.launchId, 'test-launch-id-123');
+    const backend = new DesktopBackend();
+    try {
+      const caps = await backend.probe();
+      assert.equal(caps.connection, 'connected_writable');
+      assert.equal(caps.authorization, 'write_authorized');
+    } finally { backend.dispose(); }
+  } finally {
+    child?.kill('SIGTERM');
+    if (child && child.exitCode === null) await Promise.race([once(child, 'exit'), new Promise((resolve) => setTimeout(resolve, 1000))]);
+    invalidateDiscoveryCache();
+    if (previousReadiness === undefined) delete process.env.FREEBUFF_READINESS_FILE; else process.env.FREEBUFF_READINESS_FILE = previousReadiness;
+    if (previousUrl === undefined) delete process.env.FREEBUFF_ORCHESTRATOR_URL; else process.env.FREEBUFF_ORCHESTRATOR_URL = previousUrl;
     if (previousHandoff === undefined) delete process.env[HANDOFF_ENV]; else process.env[HANDOFF_ENV] = previousHandoff;
     await fs.rm(dir, { recursive: true, force: true });
   }
