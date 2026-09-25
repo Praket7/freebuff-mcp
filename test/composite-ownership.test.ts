@@ -175,6 +175,26 @@ test('ownership: aggregate reads stay on the Desktop while it is connected (even
   });
 });
 
+test('ownership: aggregate Desktop reads preserve the backend receiver', async () => {
+  const value = { projects: [{ id: 'desktop-project' }], threads: [{ id: 'desktop-thread' }] };
+  const desktop = {
+    kind: 'desktop' as const,
+    value,
+    probe: async () => ({ backend: 'desktop' as const, connection: 'connected_read_only' as const, authorization: 'read_only' as const, liveProgress: 'connected' as const, canCreateSession: false, canSendMessage: false, canStop: false, canResume: false, canSetModel: false, canSetReasoning: false, notes: [] }),
+    async listProjects() { return this.value.projects; },
+    async listThreads() { return this.value.threads; },
+    dispose: () => undefined,
+  };
+  const calls: CliStubCalls = { create: [], send: [], read: [] };
+  const composite = new CompositeBackend({ desktop: desktop as never, cli: cliStub(calls) as never });
+  try {
+    assert.deepEqual(await composite.listProjects(), value.projects);
+    assert.deepEqual(await composite.listThreads(), value.threads);
+  } finally {
+    composite.dispose();
+  }
+});
+
 test('ownership: registered threads resolve through the owner of the real handle', async () => {
   const desktopCalls: string[] = [];
   const composite = new CompositeBackend({ desktop: desktopStub({ connection: 'connected_writable', calls: desktopCalls }) as never, cli: cliStub({ create: [], send: [], read: [] }) as never });

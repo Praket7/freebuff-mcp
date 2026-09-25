@@ -34,3 +34,8 @@ test('CLI readiness rejects a timeout screen that never rendered the interactive
   assert.equal(cliTerminalIsReady(''), false);
   assert.equal(cliTerminalIsReady('Connecting...'), false);
 });
+
+test('CLI readiness recognizes the current Start coding prompt without accepting a Connecting screen', () => {
+  assert.equal(cliTerminalIsReady('Start coding for this project'), true);
+  assert.equal(cliTerminalIsReady('Connecting...\nStart coding for this project'), false);
+});

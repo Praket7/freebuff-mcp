@@ -277,7 +277,7 @@ export class CompositeBackend implements FreebuffBackend {
     const backend = this.backendFor(kind);
     const fn = (backend as unknown as Record<string, unknown>)[method] as ((...a: string[]) => Promise<unknown>) | undefined;
     if (typeof fn !== 'function') return whenMissing();
-    return await fn(...args);
+    return await fn.apply(backend, args);
   }
 
   /**

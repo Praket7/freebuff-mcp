@@ -86,7 +86,7 @@ export class CliTerminalScreen {
   }
 }
 
-const CLI_READY_PROMPT = /Enter a coding task or \/ for commands/i;
+const CLI_READY_PROMPT = /(?:Enter a coding task or \/ for commands|Start coding for)\b/i;
 const CLI_CONNECTING = /\bConnecting\b/i;
 
 export function cliTerminalIsReady(screen: string): boolean {
