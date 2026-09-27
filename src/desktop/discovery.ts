@@ -217,8 +217,9 @@ async function discoverLiveOrchestrator(): Promise<DesktopCandidate[]> {
         if (!/(?:^|[\\/\s])orchestrator\.js(?:\s|$)/i.test(command)) continue;
         const launchId = command.match(/(?:^|\s)FREEBUFF_LAUNCH_ID=([^\s]{8,512})(?=\s|$)/)?.[1];
         if (!launchId) continue;
-        const { stdout: listeners } = await execFileAsync('lsof', ['-nP', '-a', '-p', String(pid), '-iTCP', '-sTCP:LISTEN'], { timeout: 1500, maxBuffer: 128 * 1024 });
-        const ports = [...listeners.matchAll(/\b(?:127\.0\.0\.1|\[?::1\]?):(\d+)\s+\(LISTEN\)/g)].map((item) => Number(item[1]));
+        const ports = process.platform === 'linux'
+          ? await linuxLoopbackListenerPorts(pid)
+          : await macLoopbackListenerPorts(pid);
         for (const port of new Set(ports)) {
           if (port > 0 && port < 65536) candidates.push({ url: `http://127.0.0.1:${port}`, launchId, pid, source: 'process' });
         }
@@ -227,6 +228,38 @@ async function discoverLiveOrchestrator(): Promise<DesktopCandidate[]> {
     }
     return candidates;
   } catch { return []; }
+}
+
+async function linuxLoopbackListenerPorts(pid: number): Promise<number[]> {
+  // ubuntu-slim does not include lsof or ss; procfs provides the same PID to
+  // socket binding without adding a runner or host dependency.
+  let descriptors: string[];
+  try { descriptors = await fs.readdir(`/proc/${pid}/fd`); } catch { return []; }
+  const inodes = new Set<string>();
+  for (const descriptor of descriptors) {
+    try {
+      const match = (await fs.readlink(`/proc/${pid}/fd/${descriptor}`)).match(/^socket:\[(\d+)\]$/);
+      if (match) inodes.add(match[1]!);
+    } catch { /* the process may close a descriptor during discovery */ }
+  }
+  if (!inodes.size) return [];
+  let table: string;
+  try { table = await fs.readFile('/proc/net/tcp', 'utf8'); } catch { return []; }
+  const ports = new Set<number>();
+  for (const line of table.split('\n').slice(1)) {
+    const fields = line.trim().split(/\s+/);
+    if (fields.length < 10 || fields[3] !== '0A' || !inodes.has(fields[9]!)) continue;
+    const [address, portText] = fields[1]!.split(':');
+    if (address?.toUpperCase() !== '0100007F') continue;
+    const port = Number.parseInt(portText ?? '', 16);
+    if (Number.isInteger(port) && port > 0 && port < 65536) ports.add(port);
+  }
+  return [...ports];
+}
+
+async function macLoopbackListenerPorts(pid: number): Promise<number[]> {
+  const { stdout } = await execFileAsync('lsof', ['-nP', '-a', '-p', String(pid), '-iTCP', '-sTCP:LISTEN'], { timeout: 1500, maxBuffer: 128 * 1024 });
+  return [...stdout.matchAll(/\b127\.0\.0\.1:(\d+)\s+\(LISTEN\)/g)].map((item) => Number(item[1]));
 }
 
 async function probeCandidate(candidate: DesktopCandidate): Promise<DesktopCandidate | null> {
