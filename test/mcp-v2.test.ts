@@ -157,3 +157,54 @@ test('freebuff_status returns structured capability data', async () => {
   const tools = (server as unknown as { _registeredTools: Record<string, unknown> })._registeredTools;
   assert.ok(tools.freebuff_status, 'freebuff_status registered');
 });
+test('MCP v2: bounded thread reads preserve routing while omitting oversized history', async () => {
+  const history = 'x'.repeat(11 * 1024 * 1024);
+  const messages = [{ role: 'assistant', text: history }, { role: 'assistant', text: 'finished' }];
+  const thread = { id: 'large-thread', projectPath: '/tmp/project', model: 'flash', reasoningEffort: 'max', harnessId: 'codebuff', executionMode: 'local', turnState: 'idle', pendingWorkCount: 0, missionOn: false, willContinue: false, lastPromptAt: 100, lastTurnFinishedAt: 200, messages, items: [history], stopToken: 'private' };
+  const backend = { getThread: async () => thread, getMessages: async () => messages } as unknown as CompositeBackend;
+  const sessions = new SessionManager(backend);
+  const server = createV2ServerFromAdapter({ backend, sessions, turns: new TurnManager(sessions) });
+  const metadata = await toolOf(server, 'get_thread').handler({ threadId: 'large-thread', metadataOnly: true }, undefined);
+  assert.equal(metadata.structuredContent?.model, 'flash');
+  assert.equal(metadata.structuredContent?.reasoningEffort, 'max');
+  assert.equal(metadata.structuredContent?.lastTurnFinishedAt, 200);
+  assert.equal(metadata.structuredContent?.missionOn, false);
+  for (const field of ['messages', 'items', 'stopToken']) assert.equal(field in metadata.structuredContent!, false);
+  assert.ok(Buffer.byteLength(JSON.stringify(metadata)) < 4096);
+
+  const recent = await toolOf(server, 'get_thread_messages').handler({ threadId: 'large-thread', limit: 1, maxChars: 128 }, undefined);
+  assert.equal(recent.structuredContent?.totalMessages, 2);
+  assert.equal(recent.structuredContent?.omittedMessages, 1);
+  assert.deepEqual(recent.structuredContent?.messages, [{ excerpt: JSON.stringify(messages[1]), truncated: false }]);
+  const bounded = await toolOf(server, 'get_thread_messages').handler({ threadId: 'large-thread', limit: 2, maxChars: 128 }, undefined);
+  const excerpts = bounded.structuredContent?.messages as Array<{ excerpt: string; truncated: boolean }>;
+  assert.equal(excerpts[0]!.excerpt.length, 128);
+  assert.equal(excerpts[0]!.truncated, true);
+  assert.ok(Buffer.byteLength(JSON.stringify(bounded)) < 4096);
+  const legacy = await toolOf(server, 'get_thread_messages').handler({ threadId: 'large-thread' }, undefined);
+  assert.deepEqual(legacy.structuredContent, messages, 'existing unbounded reads stay opt-in by omission for compatibility');
+});
+
+test('MCP v2: oversized routing metadata is refused instead of truncated', async () => {
+  const backend = { getThread: async () => ({ id: 'thread', model: 'x'.repeat(8193) }) } as unknown as CompositeBackend;
+  const sessions = new SessionManager(backend);
+  const server = createV2ServerFromAdapter({ backend, sessions, turns: new TurnManager(sessions) });
+  const result = await toolOf(server, 'get_thread').handler({ threadId: 'thread', metadataOnly: true }, undefined);
+  assert.equal(result.structuredContent?.ok, false);
+  assert.equal('model' in result.structuredContent!, false);
+});
+
+test('MCP v2: a bounded tail retains the final report of one long assistant message', async () => {
+  const messages = [{ role: 'user', text: 'old request' }, { role: 'assistant', text: 'work '.repeat(100000) + 'READY_FOR_REVIEW: report.md' }];
+  const backend = { getMessages: async () => messages } as unknown as CompositeBackend;
+  const sessions = new SessionManager(backend);
+  const server = createV2ServerFromAdapter({ backend, sessions, turns: new TurnManager(sessions) });
+  const response = await toolOf(server, 'get_thread_messages').handler({ threadId: 'thread', tail: true, maxChars: 128 }, undefined);
+  assert.equal(response.structuredContent?.omittedMessages, 1);
+  const [last] = response.structuredContent?.messages as Array<{ excerpt: string; truncated: boolean; fromEnd: boolean }>;
+  assert.equal(last!.excerpt.length, 128);
+  assert.match(last!.excerpt, /READY_FOR_REVIEW: report.md/);
+  assert.equal(last!.truncated, true);
+  assert.equal(last!.fromEnd, true);
+  assert.ok(Buffer.byteLength(JSON.stringify(response)) < 1024);
+});

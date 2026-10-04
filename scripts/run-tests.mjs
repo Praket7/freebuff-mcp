@@ -13,10 +13,10 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 async function collect(dir) {
   const entries = await readdir(path.join(root, dir), { withFileTypes: true }).catch(() => []);
-  return entries.filter((e) => e.isFile() && e.name.endsWith('.test.ts')).map((e) => path.join(dir, e.name));
+  return entries.filter((e) => e.isFile() && /\.test\.(ts|mjs)$/.test(e.name)).map((e) => path.join(dir, e.name));
 }
 
-const files = [...await collect('test'), ...await collect(path.join('test', 'integration'))].sort();
+const files = [...await collect('test'), ...await collect(path.join('test', 'integration')), ...await collect('scripts')].sort();
 if (!files.length) { console.error('No test files found'); process.exit(1); }
 
 const result = spawnSync(process.execPath, ['--test', '--import', 'tsx', ...files], {

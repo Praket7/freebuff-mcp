@@ -94,8 +94,32 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
 
   read('list_projects', 'List discovered Freebuff projects.', {}, () => shapeError(async () => { await requireSessions(); return adapter.backend.listProjects(); }));
   read('list_threads', 'List Freebuff threads.', { projectId: id.optional() }, (args) => shapeError(async () => { await requireSessions(); const threads = await adapter.backend.listThreads(); return args.projectId ? (Array.isArray(threads) ? threads : []).filter((t) => (t as Record<string, unknown>).projectId === args.projectId || (t as Record<string, unknown>).projectPath === args.projectId) : threads; }));
-  read('get_thread', 'Read thread metadata.', { threadId: id }, (args) => shapeError(() => adapter.backend.getThread(assertSafeId(args.threadId))));
-  read('get_thread_messages', 'Read visible thread messages.', { threadId: id }, (args) => shapeError(() => adapter.backend.getMessages(assertSafeId(args.threadId))));
+  read('get_thread', 'Read thread metadata; metadataOnly omits transcript and tool history.', { threadId: id, metadataOnly: z.boolean().optional() }, (args) => shapeError(async () => {
+    const value = await adapter.backend.getThread(assertSafeId(args.threadId));
+    if (!args.metadataOnly) return value;
+    const thread = asObject(value);
+    if (!thread) throw new Error('Unreadable thread metadata.');
+    const fields = ['id', 'projectId', 'projectPath', 'title', 'status', 'harnessId', 'model', 'reasoningEffort', 'agentMode', 'executionMode', 'branch', 'worktreePath', 'turnState', 'queuePaused', 'lastPromptAt', 'lastTurnFinishedAt', 'lastTurnOutcome', 'missionOn', 'willContinue', 'pendingWorkCount', 'stopping', 'createdAt', 'updatedAt', 'compacting'];
+    const metadata: Record<string, unknown> = {};
+    for (const field of fields) {
+      const item = thread[field];
+      if (item === undefined) continue;
+      if ((typeof item === 'string' && item.length <= 8192) || typeof item === 'boolean' || typeof item === 'number' || item === null) metadata[field] = item;
+      else throw new Error(`Invalid or oversized thread metadata field: ${field}`);
+    }
+    return metadata;
+  }));
+  read('get_thread_messages', 'Read visible thread messages. limit/maxChars bound excerpts; tail reads their end so a long message cannot hide its final report.', { threadId: id, limit: z.number().int().min(1).max(50).optional(), maxChars: z.number().int().min(128).max(16000).optional(), tail: z.boolean().optional() }, (args) => shapeError(async () => {
+    const value = await adapter.backend.getMessages(assertSafeId(args.threadId));
+    if (args.limit === undefined && args.maxChars === undefined && !args.tail) return value;
+    if (!Array.isArray(value)) throw new Error('Unreadable thread messages.');
+    const selected = value.slice(-(args.limit ?? (args.tail ? 1 : 10)));
+    const maxChars = args.maxChars ?? 4000;
+    return { totalMessages: value.length, omittedMessages: value.length - selected.length, messages: selected.map((message) => {
+      const serialized = JSON.stringify(message);
+      return { excerpt: args.tail ? serialized.slice(-maxChars) : serialized.slice(0, maxChars), truncated: serialized.length > maxChars, ...(args.tail ? { fromEnd: true } : {}) };
+    }) };
+  }));
   read('get_active_work', 'Read visible active work.', {}, () => shapeError(async () => {
     await requireSessions();
     const threads = await adapter.backend.listThreads();

@@ -79,6 +79,22 @@ The figures above come from the local suite run on this source revision. They de
 
 ## Build from source
 
+For large worker histories, `get_thread({threadId, metadataOnly: true})` returns
+routing and completion fields without transcript or tool history.
+`get_thread_messages({threadId, limit: 1, maxChars: 4000, tail: true})` retains the
+end of the latest message, including a final report after a long tool transcript.
+Omit these optional fields to keep the existing full-read response.
+
+From a source checkout, export a bounded review patch with:
+
+```sh
+node scripts/export-review-diff.mjs --cwd /path/to/worktree --evidence /path/to/new-evidence
+```
+
+The exporter selects Git paths before reading contents, skips generated evidence
+and private worker state, and records every exclusion or truncation. Repeated
+exports do not recursively include earlier exports or overwrite an existing result.
+
 ```sh
 pnpm install --frozen-lockfile
 pnpm typecheck
