@@ -31,22 +31,34 @@ export function processIsAlive(pid: number | undefined): boolean {
 }
 
 /**
- * Platform-default handoff locations the stock Desktop writes. `readHandoff`
- * consults these when no explicit path (or env var) is configured, so handoff
- * discovery is automatic; `writeHandoff` defaults to the current platform's
- * entry. The file carries only a loopback URL plus a short-lived launch id
- * that the Desktop challenges over HTTP — never credentials.
+ * Platform-default handoff locations the bridge reads. `readHandoff` consults
+ * these when no explicit path (or env var) is configured. Windows supports the
+ * newer LocalAppData mcp-connection contract plus the legacy roaming handoff.
+ * The file carries only a loopback URL plus a short-lived launch id that the
+ * Desktop challenges over HTTP — never credentials.
  */
-export function defaultHandoffPaths(): string[] {
-  const home = os.homedir();
+export interface HandoffPathOptions {
+  platform?: NodeJS.Platform;
+  home?: string;
+  appData?: string;
+  localAppData?: string;
+}
+
+export function defaultHandoffPaths(options: HandoffPathOptions = {}): string[] {
+  const platform = options.platform ?? process.platform;
+  const pathApi = platform === 'win32' ? path.win32 : path;
+  const home = options.home ?? os.homedir();
+  const appData = options.appData ?? process.env.APPDATA;
+  const localAppData = options.localAppData ?? process.env.LOCALAPPDATA;
   const defaults: string[] = [];
-  if (process.platform === 'win32') {
-    if (process.env.APPDATA) defaults.push(path.join(process.env.APPDATA, 'Freebuff', 'mcp-handoff.json'));
-  } else if (process.platform === 'darwin') {
-    defaults.push(path.join(home, 'Library', 'Application Support', 'Freebuff', 'mcp-handoff.json'));
-    defaults.push(path.join(home, '.config', 'freebuff-desktop', 'mcp-handoff.json'));
+  if (platform === 'win32') {
+    if (localAppData) defaults.push(pathApi.join(localAppData, 'Freebuff', 'mcp-connection.json'));
+    if (appData) defaults.push(pathApi.join(appData, 'Freebuff', 'mcp-handoff.json'));
+  } else if (platform === 'darwin') {
+    defaults.push(pathApi.join(home, 'Library', 'Application Support', 'Freebuff', 'mcp-handoff.json'));
+    defaults.push(pathApi.join(home, '.config', 'freebuff-desktop', 'mcp-handoff.json'));
   } else {
-    defaults.push(path.join(home, '.config', 'freebuff-desktop', 'mcp-handoff.json'));
+    defaults.push(pathApi.join(home, '.config', 'freebuff-desktop', 'mcp-handoff.json'));
   }
   return defaults;
 }
@@ -58,18 +70,18 @@ export function defaultHandoffPaths(): string[] {
  */
 export async function readHandoff(explicitPath?: string): Promise<HandoffValidation> {
   const configured = explicitPath ?? process.env[HANDOFF_ENV];
-  if (configured) return validateHandoffFile(configured);
+  if (configured) return validateHandoffFile(configured, path.basename(configured).toLowerCase() === 'mcp-connection.json');
 
   let firstInvalid: HandoffValidation | undefined;
   for (const fallback of defaultHandoffPaths()) {
-    const result = await validateHandoffFile(fallback);
+    const result = await validateHandoffFile(fallback, path.basename(fallback).toLowerCase() === 'mcp-connection.json');
     if (result.valid) return result;
     if (result.reason !== 'handoff_missing' && !firstInvalid) firstInvalid = result;
   }
   return firstInvalid ?? { valid: false, reason: 'no_handoff_configured' };
 }
 
-async function validateHandoffFile(handoffPath: string): Promise<HandoffValidation> {
+async function validateHandoffFile(handoffPath: string, allowUnversioned = false): Promise<HandoffValidation> {
   let pathStat: Awaited<ReturnType<typeof fs.lstat>>;
   try {
     pathStat = await fs.lstat(handoffPath);
@@ -113,7 +125,9 @@ async function validateHandoffFile(handoffPath: string): Promise<HandoffValidati
   try { value = JSON.parse(raw); } catch { return { valid: false, reason: 'handoff_malformed_json', path: handoffPath }; }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return { valid: false, reason: 'handoff_malformed_json', path: handoffPath };
   const record = value as Record<string, unknown>;
-  if (record.version !== HANDOFF_VERSION) return { valid: false, reason: 'handoff_unsupported_version', path: handoffPath };
+  if (record.version !== HANDOFF_VERSION && !(allowUnversioned && record.version === undefined)) {
+    return { valid: false, reason: 'handoff_unsupported_version', path: handoffPath };
+  }
   const url = typeof record.url === 'string' ? record.url : undefined;
   const launchId = typeof record.launchId === 'string' ? record.launchId : undefined;
   const pid = Number(record.pid);

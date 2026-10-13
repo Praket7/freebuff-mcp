@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { readHandoff, writeHandoff, HANDOFF_ENV } from '../src/desktop/handoff.js';
+import { defaultHandoffPaths, readHandoff, writeHandoff, HANDOFF_ENV } from '../src/desktop/handoff.js';
 import { discoverDesktopCandidates, invalidateDiscoveryCache } from '../src/desktop/discovery.js';
 import { DesktopBackend } from '../src/backends/desktop-backend.js';
 
@@ -46,6 +46,91 @@ test('handoff: valid handoff passes validation', async () => {
     assert.equal(result.valid, true);
     assert.equal(result.handoff?.launchId, 'launch-abc');
     assert.equal(result.handoff?.pid, process.pid);
+  });
+});
+
+test('handoff: Windows checks LocalAppData mcp-connection before the legacy roaming path', () => {
+  const paths = defaultHandoffPaths({
+    platform: 'win32',
+    home: 'C:\\Users\\tester',
+    localAppData: 'C:\\Users\\tester\\AppData\\Local',
+    appData: 'C:\\Users\\tester\\AppData\\Roaming',
+  });
+  assert.deepEqual(paths, [
+    path.win32.join('C:\\Users\\tester\\AppData\\Local', 'Freebuff', 'mcp-connection.json'),
+    path.win32.join('C:\\Users\\tester\\AppData\\Roaming', 'Freebuff', 'mcp-handoff.json'),
+  ]);
+});
+
+test('handoff: mcp-connection contract accepts an omitted version but normalizes it', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'freebuff-connection-handoff-'));
+  const file = path.join(dir, 'mcp-connection.json');
+  const { version: _version, ...connection } = validHandoff();
+  await fs.writeFile(file, JSON.stringify(connection), { encoding: 'utf8', mode: 0o600 });
+  try {
+    const result = await readHandoff(file);
+    assert.equal(result.valid, true);
+    assert.equal(result.handoff?.version, 1);
+    assert.equal(result.handoff?.launchId, 'launch-abc');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('handoff: Windows default reads LocalAppData mcp-connection.json', { skip: process.platform !== 'win32' }, async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'freebuff-localappdata-handoff-'));
+  const freebuffDir = path.join(dir, 'Freebuff');
+  const file = path.join(freebuffDir, 'mcp-connection.json');
+  const previousLocalAppData = process.env.LOCALAPPDATA;
+  const previousAppData = process.env.APPDATA;
+  const previousHandoff = process.env[HANDOFF_ENV];
+  const previousUrl = process.env.FREEBUFF_ORCHESTRATOR_URL;
+  const previousReadiness = process.env.FREEBUFF_READINESS_FILE;
+  const originalFetch = globalThis.fetch;
+  await fs.mkdir(freebuffDir, { recursive: true });
+  const { version: _version, ...connection } = validHandoff();
+  await fs.writeFile(file, JSON.stringify(connection), 'utf8');
+  process.env.LOCALAPPDATA = dir;
+  process.env.APPDATA = path.join(dir, 'Roaming');
+  delete process.env[HANDOFF_ENV];
+  delete process.env.FREEBUFF_ORCHESTRATOR_URL;
+  delete process.env.FREEBUFF_READINESS_FILE;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.endsWith('/healthz')) {
+      assert.equal(new Headers(init?.headers).get('x-freebuff-launch-id'), 'launch-abc');
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    if (url.endsWith('/api/projects')) return new Response(JSON.stringify({ projects: [] }), { status: 200 });
+    if (url.endsWith('/api/events')) return new Response(new ReadableStream<Uint8Array>({ start() { /* hold open */ } }), { status: 200 });
+    throw new Error(`unexpected ${url}`);
+  }) as typeof fetch;
+  let backend: DesktopBackend | undefined;
+  try {
+    const result = await readHandoff();
+    assert.equal(result.valid, true);
+    assert.equal(result.path, file);
+    assert.equal(result.handoff?.launchId, 'launch-abc');
+    backend = new DesktopBackend();
+    const caps = await backend.probe();
+    assert.equal(caps.connection, 'connected_writable');
+    assert.equal(caps.authorization, 'write_authorized');
+  } finally {
+    backend?.dispose();
+    globalThis.fetch = originalFetch;
+    if (previousLocalAppData === undefined) delete process.env.LOCALAPPDATA; else process.env.LOCALAPPDATA = previousLocalAppData;
+    if (previousAppData === undefined) delete process.env.APPDATA; else process.env.APPDATA = previousAppData;
+    if (previousHandoff === undefined) delete process.env[HANDOFF_ENV]; else process.env[HANDOFF_ENV] = previousHandoff;
+    if (previousUrl === undefined) delete process.env.FREEBUFF_ORCHESTRATOR_URL; else process.env.FREEBUFF_ORCHESTRATOR_URL = previousUrl;
+    if (previousReadiness === undefined) delete process.env.FREEBUFF_READINESS_FILE; else process.env.FREEBUFF_READINESS_FILE = previousReadiness;
+    invalidateDiscoveryCache();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('handoff: legacy mcp-handoff does not accept a missing version', async () => {
+  await inHandoffEnv({ ...validHandoff(), version: undefined }, async () => {
+    assert.equal((await readHandoff()).reason, 'handoff_unsupported_version');
   });
 });
 

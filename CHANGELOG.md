@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Discover the Windows Desktop connection handoff under `%LOCALAPPDATA%\\Freebuff\\mcp-connection.json`, while retaining the legacy roaming handoff path.
+- Accept the versionless `mcp-connection.json` shape only for that filename, then continue to require the `/healthz` launch-id challenge before enabling writes.
+- Document that missing Windows handoff files require a Desktop producer update; the MCP does not read process memory or infer authorization from open ports.
+
 ## 0.2.1 (2026-09-21)
 
 Security, routing, and release-hygiene hardening after the 0.2.0 publication.

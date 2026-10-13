@@ -46,13 +46,13 @@ Desktop discovery order (`desktop/discovery.ts`): handoff file → explicit `FRE
 
 ## Handoff authorization (`desktop/handoff.ts`)
 
-The Desktop (or a fixture) writes a current-user-only JSON file:
+The Desktop (or a fixture) writes a current-user-only JSON file. Windows checks `%LOCALAPPDATA%\Freebuff\mcp-connection.json` first and also accepts the versioned legacy `%APPDATA%\Freebuff\mcp-handoff.json`; macOS and Linux keep their existing `mcp-handoff.json` paths.
 
 ```json
 { "version": 1, "url": "http://127.0.0.1:PORT", "launchId": "SHORT_LIVED_SECRET", "pid": 1234, "expiresAt": "ISO" }
 ```
 
-Validation covers presence, JSON shape, version, loopback URL, live PID, and expiry. The launch id is then challenged over HTTP (`/healthz` with `x-freebuff-launch-id`); only a passing challenge grants write capability. No process memory is read on any platform.
+Validation covers presence, JSON shape, loopback URL, live PID, and expiry. The new Windows `mcp-connection.json` contract may omit `version`; the legacy handoff requires version 1. The launch id is challenged over HTTP (`/healthz` with `x-freebuff-launch-id`); only a passing challenge grants write capability. No process memory is read on any platform. The stock Desktop's production of either Windows handoff remains unverified; if neither file exists, the Desktop producer must be updated before writes can work.
 
 That challenge is the single source of truth for the capability flags reported by `doctor` and `freebuff_status`: when it fails, the Desktop reports `connected_read_only` and does not advertise sends, stops, resumes, model or reasoning changes — or thread creation, which is itself a write. A capability is only ever advertised by a backend that actually implements it.
 

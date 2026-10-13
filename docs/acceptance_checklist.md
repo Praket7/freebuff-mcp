@@ -29,6 +29,8 @@ Backend under test
 7. Restart the MCP client or bridge. Reconnect to the thread plus confirm that no duplicate request was sent.
 8. Record any step that could not be completed, including the exact version plus a short error message with secrets removed.
 
+On Windows, also confirm whether `%LOCALAPPDATA%\Freebuff\mcp-connection.json` or `%APPDATA%\Freebuff\mcp-handoff.json` exists. Do not paste the launch id into the run record. If neither handoff exists, mark Desktop writes blocked at the producer contract; do not treat the listener scan or an HTTP 401 as successful discovery.
+
 ## Results
 
 Progress and completion

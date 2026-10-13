@@ -57,8 +57,10 @@ so treat the writable path as provisional until real-Desktop smoke proves it:
 
 - Linux: `~/.config/freebuff-desktop/mcp-handoff.json`
 - macOS: `~/Library/Application Support/Freebuff/mcp-handoff.json`
-- Windows: `%APPDATA%\Freebuff\mcp-handoff.json` (user-profile ACLs apply)
-- Schema: `{ version: 1, url, launchId, pid, expiresAt }`, loopback URL only.
+- Windows: `%LOCALAPPDATA%\Freebuff\mcp-connection.json`, then the legacy `%APPDATA%\Freebuff\mcp-handoff.json` (user-profile ACLs apply)
+- Schema: `{ url, launchId, pid, expiresAt }` in `mcp-connection.json`; the legacy `mcp-handoff.json` requires `{ version: 1, url, launchId, pid, expiresAt }`. Loopback URL only.
+- The MCP validates the PID, expiry, regular-file status, and loopback URL, then verifies `launchId` against `/healthz` before granting writes. It never fabricates a launch id.
+- Desktop 0.0.171's producer behavior has not been confirmed. If neither Windows file exists, an MCP update alone cannot grant Desktop write authorization; Desktop must publish the handoff or expose a supported authenticated IPC contract.
 - POSIX files must be mode `0600` and owned by the current uid; the bridge
   writes them that way and rejects foreign-owned or group/world-readable files on read.
 

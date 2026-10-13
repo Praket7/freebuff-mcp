@@ -15,7 +15,7 @@ Run `freebuff-mcp doctor` (or `freebuff-mcp doctor --json`) first — it reports
 
 **Symptoms:** `authorization: "read_only"`, write tools return `FREEBUFF_DESKTOP_AUTH_REQUIRED`.
 
-**Fixes:** The launch-ID health check failed or no launch id was found. Restart Freebuff Desktop (it re-issues a short-lived launch id) or reopen the project, then retry. The bridge never fabricates authorization.
+**Fixes:** The launch-ID health check failed or no launch id was found. Restart Freebuff Desktop or reopen the project, then retry. On Windows, the bridge checks `%LOCALAPPDATA%\Freebuff\mcp-connection.json` and the legacy `%APPDATA%\Freebuff\mcp-handoff.json`. If neither exists, Desktop has not handed off a launch id; the bridge cannot recover it from another process or manufacture authorization. The bridge never fabricates authorization.
 
 ## Desktop authorization expired / rotated
 
