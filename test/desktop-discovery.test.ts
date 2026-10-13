@@ -282,8 +282,9 @@ test('handoff: written files are owner-only (0600 on POSIX)', async () => {
     } else {
       // Windows protects via user-profile ACLs; the producer contract keeps
       // the default inside the current user's profile.
-      const profile = process.env.APPDATA ?? process.env.USERPROFILE ?? '';
-      assert.ok((defaultHandoffPaths()[0] ?? '').startsWith(profile), 'default handoff lives under the user profile');
+      const profile = process.env.USERPROFILE ?? '';
+      const relativeToProfile = path.win32.relative(profile, defaultHandoffPaths()[0] ?? '');
+      assert.ok(profile && relativeToProfile !== '..' && !relativeToProfile.startsWith(`..${path.win32.sep}`) && !path.win32.isAbsolute(relativeToProfile), 'default handoff lives under the user profile');
     }
   } finally {
     await fs.unlink(file).catch(() => undefined);
