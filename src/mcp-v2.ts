@@ -5,7 +5,7 @@ import { CompositeBackend } from './backends/backend.js';
 import { MAX_DIFF_FILES } from './backends/desktop-backend.js';
 import { SessionManager } from './bridge/session-manager.js';
 import { TurnManager } from './bridge/turn-manager.js';
-import { BackendTurnResult, BridgeError, ErrorCodes, toErrorShape, BackendSession } from './bridge/types.js';
+import { BackendTurnResult, BridgeError, ErrorCodes, toErrorShape, BackendSession, FreebuffBackend } from './bridge/types.js';
 import { Json } from './types.js';
 import { assertSafeId, redact } from './security.js';
 import { VERSION } from './version.js';
@@ -127,8 +127,14 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
   }));
   read('watch_turn', 'Wait up to 30 seconds for canonical turn progress.', { turnId: id, timeoutMs: z.number().int().min(0).max(30000).optional(), afterSequence: z.number().int().nonnegative().optional() }, (args) => shapeError(() => adapter.turns.waitForTurn(assertSafeId(args.turnId), args.timeoutMs ?? 30_000, args.afterSequence ?? 0)));
   read('watch_active_threads', 'Read compact progress summaries for active threads.', {}, () => shapeError(async () => adapter.sessions.events.activeThreads().map((threadId) => adapter.sessions.events.progress(threadId, 0, 1))));
-  read('list_project_files', 'List safe files in a project.', { projectId: id, relative: z.string().optional() }, (args) => shapeError(async () => { const caps = await adapter.backend.probe(); return caps.backend === 'cli' ? [] : (adapter.backend.desktop as unknown as { listFiles(root: string, relative?: string): Promise<string[]> }).listFiles(args.projectId, args.relative); }));
-  read('read_project_file', 'Read one safe project file.', { projectId: id, path: z.string() }, (args) => shapeError(async () => (adapter.backend.desktop as unknown as { readFile(root: string, relative: string): Promise<{ path: string; content: string }> }).readFile(args.projectId, args.path)));
+  read('list_project_files', 'List safe files in a project.', { projectId: id, relative: z.string().optional() }, (args) => shapeError(async () => {
+    const root = await resolveListedProjectRoot(adapter.backend, args.projectId);
+    return (adapter.backend.desktop as unknown as { listFiles(root: string, relative?: string): Promise<string[]> }).listFiles(root, args.relative);
+  }));
+  read('read_project_file', 'Read one safe project file.', { projectId: id, path: z.string() }, (args) => shapeError(async () => {
+    const root = await resolveListedProjectRoot(adapter.backend, args.projectId);
+    return (adapter.backend.desktop as unknown as { readFile(root: string, relative: string): Promise<{ path: string; content: string }> }).readFile(root, args.path);
+  }));
   read('list_thread_attachments', 'List safe attachment metadata for a thread.', { threadId: id }, (args) => shapeError(() => adapter.backend.desktop.listAttachments(assertSafeId(args.threadId))));
   read('list_models', 'List available model information.', {}, () => shapeError(async () => {
     // The Desktop exposes no model-catalog route, and getThread('') is an
@@ -406,6 +412,20 @@ async function resolveSessionId(adapter: V2Adapter, args: { sessionId?: unknown;
 
 async function findSessionByBackendId(adapter: V2Adapter, backendId: string) {
   return adapter.sessions.listSessions().find((s) => s.backendSessionId === backendId) ?? (await adapter.sessions.registerExisting({ backendSessionId: backendId, cwd: process.env.FREEBUFF_PROJECT_ROOT ?? process.cwd() }));
+}
+
+async function resolveListedProjectRoot(backend: FreebuffBackend, projectId: string): Promise<string> {
+  if (!backend.listProjects) throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, 'This Freebuff backend cannot list projects.');
+  const projects = await backend.listProjects();
+  if (!Array.isArray(projects)) throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, 'Freebuff returned an invalid project list.');
+  for (const value of projects) {
+    const project = asObject(value);
+    if (!project) continue;
+    const projectPath = typeof project.path === 'string' ? project.path : undefined;
+    const id = typeof project.id === 'string' ? project.id : undefined;
+    if ((id === projectId || projectPath === projectId) && projectPath) return projectPath;
+  }
+  throw new BridgeError(ErrorCodes.INVALID_INPUT, 'Project not found in the current Freebuff project list.');
 }
 
 export function createDefaultAdapter(): V2Adapter & { dispose(): void } {

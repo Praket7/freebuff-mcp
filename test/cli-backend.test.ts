@@ -69,6 +69,31 @@ test('cli backend: writes are authorized only after a PTY session succeeds', asy
   }
 });
 
+test('cli backend: a later authentication failure clears previously verified write access', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'freebuff-cli-auth-expired-'));
+  const bin = path.join(dir, process.platform === 'win32' ? 'freebuff.exe' : 'freebuff');
+  await fs.writeFile(bin, '#!/bin/sh\nexit 0\n');
+  if (process.platform !== 'win32') await fs.chmod(bin, 0o755);
+  const previous = process.env.FREEBUFF_CLI_PATH;
+  process.env.FREEBUFF_CLI_PATH = bin;
+  try {
+    const backend = new CliBackend('/tmp/project');
+    (backend as unknown as { authVerified: boolean }).authVerified = true;
+    (backend as unknown as { manager: unknown }).manager = {
+      send: async () => { throw new Error('FREEBUFF_CLI_NOT_AUTHENTICATED'); },
+      dispose: () => undefined,
+    };
+    const session = { id: 'pty-1', backend: 'cli' as const, backendSessionId: 'conversation-1', cwd: '/tmp/project' };
+    await assert.rejects(() => backend.setReasoning(session, 'high'), /NOT_AUTHENTICATED/);
+    const caps = await backend.probe();
+    assert.equal(caps.authorization, 'unknown');
+    assert.equal(caps.canSendMessage, false);
+  } finally {
+    if (previous === undefined) delete process.env.FREEBUFF_CLI_PATH; else process.env.FREEBUFF_CLI_PATH = previous;
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 interface StubCall { id: string; text: string; cwd: string; conversationId?: string }
 
 /**

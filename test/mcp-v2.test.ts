@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { createV2ServerFromAdapter, V2Adapter } from '../src/mcp-v2.js';
 import { CompositeBackend } from '../src/backends/backend.js';
+import { DesktopBackend } from '../src/backends/desktop-backend.js';
 import { SessionManager } from '../src/bridge/session-manager.js';
 import { TurnManager } from '../src/bridge/turn-manager.js';
 import { BackendCapabilities, FreebuffBackend } from '../src/bridge/types.js';
@@ -22,6 +26,40 @@ test('MCP v2 server exposes the stable guarded tool surface', () => {
     assert.ok(names.includes(expected), `missing tool ${expected}`);
   }
   assert.equal(names.length, 28, `unexpected extra tools: ${names.join(', ')}`);
+});
+
+test('MCP v2 project file tools are restricted to roots returned by list_projects', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'freebuff-approved-project-'));
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'freebuff-unlisted-project-'));
+  const desktop = new DesktopBackend();
+  const backend = {
+    kind: 'desktop' as const,
+    desktop,
+    probe: async () => ({ backend: 'desktop' as const, connection: 'connected_read_only' as const, authorization: 'none' as const, liveProgress: 'unavailable' as const, canCreateSession: false, canSendMessage: false, canStop: false, canResume: false, canSetModel: false, canSetReasoning: false, notes: [] }),
+    listProjects: async () => [{ id: root, path: root, name: path.basename(root) }],
+    dispose: () => desktop.dispose(),
+  } as unknown as CompositeBackend;
+  const sessions = new SessionManager(backend as unknown as FreebuffBackend);
+  const adapter: V2Adapter = { backend, sessions, turns: new TurnManager(sessions) };
+  const server = createV2ServerFromAdapter(adapter);
+  const ctx = { mcpReq: { _meta: {}, signal: new AbortController().signal, notify: async () => undefined } };
+  try {
+    await fs.writeFile(path.join(root, 'README.md'), 'inside the selected project');
+    await fs.writeFile(path.join(outside, 'private.txt'), 'outside the selected project');
+    const allowed = await toolOf(server, 'read_project_file').handler({ projectId: root, path: 'README.md' }, ctx);
+    assert.equal(allowed.structuredContent?.content, 'inside the selected project');
+
+    const denied = await toolOf(server, 'read_project_file').handler({ projectId: outside, path: 'private.txt' }, ctx);
+    assert.equal(denied.structuredContent?.ok, false);
+    assert.match(String(denied.structuredContent?.message), /project/i);
+
+    const listed = await toolOf(server, 'list_project_files').handler({ projectId: outside }, ctx);
+    assert.equal(listed.structuredContent?.ok, false);
+  } finally {
+    desktop.dispose();
+    await fs.rm(root, { recursive: true, force: true });
+    await fs.rm(outside, { recursive: true, force: true });
+  }
 });
 
 test('MCP v2: resume_thread uses the Desktop resume route instead of submitting /resume as a prompt', async () => {

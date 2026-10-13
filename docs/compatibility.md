@@ -1,6 +1,6 @@
 # Compatibility
 
-Feature support by platform, client, and backend. All entries reflect tested behavior in CI (ubuntu/macos/windows × Node 20/22/24) unless marked otherwise.
+Feature support by platform, client, and backend. CI checks protocol and platform-specific code paths with controlled fixtures. A green matrix does not prove compatibility with every installed Freebuff Desktop release; the handoff producer caveat below remains an explicit live qualification item.
 
 ## Platforms
 
@@ -8,8 +8,8 @@ Feature support by platform, client, and backend. All entries reflect tested beh
 | --- | --- | --- | --- |
 | MCP v2 stdio | ✅ | ✅ | ✅ |
 | Desktop discovery (handoff/readiness/log/listener) | ✅ | ✅ | ✅ |
-| Desktop handoff file | ✅ | ✅ | ✅ |
-| Desktop writes (launch-ID health check) | ✅ | ✅ | ✅ |
+| Desktop handoff file discovery and validation | ✅ mock fixtures | ✅ mock fixtures | ✅ mock fixtures |
+| Desktop writes (launch-ID health check) | ✅ mock fixtures | ✅ mock fixtures | ✅ mock fixtures |
 | SSE live progress | ✅ | ✅ | ✅ |
 | CLI PTY fallback (ConPTY/POSIX) | ✅ | ✅ | ✅ |
 | CLI cancellation + stuck-child cleanup | ✅ | ✅ | ✅ |

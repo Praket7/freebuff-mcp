@@ -440,6 +440,22 @@ test('http transport: rate limiting kicks in with 429 and a retry-after', async 
   }
 });
 
+test('http transport: unauthenticated requests do not consume the authorized request quota', async () => {
+  const desktop = await startFakeDesktop();
+  const server = await startHttpServer(desktop);
+  try {
+    for (let i = 0; i < 125; i++) {
+      const response = await rpc(server.port, { jsonrpc: '2.0', id: i + 1, method: 'initialize', params: {} }, { token: null });
+      assert.equal(response.status, 401);
+    }
+    const authorized = await rpc(server.port, { jsonrpc: '2.0', id: 200, method: 'initialize', params: {} });
+    assert.equal(authorized.status, 200, authorized.text);
+  } finally {
+    await server.stop();
+    await desktop.close();
+  }
+});
+
 interface CallToolResult {
   structuredContent?: { sessionId?: string; state?: string };
 }

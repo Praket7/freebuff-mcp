@@ -244,26 +244,25 @@ export async function readCliConversationMessages(cwd: string, conversationId: s
 
 /** Pre-turn markers for one CLI conversation, so completion requires post-submit proof. */
 export interface CliTurnMarkers {
-  messageCount: number;
   runStateMtimeMs: number;
   logBytes: number;
+  logMtimeMs: number;
 }
 
-const NO_MARKERS: CliTurnMarkers = { messageCount: 0, runStateMtimeMs: 0, logBytes: 0 };
+const NO_MARKERS: CliTurnMarkers = { runStateMtimeMs: 0, logBytes: 0, logMtimeMs: 0 };
 
 /** Snapshot the conversation store BEFORE submitting, so only later transitions count. */
 export async function readCliTurnMarkers(cwd: string, conversationId: string): Promise<CliTurnMarkers> {
   const dir = await findChatDir(cwd, conversationId);
   if (!dir) return { ...NO_MARKERS };
-  const [runState, log, messages] = await Promise.all([
+  const [runState, log] = await Promise.all([
     fs.stat(path.join(dir, 'run-state.json')).catch(() => null),
     fs.stat(path.join(dir, 'log.jsonl')).catch(() => null),
-    readCliConversationMessages(cwd, conversationId).catch(() => [] as unknown[]),
   ]);
   return {
-    messageCount: messages.length,
     runStateMtimeMs: runState?.mtimeMs ?? 0,
     logBytes: log?.size ?? 0,
+    logMtimeMs: log?.mtimeMs ?? 0,
   };
 }
 
@@ -335,15 +334,14 @@ export async function waitForCliTurnEnd(
     }
     const state = await readCliRunState(dir);
     const turnState = cliTurnStateString(state)?.toLowerCase();
-    const [runStateStat, logStat, messages] = await Promise.all([
+    const [runStateStat, logStat] = await Promise.all([
       fs.stat(path.join(dir, 'run-state.json')).catch(() => null),
       fs.stat(path.join(dir, 'log.jsonl')).catch(() => null),
-      readCliConversationMessages(cwd, conversationId).catch(() => [] as unknown[]),
     ]);
     // Post-submit movement: anything the turn itself wrote after our markers.
     const progressed =
-      messages.length > baseline.messageCount ||
       (logStat?.size ?? 0) > baseline.logBytes ||
+      (logStat?.mtimeMs ?? 0) > baseline.logMtimeMs ||
       (runStateStat?.mtimeMs ?? 0) > baseline.runStateMtimeMs;
     if (turnState && CLI_ACTIVE_STATES.has(turnState)) sawActive = true;
     if (turnState && CLI_FAILED_STATES.has(turnState) && (progressed || sawActive)) {

@@ -35,6 +35,12 @@ export class CliBackend implements FreebuffBackend {
    */
   private authVerified = false;
 
+  private invalidateAuthorizationOnAuthError(error: unknown): void {
+    if (/FREEBUFF_CLI_NOT_AUTHENTICATED|not authenticated|sign in to freebuff|authentication required/i.test(String(error))) {
+      this.authVerified = false;
+    }
+  }
+
   constructor(private projectRoot: string = process.env.FREEBUFF_PROJECT_ROOT ?? process.cwd()) {
     this.knownRoots.add(projectRoot);
   }
@@ -100,7 +106,7 @@ export class CliBackend implements FreebuffBackend {
       const bridgeId = randomUUID();
       const startedAt = Date.now();
       this.knownRoots.add(cwd);
-      await this.manager.start(bridgeId, cwd, continueBackendId);
+      try { await this.manager.start(bridgeId, cwd, continueBackendId); } catch (error) { this.invalidateAuthorizationOnAuthError(error); throw error; }
       // After a managed start, correlate the created conversation. Because
       // creation is serialized per project, the newest chat directory is
       // unambiguous here.
@@ -140,8 +146,8 @@ export class CliBackend implements FreebuffBackend {
     // Markers BEFORE submission: completion requires a post-submit terminal
     // transition, never a stale idle state or a pre-existing message.
     const baseline: CliTurnMarkers = conversationId
-      ? await readCliTurnMarkers(session.cwd, conversationId).catch(() => ({ messageCount: 0, runStateMtimeMs: 0, logBytes: 0 }))
-      : { messageCount: 0, runStateMtimeMs: 0, logBytes: 0 };
+      ? await readCliTurnMarkers(session.cwd, conversationId).catch(() => ({ runStateMtimeMs: 0, logBytes: 0, logMtimeMs: 0 }))
+      : { runStateMtimeMs: 0, logBytes: 0, logMtimeMs: 0 };
     this.pending.set(turnKey, { text, startedAt, outputMarker: outputBefore, onEvent, signal });
     try {
       const snapshot = await this.manager.send(session.id, text, session.cwd, conversationId);
@@ -165,6 +171,9 @@ export class CliBackend implements FreebuffBackend {
         result: redact({ output: output.slice(-20_000), conversationId: activeConvId, pid: snapshot.pid, completionProven: turnEnd.proven, ...(exited ? { exitCode: snapshot.exitCode } : {}) }),
         ...(exited ? { error: `Freebuff CLI exited with code ${snapshot.exitCode ?? 'unknown'}.` } : turnEnd.error ? { error: turnEnd.error } : {}),
       };
+    } catch (error) {
+      this.invalidateAuthorizationOnAuthError(error);
+      throw error;
     } finally {
       this.pending.delete(turnKey);
     }
@@ -222,7 +231,8 @@ export class CliBackend implements FreebuffBackend {
   async resume(session: BackendSession): Promise<BackendTurnResult> {
     const conversationId = session.backendSessionId;
     if (!conversationId) throw new BridgeError(ErrorCodes.INVALID_INPUT, 'Cannot resume: no verified conversation id for this session.');
-    const snapshot = await this.manager.send(session.id, '/resume', session.cwd, conversationId);
+    let snapshot;
+    try { snapshot = await this.manager.send(session.id, '/resume', session.cwd, conversationId); } catch (error) { this.invalidateAuthorizationOnAuthError(error); throw error; }
     this.authVerified = true;
     return { backendTurnId: conversationId, state: snapshot.exited ? 'failed' : 'completed', result: redact({ output: snapshot.output.slice(-20_000) }) };
   }
@@ -234,14 +244,16 @@ export class CliBackend implements FreebuffBackend {
    */
   async setModel(session: BackendSession, model: string, _harnessId = 'codebuff'): Promise<unknown> {
     if (!model || model.length > 200) throw new BridgeError(ErrorCodes.INVALID_INPUT, 'Invalid model.');
-    const snapshot = await this.manager.send(session.id, `/model ${model}`, session.cwd, session.backendSessionId);
+    let snapshot;
+    try { snapshot = await this.manager.send(session.id, `/model ${model}`, session.cwd, session.backendSessionId); } catch (error) { this.invalidateAuthorizationOnAuthError(error); throw error; }
     if (snapshot.exited) throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, 'The Freebuff CLI exited before the model could be set.');
     this.authVerified = true;
     return redact({ model, output: snapshot.output.slice(-4_000) });
   }
 
   async setReasoning(session: BackendSession, effort: string | null): Promise<unknown> {
-    const snapshot = await this.manager.send(session.id, `/reasoning ${effort ?? ''}`.trimEnd(), session.cwd, session.backendSessionId);
+    let snapshot;
+    try { snapshot = await this.manager.send(session.id, `/reasoning ${effort ?? ''}`.trimEnd(), session.cwd, session.backendSessionId); } catch (error) { this.invalidateAuthorizationOnAuthError(error); throw error; }
     if (snapshot.exited) throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, 'The Freebuff CLI exited before the reasoning effort could be set.');
     this.authVerified = true;
     return redact({ effort, output: snapshot.output.slice(-4_000) });

@@ -89,15 +89,18 @@ export async function runHttp(): Promise<void> {
 
   const httpServer = createHttpServer(async (req, res) => {
     if (!validOrigin(req)) { res.writeHead(403, {'content-type':'application/json'}); res.end(JSON.stringify({error:'invalid_origin'})); return; }
-    const address = req.socket.remoteAddress ?? 'unknown'; const now = Date.now(); pruneRecent(now); const bucket = recent.get(address); if (!bucket || now - bucket.at >= RATE_WINDOW_MS) recent.set(address, {at:now,count:1}); else { bucket.count++; if (bucket.count > RATE_LIMIT) { res.writeHead(429, {'content-type':'application/json','retry-after':'60'}); res.end(JSON.stringify({error:'rate_limited'})); return; } }
+    const isHealthCheck = req.url === '/healthz' && req.method === 'GET';
+    const isMcpEndpoint = req.url === '/mcp';
+    if ((isMcpEndpoint || (isHealthCheck && !isLoopback(host))) && !authorized(req)) {
+      res.writeHead(401, {'www-authenticate':'Bearer'}); res.end(JSON.stringify({error:'unauthorized'})); return;
+    }
+    const address = req.socket.remoteAddress ?? 'unknown'; const quotaKey = `${address}:${isMcpEndpoint ? 'mcp' : 'health'}`; const now = Date.now(); pruneRecent(now); const bucket = recent.get(quotaKey); if (!bucket || now - bucket.at >= RATE_WINDOW_MS) recent.set(quotaKey, {at:now,count:1}); else { bucket.count++; if (bucket.count > RATE_LIMIT) { res.writeHead(429, {'content-type':'application/json','retry-after':'60'}); res.end(JSON.stringify({error:'rate_limited'})); return; } }
 
-    if (req.url === '/healthz' && req.method === 'GET') {
-      if (!isLoopback(host) && !authorized(req)) { res.writeHead(401, {'www-authenticate':'Bearer'}); res.end(JSON.stringify({error:'unauthorized'})); return; }
+    if (isHealthCheck) {
       res.writeHead(200, {'content-type':'application/json'}); res.end(JSON.stringify({ok:true,readOnly:!(await adapter.backend.probe().catch(() => null))?.canSendMessage})); return;
     }
 
     if (req.url !== '/mcp') { res.writeHead(404, {'content-type':'application/json'}); res.end(JSON.stringify({error:'not_found'})); return; }
-    if (!authorized(req)) { res.writeHead(401, {'www-authenticate':'Bearer'}); res.end(JSON.stringify({error:'unauthorized'})); return; }
 
     // Read body for the SDK handler
     let rawBodyText: string;

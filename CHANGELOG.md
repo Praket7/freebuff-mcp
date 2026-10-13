@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Restrict project-file reads and listings to roots returned by Freebuff's current project list, including in CLI-only mode.
+- Make CLI turn completion polling use file metadata instead of reparsing the full conversation log every second; detect same-size log rewrites.
+- Revoke cached CLI write authorization when the CLI reports an authentication failure.
+- Authenticate HTTP MCP requests before rate-limit accounting, and keep health-check traffic in a separate quota so it cannot starve authorized MCP calls.
+- Clarify that the cross-platform compatibility matrix uses fixtures and does not establish real Desktop handoff compatibility.
 - Discover the Windows Desktop connection handoff under `%LOCALAPPDATA%\\Freebuff\\mcp-connection.json`, while retaining the legacy roaming handoff path.
 - Accept the versionless `mcp-connection.json` shape only for that filename, then continue to require the `/healthz` launch-id challenge before enabling writes.
 - Document that missing Windows handoff files require a Desktop producer update; the MCP does not read process memory or infer authorization from open ports.

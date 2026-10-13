@@ -64,7 +64,7 @@ test('cli completion: a long turn cannot finish before its terminal transition',
     const conv = 'conv-long-1';
     await makeConv(home, cwd, conv, { runState: { mainAgentState: { turnState: 'running' } }, messages: [userMsg] });
     const baseline = await readCliTurnMarkers(cwd, conv);
-    assert.equal(baseline.messageCount, 1);
+    assert.ok(baseline.logBytes > 0);
 
     const waited = waitForCliTurnEnd(cwd, conv, baseline, undefined, 5_000);
     // The store still says running: 250ms must not be enough to "complete".
@@ -93,6 +93,27 @@ test('cli completion: stale idle state plus old messages never reads as complete
     assert.equal(end.state, 'waiting_for_user');
     assert.equal(end.proven, false);
     assert.match(end.error ?? '', /unconfirmed/i);
+  });
+});
+
+test('cli completion: a same-size log update proves the terminal transition', async () => {
+  await withHome(async (home) => {
+    const cwd = path.join(home, 'proj');
+    const conv = 'conv-same-size-log';
+    const initial = { role: 'assistant', parts: [{ type: 'text', text: 'old' }] };
+    await makeConv(home, cwd, conv, { runState: { mainAgentState: { turnState: 'idle' } }, messages: [userMsg, initial] });
+    const baseline = await readCliTurnMarkers(cwd, conv);
+    const dir = path.join(home, '.config', 'manicode', 'projects', projectKey(cwd), 'chats', conv);
+    const before = await fs.stat(path.join(dir, 'log.jsonl'));
+    const started = waitForCliTurnEnd(cwd, conv, baseline, undefined, 2_000);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const replacement = { role: 'assistant', parts: [{ type: 'text', text: 'new' }] };
+    await fs.writeFile(path.join(dir, 'log.jsonl'), `${JSON.stringify(userMsg)}\n${JSON.stringify(replacement)}\n`, 'utf8');
+    const later = new Date(Math.max(Date.now(), before.mtimeMs + 2_000));
+    await fs.utimes(path.join(dir, 'log.jsonl'), later, later);
+    const result = await started;
+    assert.equal(result.state, 'completed');
+    assert.equal(result.proven, true);
   });
 });
 
