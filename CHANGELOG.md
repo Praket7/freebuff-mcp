@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.3 (2026-10-20)
+
 - Restrict project-file reads and listings to roots returned by Freebuff's current project list, including in CLI-only mode.
 - Make CLI turn completion polling use file metadata instead of reparsing the full conversation log every second; detect same-size log rewrites.
 - Revoke cached CLI write authorization when the CLI reports an authentication failure.
@@ -10,6 +12,9 @@
 - Discover the Windows Desktop connection handoff under `%LOCALAPPDATA%\\Freebuff\\mcp-connection.json`, while retaining the legacy roaming handoff path.
 - Accept the versionless `mcp-connection.json` shape only for that filename, then continue to require the `/healthz` launch-id challenge before enabling writes.
 - Document that missing Windows handoff files require a Desktop producer update; the MCP does not read process memory or infer authorization from open ports.
+- Recognize fresh assistant output and the CLI completion log as proof that a turn finished.
+- Detect ended Freebuff sessions before accepting queued messages and return an actionable `FREEBUFF_SESSION_OVER` error.
+- Send `SIGTERM` to managed CLI processes during bridge shutdown to give Freebuff a chance to clean up its session.
 
 ## 0.2.1 (2026-09-21)
 
