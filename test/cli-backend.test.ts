@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { CliBackend } from '../src/backends/cli-backend.js';
-import { verifyConversationIdShape } from '../src/pty.js';
+import { CliPtyManager, verifyConversationIdShape } from '../src/pty.js';
 import { BridgeError, ErrorCodes } from '../src/bridge/types.js';
 
 test('cli backend: create-session with an unknown id fails with a structured error and never launches a PTY', async () => {
@@ -92,6 +92,44 @@ test('cli backend: a later authentication failure clears previously verified wri
     if (previous === undefined) delete process.env.FREEBUFF_CLI_PATH; else process.env.FREEBUFF_CLI_PATH = previous;
     await fs.rm(dir, { recursive: true, force: true });
   }
+});
+
+test('cli backend: session-over startup fails clearly and appears in status notes', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'freebuff-cli-session-over-'));
+  const bin = path.join(dir, process.platform === 'win32' ? 'freebuff.exe' : 'freebuff');
+  await fs.writeFile(bin, '#!/bin/sh\nexit 0\n');
+  if (process.platform !== 'win32') await fs.chmod(bin, 0o755);
+  const previous = process.env.FREEBUFF_CLI_PATH;
+  process.env.FREEBUFF_CLI_PATH = bin;
+  try {
+    const backend = new CliBackend('/tmp/project');
+    (backend as unknown as { manager: unknown }).manager = {
+      start: async () => { throw new Error('FREEBUFF_SESSION_OVER'); },
+      dispose: () => undefined,
+    };
+    await assert.rejects(
+      () => backend.createSession({ cwd: '/tmp/project' }),
+      (error: unknown) => error instanceof BridgeError && String(error.code) === 'FREEBUFF_SESSION_OVER',
+    );
+    const caps = await backend.probe();
+    assert.equal(caps.authorization, 'unknown');
+    assert.ok(caps.notes.some((note) => /session has ended|session over/i.test(note)), caps.notes.join(' | '));
+  } finally {
+    if (previous === undefined) delete process.env.FREEBUFF_CLI_PATH; else process.env.FREEBUFF_CLI_PATH = previous;
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('CLI PTY disposal requests graceful termination instead of hanging up the process', () => {
+  const manager = new CliPtyManager();
+  const signals: string[] = [];
+  const session = {
+    term: { pid: 1, kill: (signal?: string) => { signals.push(signal ?? 'default'); }, write: () => undefined },
+    cwd: '/tmp/project', startedAt: Date.now(), output: '', screen: { text: () => '' }, exited: false,
+  };
+  (manager as unknown as { sessions: Map<string, unknown> }).sessions.set('pty-1', session);
+  manager.dispose();
+  assert.deepEqual(signals, ['SIGTERM']);
 });
 
 interface StubCall { id: string; text: string; cwd: string; conversationId?: string }

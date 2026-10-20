@@ -34,6 +34,17 @@ export class CliBackend implements FreebuffBackend {
    * never login — so writes are reported `unknown` until this flips.
    */
   private authVerified = false;
+  private lastSessionError?: string;
+
+  private rethrowCliError(error: unknown): never {
+    if (/FREEBUFF_SESSION_OVER|Freebuff session over|holding queued messages until rejoin/i.test(String(error))) {
+      this.authVerified = false;
+      this.lastSessionError = 'The Freebuff CLI session has ended and is holding queued messages until it rejoins. Restart or rejoin Freebuff, then retry.';
+      throw new BridgeError(ErrorCodes.CLI_SESSION_OVER, this.lastSessionError, 'Restart or rejoin Freebuff in the CLI, then retry.');
+    }
+    this.invalidateAuthorizationOnAuthError(error);
+    throw error;
+  }
 
   private invalidateAuthorizationOnAuthError(error: unknown): void {
     if (/FREEBUFF_CLI_NOT_AUTHENTICATED|not authenticated|sign in to freebuff|authentication required/i.test(String(error))) {
@@ -86,6 +97,7 @@ export class CliBackend implements FreebuffBackend {
         this.authVerified
           ? 'Write authorization verified by a successful authenticated PTY session.'
           : 'Authentication is unverified: the binary exists but no signed-in PTY session has succeeded yet. An installed-but-signed-out CLI is never reported write-authorized.',
+        ...(this.lastSessionError ? [this.lastSessionError] : []),
       ],
     };
   }
@@ -106,7 +118,7 @@ export class CliBackend implements FreebuffBackend {
       const bridgeId = randomUUID();
       const startedAt = Date.now();
       this.knownRoots.add(cwd);
-      try { await this.manager.start(bridgeId, cwd, continueBackendId); } catch (error) { this.invalidateAuthorizationOnAuthError(error); throw error; }
+      try { await this.manager.start(bridgeId, cwd, continueBackendId); } catch (error) { return this.rethrowCliError(error); }
       // After a managed start, correlate the created conversation. Because
       // creation is serialized per project, the newest chat directory is
       // unambiguous here.
@@ -115,6 +127,7 @@ export class CliBackend implements FreebuffBackend {
       // manager.start() returning means the readiness prompt was observed and
       // the signed-in checks passed: authentication is now proven, not assumed.
       this.authVerified = true;
+      this.lastSessionError = undefined;
       const snapshot = this.manager.snapshot(bridgeId);
       const session: BackendSession & { conversationId?: string; pid: number; output: string; exited: boolean; startedAt: number } = { id: bridgeId, backend: 'cli', ...(conversationId ? { backendSessionId: conversationId, conversationId } : {}), cwd, pid: snapshot.pid, output: '', exited: false, startedAt };
       this.sessions.set(bridgeId, session);
@@ -146,14 +159,15 @@ export class CliBackend implements FreebuffBackend {
     // Markers BEFORE submission: completion requires a post-submit terminal
     // transition, never a stale idle state or a pre-existing message.
     const baseline: CliTurnMarkers = conversationId
-      ? await readCliTurnMarkers(session.cwd, conversationId).catch(() => ({ runStateMtimeMs: 0, logBytes: 0, logMtimeMs: 0 }))
-      : { runStateMtimeMs: 0, logBytes: 0, logMtimeMs: 0 };
+      ? await readCliTurnMarkers(session.cwd, conversationId).catch(() => ({ capturedAtMs: startedAt, runStateMtimeMs: 0, logBytes: 0, logMtimeMs: 0 }))
+      : { capturedAtMs: startedAt, runStateMtimeMs: 0, logBytes: 0, logMtimeMs: 0 };
     this.pending.set(turnKey, { text, startedAt, outputMarker: outputBefore, onEvent, signal });
     try {
       const snapshot = await this.manager.send(session.id, text, session.cwd, conversationId);
       // A completed send proves the PTY is (or was) signed in: start() throws
       // FREEBUFF_CLI_NOT_AUTHENTICATED before any send when it is not.
       this.authVerified = true;
+      this.lastSessionError = undefined;
       const activeConvId = conversationId ?? snapshot.conversationId;
       // No conversation id means no completion proof is possible: report
       // unconfirmed, never completed.
@@ -172,8 +186,7 @@ export class CliBackend implements FreebuffBackend {
         ...(exited ? { error: `Freebuff CLI exited with code ${snapshot.exitCode ?? 'unknown'}.` } : turnEnd.error ? { error: turnEnd.error } : {}),
       };
     } catch (error) {
-      this.invalidateAuthorizationOnAuthError(error);
-      throw error;
+      return this.rethrowCliError(error);
     } finally {
       this.pending.delete(turnKey);
     }

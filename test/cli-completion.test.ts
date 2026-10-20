@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { CliBackend } from '../src/backends/cli-backend.js';
-import { readCliConversationSnapshot, readCliTurnMarkers, waitForCliTurnEnd } from '../src/pty.js';
+import { CliPtyManager, readCliConversationSnapshot, readCliTurnMarkers, waitForCliTurnEnd } from '../src/pty.js';
 
 /**
  * P0: the CLI must never invent completion.
@@ -93,6 +93,77 @@ test('cli completion: stale idle state plus old messages never reads as complete
     assert.equal(end.state, 'waiting_for_user');
     assert.equal(end.proven, false);
     assert.match(end.error ?? '', /unconfirmed/i);
+  });
+});
+
+test('cli completion: a post-submit assistant lastMessage proves completion without a turnState field', async () => {
+  await withHome(async (home) => {
+    const cwd = path.join(home, 'proj');
+    const conv = 'conv-last-message';
+    const oldMessage = { type: 'lastMessage', value: [{ role: 'assistant', text: 'old', sentAt: new Date(Date.now() - 60_000).toISOString() }] };
+    await makeConv(home, cwd, conv, { runState: { sessionState: { fileContext: {}, mainAgentState: { runId: 'old-run' } }, output: oldMessage }, messages: [userMsg, assistantMsg] });
+    const baseline = await readCliTurnMarkers(cwd, conv);
+    const dir = path.join(home, '.config', 'manicode', 'projects', projectKey(cwd), 'chats', conv);
+    const waiting = waitForCliTurnEnd(cwd, conv, baseline, undefined, 3_000);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await fs.writeFile(path.join(dir, 'run-state.json'), JSON.stringify({
+      sessionState: { fileContext: {}, mainAgentState: { runId: 'new-run', stepsRemaining: 0 } },
+      output: { type: 'lastMessage', value: [{ role: 'assistant', text: 'READY', sentAt: new Date().toISOString() }] },
+    }), 'utf8');
+    const result = await waiting;
+    assert.deepEqual(result, { state: 'completed', proven: true });
+  });
+});
+
+test('cli completion: a post-submit Main prompt finished log entry proves completion', async () => {
+  await withHome(async (home) => {
+    const cwd = path.join(home, 'proj');
+    const conv = 'conv-prompt-finished';
+    await makeConv(home, cwd, conv, { runState: { sessionState: { mainAgentState: { runId: 'run-1' } } }, messages: [userMsg] });
+    const baseline = await readCliTurnMarkers(cwd, conv);
+    const dir = path.join(home, '.config', 'manicode', 'projects', projectKey(cwd), 'chats', conv);
+    const waiting = waitForCliTurnEnd(cwd, conv, baseline, undefined, 3_000);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await fs.appendFile(path.join(dir, 'log.jsonl'), `${JSON.stringify({ message: 'Main prompt finished' })}\n`, 'utf8');
+    const result = await waiting;
+    assert.deepEqual(result, { state: 'completed', proven: true });
+  });
+});
+
+test('cli completion: a post-submit session-over log fails instead of waiting for timeout', async () => {
+  await withHome(async (home) => {
+    const cwd = path.join(home, 'proj');
+    const conv = 'conv-session-over';
+    await makeConv(home, cwd, conv, { runState: { sessionState: { mainAgentState: { runId: 'run-1' } } }, messages: [userMsg] });
+    const baseline = await readCliTurnMarkers(cwd, conv);
+    const dir = path.join(home, '.config', 'manicode', 'projects', projectKey(cwd), 'chats', conv);
+    const waiting = waitForCliTurnEnd(cwd, conv, baseline, undefined, 3_000);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await fs.appendFile(path.join(dir, 'log.jsonl'), `${JSON.stringify({ message: '[chat-runtime] Freebuff session over; holding queued messages until rejoin' })}\n`, 'utf8');
+    const result = await waiting;
+    assert.equal(result.state, 'failed');
+    assert.equal(result.proven, true);
+    assert.match(result.error ?? '', /FREEBUFF_SESSION_OVER/);
+  });
+});
+
+test('cli startup refuses a conversation whose recent log says its session is over', async () => {
+  await withHome(async (home) => {
+    const cwd = path.join(home, 'proj');
+    const conv = 'conv-session-over-start';
+    const dir = await makeConv(home, cwd, conv, { messages: [{ message: 'Freebuff session over; holding queued messages until rejoin' }] });
+    const manager = new CliPtyManager();
+    const session = {
+      term: { pid: process.pid, write: () => undefined, kill: () => undefined },
+      cwd, startedAt: Date.now(), conversationId: conv, output: '', screen: { text: () => 'Enter a coding task or / for commands' }, exited: false,
+    };
+    (manager as unknown as { sessions: Map<string, unknown> }).sessions.set('pty-session-over', session);
+    try {
+      await assert.rejects(() => manager.start('pty-session-over', cwd), /FREEBUFF_SESSION_OVER/);
+    } finally {
+      manager.dispose();
+    }
+    assert.ok(dir);
   });
 });
 

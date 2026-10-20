@@ -88,10 +88,13 @@ export class CliTerminalScreen {
 
 const CLI_READY_PROMPT = /(?:Enter a coding task or \/ for commands|Start coding for)\b/i;
 const CLI_CONNECTING = /\bConnecting\b/i;
+const CLI_SESSION_OVER = /(?:Freebuff session over|holding queued messages until rejoin)/i;
 
 export function cliTerminalIsReady(screen: string): boolean {
   return CLI_READY_PROMPT.test(screen) && !CLI_CONNECTING.test(screen);
 }
+
+export function cliSessionIsOver(text: string): boolean { return CLI_SESSION_OVER.test(text); }
 
 function cliCandidates(): string[] {
   const home = os.homedir();
@@ -193,6 +196,47 @@ export async function readCliRunState(dir: string): Promise<Record<string, unkno
   return {};
 }
 
+function assistantLastMessageSentAt(state: Record<string, unknown>): number | undefined {
+  const output = asRecord(state.output);
+  if (output?.type !== 'lastMessage' || !Array.isArray(output.value)) return undefined;
+  const timestamps = output.value.flatMap((value) => {
+    const message = asRecord(value);
+    if (message?.role !== 'assistant') return [];
+    const sentAt = message.sentAt;
+    const parsed = typeof sentAt === 'string' ? Date.parse(sentAt) : Number.NaN;
+    const numeric = typeof sentAt === 'number' ? sentAt : typeof sentAt === 'string' && /^\d+(?:\.\d+)?$/.test(sentAt) ? Number(sentAt) : Number.NaN;
+    const timestamp = Number.isFinite(parsed) ? parsed : Number.isFinite(numeric) ? numeric < 1_000_000_000_000 ? numeric * 1000 : numeric : Number.NaN;
+    return Number.isFinite(timestamp) ? [timestamp] : [];
+  });
+  return timestamps.length ? Math.max(...timestamps) : undefined;
+}
+
+/** Read a bounded tail or post-baseline append from a conversation log. */
+async function readCliLogText(cwd: string, conversationId: string, fromByte?: number, previousMtimeMs?: number): Promise<string> {
+  const dir = await findChatDir(cwd, conversationId);
+  if (!dir) return '';
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  try {
+    handle = await fs.open(path.join(dir, 'log.jsonl'), 'r');
+    const stat = await handle.stat();
+    const maxBytes = 64 * 1024;
+    let start = fromByte === undefined ? Math.max(0, stat.size - maxBytes) : Math.min(fromByte, stat.size);
+    if (fromByte !== undefined && stat.size <= fromByte && previousMtimeMs !== undefined && stat.mtimeMs > previousMtimeMs) {
+      start = Math.max(0, stat.size - maxBytes);
+    }
+    start = Math.max(start, stat.size - maxBytes);
+    const length = Math.max(0, stat.size - start);
+    if (!length) return '';
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, start);
+    return buffer.subarray(0, bytesRead).toString('utf8');
+  } catch {
+    return '';
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
 /**
  * Read what the CLI store actually knows about one conversation. Never invents
  * a field: summary-grade data comes from chat-meta.json and run-state.json
@@ -244,22 +288,28 @@ export async function readCliConversationMessages(cwd: string, conversationId: s
 
 /** Pre-turn markers for one CLI conversation, so completion requires post-submit proof. */
 export interface CliTurnMarkers {
+  capturedAtMs: number;
+  assistantSentAtMs?: number;
   runStateMtimeMs: number;
   logBytes: number;
   logMtimeMs: number;
 }
 
-const NO_MARKERS: CliTurnMarkers = { runStateMtimeMs: 0, logBytes: 0, logMtimeMs: 0 };
+const NO_MARKERS: CliTurnMarkers = { capturedAtMs: 0, runStateMtimeMs: 0, logBytes: 0, logMtimeMs: 0 };
 
 /** Snapshot the conversation store BEFORE submitting, so only later transitions count. */
 export async function readCliTurnMarkers(cwd: string, conversationId: string): Promise<CliTurnMarkers> {
   const dir = await findChatDir(cwd, conversationId);
   if (!dir) return { ...NO_MARKERS };
-  const [runState, log] = await Promise.all([
+  const [state, runState, log] = await Promise.all([
+    readCliRunState(dir),
     fs.stat(path.join(dir, 'run-state.json')).catch(() => null),
     fs.stat(path.join(dir, 'log.jsonl')).catch(() => null),
   ]);
+  const capturedAtMs = Date.now();
   return {
+    capturedAtMs,
+    ...(assistantLastMessageSentAt(state) !== undefined ? { assistantSentAtMs: assistantLastMessageSentAt(state) } : {}),
     runStateMtimeMs: runState?.mtimeMs ?? 0,
     logBytes: log?.size ?? 0,
     logMtimeMs: log?.mtimeMs ?? 0,
@@ -300,12 +350,11 @@ async function sleepInterruptible(ms: number, signal?: AbortSignal): Promise<voi
 }
 
 /**
- * Poll the CLI chat store for turn completion PROOF (run-state.json and message
- * log) so sendMessage never claims completed without a post-submit terminal
- * transition.
+ * Poll the CLI chat store for turn completion proof so sendMessage never
+ * claims completed without a post-submit terminal transition.
  *
- * - Completion requires a terminal store state reached AFTER `baseline`
- *   (message/log/run-state movement, or an observed active→terminal flip).
+ * Completion requires a terminal state, a new assistant lastMessage, or a
+ * post-submit Main prompt finished log marker.
  * - Timeout returns unproven `waiting_for_user`, never `completed`.
  * - Abort returns `cancelled`, never `completed`.
  */
@@ -334,6 +383,10 @@ export async function waitForCliTurnEnd(
     }
     const state = await readCliRunState(dir);
     const turnState = cliTurnStateString(state)?.toLowerCase();
+    const logText = await readCliLogText(cwd, conversationId, baseline.logBytes, baseline.logMtimeMs);
+    if (cliSessionIsOver(logText)) {
+      return { state: 'failed', proven: true, error: 'FREEBUFF_SESSION_OVER: The Freebuff CLI session has ended and is holding queued messages until it rejoins. Restart or rejoin Freebuff before sending another message.' };
+    }
     const [runStateStat, logStat] = await Promise.all([
       fs.stat(path.join(dir, 'run-state.json')).catch(() => null),
       fs.stat(path.join(dir, 'log.jsonl')).catch(() => null),
@@ -343,6 +396,15 @@ export async function waitForCliTurnEnd(
       (logStat?.size ?? 0) > baseline.logBytes ||
       (logStat?.mtimeMs ?? 0) > baseline.logMtimeMs ||
       (runStateStat?.mtimeMs ?? 0) > baseline.runStateMtimeMs;
+    const currentAssistantSentAt = assistantLastMessageSentAt(state);
+    const freshAssistantMessage = currentAssistantSentAt !== undefined && (
+      baseline.assistantSentAtMs !== undefined
+        ? currentAssistantSentAt > baseline.assistantSentAtMs
+        : currentAssistantSentAt >= baseline.capturedAtMs
+    );
+    if (freshAssistantMessage || (/Main prompt finished/i.test(logText) && progressed)) {
+      return { state: 'completed', proven: true };
+    }
     if (turnState && CLI_ACTIVE_STATES.has(turnState)) sawActive = true;
     if (turnState && CLI_FAILED_STATES.has(turnState) && (progressed || sawActive)) {
       return { state: 'failed', proven: true, error: 'The Freebuff CLI reported a failure outcome.' };
@@ -374,6 +436,7 @@ export class CliPtyManager {
         this.sessions.delete(safeId);
         throw new Error('FREEBUFF_CLI_NOT_READY: the CLI is no longer interactive. Check CLI connectivity, then retry.');
       }
+      await this.assertSessionAvailable(existing);
       return { id: safeId, pid: existing.term.pid, output: existing.output, exited: existing.exited, exitCode: existing.exitCode };
     }
     const file = await findFreebuffCli();
@@ -403,14 +466,24 @@ export class CliPtyManager {
       throw new Error('FREEBUFF_CLI_NOT_READY: the CLI did not leave its Connecting screen and become interactive within 12 seconds. Check CLI connectivity, then retry.');
     }
     state.conversationId ??= (await findLatestCliConversationId(cwd, startedAt - 1000)) ?? undefined;
+    await this.assertSessionAvailable(state);
     return { id: safeId, conversationId: state.conversationId, pid: term.pid, output: state.output, exited: state.exited, exitCode: state.exitCode };
   }
+
+  private async assertSessionAvailable(state: { cwd: string; conversationId?: string; output: string; screen: CliTerminalScreen }): Promise<void> {
+    const combined = `${state.output}\n${state.screen.text()}`;
+    if (cliSessionIsOver(combined) || (state.conversationId && cliSessionIsOver(await readCliLogText(state.cwd, state.conversationId)))) {
+      throw new Error('FREEBUFF_SESSION_OVER: Freebuff has ended the active session and is holding queued messages until it rejoins. Restart or rejoin Freebuff before continuing.');
+    }
+  }
+
   async send(id: string, text: string, cwd = process.cwd(), continueId?: string): Promise<CliSessionSnapshot> {
     if (!text || text.length > 100_000) throw new Error('Message must be 1 to 100000 characters');
     const session = await this.start(id, cwd, continueId);
     const state = this.sessions.get(assertSafeId(id));
     if (!state || state.exited) throw new Error('FREEBUFF_CLI_SESSION_EXITED');
     await new Promise<void>((resolve) => setTimeout(resolve, 300));
+    await this.assertSessionAvailable(state);
     // Multiline prompts are pasted inside a bracketed-paste envelope, where a
     // bare LF is literal text (only CR would submit early). Preserve newlines;
     // strip only CR and unsafe terminal controls.
@@ -462,5 +535,5 @@ export class CliPtyManager {
     })();
   }
   snapshot(id: string): CliSessionSnapshot { const state = this.sessions.get(assertSafeId(id)); if (!state) throw new Error('FREEBUFF_CLI_SESSION_NOT_FOUND'); return { id: assertSafeId(id), conversationId: state.conversationId, pid: state.term.pid, output: state.output, exited: state.exited, exitCode: state.exitCode }; }
-  dispose(): void { for (const state of this.sessions.values()) { if (!state.exited) state.term.kill(); } this.sessions.clear(); }
+  dispose(): void { for (const state of this.sessions.values()) { if (!state.exited) state.term.kill('SIGTERM'); } this.sessions.clear(); }
 }

@@ -128,6 +128,7 @@ export const ErrorCodes = {
   CLI_SESSION_LIMIT: 'FREEBUFF_CLI_SESSION_LIMIT',
   CLI_SESSION_EXITED: 'FREEBUFF_CLI_SESSION_EXITED',
   CLI_SESSION_NOT_FOUND: 'FREEBUFF_CLI_SESSION_NOT_FOUND',
+  CLI_SESSION_OVER: 'FREEBUFF_SESSION_OVER',
   DESKTOP_NOT_FOUND: 'FREEBUFF_DESKTOP_NOT_FOUND',
   DESKTOP_AUTH_REQUIRED: 'FREEBUFF_DESKTOP_AUTH_REQUIRED',
   DESKTOP_API_INCOMPATIBLE: 'FREEBUFF_DESKTOP_API_INCOMPATIBLE',
@@ -176,6 +177,7 @@ export function isBridgeError(error: unknown): error is BridgeError {
 export function toErrorShape(error: unknown): BridgeErrorShape {
   if (isBridgeError(error)) return error.toShape();
   const rawMessage = error instanceof Error ? error.message : String(error);
+  if (/FREEBUFF_SESSION_OVER|Freebuff session over|holding queued messages until rejoin/i.test(rawMessage)) return new BridgeError(ErrorCodes.CLI_SESSION_OVER, 'The Freebuff CLI session has ended and is holding queued messages until it rejoins.', 'Restart or rejoin Freebuff in the CLI, then retry.').toShape();
   if (/Not authenticated|Press ENTER to login/i.test(rawMessage)) return new BridgeError(ErrorCodes.CLI_NOT_AUTHENTICATED, 'The Freebuff CLI is not authenticated.', 'Run the Freebuff CLI once and sign in, then retry.').toShape();
   if (/already running/i.test(rawMessage)) return new BridgeError(ErrorCodes.CLI_ALREADY_RUNNING, 'Freebuff CLI is already running in this project.', 'Close the other Freebuff CLI session or set FREEBUFF_CLI_TAKEOVER=1, then retry.').toShape();
   const message = redactString(rawMessage);
