@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { CliPtyManager, cliConversationExists, findFreebuffCli, findLatestCliConversationId, readCliConversationMessages, readCliConversationSnapshot, readCliRunState, readCliTurnMarkers, cliTurnStateString, findChatDir, waitForCliTurnEnd, type CliTurnMarkers } from '../pty.js';
+import { CliPtyManager, cliConversationExists, findFreebuffCli, findLatestCliConversationId, readCliConversationMessages, readCliConversationSnapshot, readCliRunState, cliTurnStateString, findChatDir, waitForCliTurnEnd, type CliTurnMarkers } from '../pty.js';
 import { assertSafeId, redact } from '../security.js';
 import { BackendCapabilities, BackendEventInput, BackendSession, BackendTurnResult, BridgeError, ErrorCodes, FreebuffBackend } from '../bridge/types.js';
 
@@ -156,14 +156,13 @@ export class CliBackend implements FreebuffBackend {
     const turnKey = session.id;
     let outputBefore = 0;
     try { outputBefore = this.manager.snapshot(session.id).output.length; } catch { /* not a running PTY yet */ }
-    // Markers BEFORE submission: completion requires a post-submit terminal
-    // transition, never a stale idle state or a pre-existing message.
-    const baseline: CliTurnMarkers = conversationId
-      ? await readCliTurnMarkers(session.cwd, conversationId).catch(() => ({ capturedAtMs: startedAt, runStateMtimeMs: 0, logBytes: 0, logMtimeMs: 0 }))
-      : { capturedAtMs: startedAt, runStateMtimeMs: 0, logBytes: 0, logMtimeMs: 0 };
+    // The PTY manager captures these after pasting the prompt but immediately
+    // before Enter. This excludes normal startup/idle log entries while still
+    // making every subsequent CLI event eligible as turn evidence.
+    let baseline: CliTurnMarkers = { capturedAtMs: startedAt, runStateMtimeMs: 0, logBytes: 0, logMtimeMs: 0 };
     this.pending.set(turnKey, { text, startedAt, outputMarker: outputBefore, onEvent, signal });
     try {
-      const snapshot = await this.manager.send(session.id, text, session.cwd, conversationId);
+      const snapshot = await this.manager.send(session.id, text, session.cwd, conversationId, (markers) => { baseline = markers; });
       // A completed send proves the PTY is (or was) signed in: start() throws
       // FREEBUFF_CLI_NOT_AUTHENTICATED before any send when it is not.
       this.authVerified = true;

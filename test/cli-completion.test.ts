@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -147,23 +148,134 @@ test('cli completion: a post-submit session-over log fails instead of waiting fo
   });
 });
 
-test('cli startup refuses a conversation whose recent log says its session is over', async () => {
+test('cli startup allows the normal idle-session log line before the first message', async () => {
   await withHome(async (home) => {
     const cwd = path.join(home, 'proj');
     const conv = 'conv-session-over-start';
-    const dir = await makeConv(home, cwd, conv, { messages: [{ message: 'Freebuff session over; holding queued messages until rejoin' }] });
+    await makeConv(home, cwd, conv, {
+      messages: [
+        { msg: '[chat-runtime] Freebuff session over; holding queued messages until rejoin' },
+        { msg: 'Enhanced CLI fingerprint generated successfully' },
+      ],
+    });
     const manager = new CliPtyManager();
     const session = {
       term: { pid: process.pid, write: () => undefined, kill: () => undefined },
-      cwd, startedAt: Date.now(), conversationId: conv, output: '', screen: { text: () => 'Enter a coding task or / for commands' }, exited: false,
+      cwd,
+      startedAt: Date.now(),
+      conversationId: conv,
+      output: '[chat-runtime] Freebuff session over; holding queued messages until rejoin',
+      screen: { text: () => 'Your first message starts the session. Enter a coding task or / for commands' },
+      exited: false,
     };
     (manager as unknown as { sessions: Map<string, unknown> }).sessions.set('pty-session-over', session);
     try {
-      await assert.rejects(() => manager.start('pty-session-over', cwd), /FREEBUFF_SESSION_OVER/);
+      const result = await manager.start('pty-session-over', cwd);
+      assert.equal(result.id, 'pty-session-over');
     } finally {
       manager.dispose();
     }
-    assert.ok(dir);
+  });
+});
+
+test('cli startup rejects a crash-resumed hour that is explicitly waiting to rejoin', async () => {
+  await withHome(async (home) => {
+    const cwd = path.join(home, 'proj');
+    const conv = 'conv-crash-resume';
+    await makeConv(home, cwd, conv, {
+      messages: [
+        { msg: '[chat-runtime] Freebuff session over; holding queued messages until rejoin' },
+        { via: 'crash', msg: '[freebuff-session] resuming the hour a previous CLI left behind' },
+      ],
+    });
+    const manager = new CliPtyManager();
+    const session = {
+      term: { pid: process.pid, write: () => undefined, kill: () => undefined },
+      cwd,
+      startedAt: Date.now(),
+      conversationId: conv,
+      output: '',
+      screen: { text: () => 'Enter a coding task or / for commands' },
+      exited: false,
+    };
+    (manager as unknown as { sessions: Map<string, unknown> }).sessions.set('pty-crash-resume', session);
+    try {
+      await assert.rejects(() => manager.start('pty-crash-resume', cwd), /FREEBUFF_SESSION_OVER/);
+    } finally {
+      manager.dispose();
+    }
+  });
+});
+
+test('cli startup ignores crash-recovery markers that predate this PTY process', async () => {
+  await withHome(async (home) => {
+    const cwd = path.join(home, 'proj');
+    const conv = 'conv-stale-crash-resume';
+    const dir = await makeConv(home, cwd, conv, {
+      messages: [
+        { msg: '[chat-runtime] Freebuff session over; holding queued messages until rejoin' },
+        { via: 'crash', msg: '[freebuff-session] resuming the hour a previous CLI left behind' },
+      ],
+    });
+    const startupLogBytes = (await fs.stat(path.join(dir, 'log.jsonl'))).size;
+    await fs.appendFile(path.join(dir, 'log.jsonl'), `${JSON.stringify({ msg: '[chat-runtime] Freebuff session over; holding queued messages until rejoin' })}\n`);
+    const manager = new CliPtyManager();
+    const session = {
+      term: { pid: process.pid, write: () => undefined, kill: () => undefined },
+      cwd,
+      startedAt: Date.now(),
+      conversationId: conv,
+      startupLogBytes,
+      output: '[chat-runtime] Freebuff session over; holding queued messages until rejoin',
+      screen: { text: () => 'Your first message starts the session. Enter a coding task or / for commands' },
+      exited: false,
+    };
+    (manager as unknown as { sessions: Map<string, unknown> }).sessions.set('pty-stale-crash', session);
+    try {
+      const result = await manager.start('pty-stale-crash', cwd);
+      assert.equal(result.id, 'pty-stale-crash');
+    } finally {
+      manager.dispose();
+    }
+  });
+});
+
+test('cli submit baseline is captured after paste and before Enter', async () => {
+  await withHome(async (home) => {
+    const cwd = path.join(home, 'proj');
+    const conv = 'conv-submit-baseline';
+    const dir = await makeConv(home, cwd, conv, {
+      messages: [{ msg: '[chat-runtime] Freebuff session over; holding queued messages until rejoin' }],
+    });
+    const initialBytes = (await fs.stat(path.join(dir, 'log.jsonl'))).size;
+    const manager = new CliPtyManager();
+    let baseline: { capturedAtMs: number; runStateMtimeMs: number; logBytes: number; logMtimeMs: number } | undefined;
+    const session = {
+      term: {
+        pid: process.pid,
+        write: (data: string) => {
+          if (data === '\r') {
+            fsSync.appendFileSync(path.join(dir, 'log.jsonl'), `${JSON.stringify({ msg: '[chat-runtime] Freebuff session over; holding queued messages until rejoin' })}\n`);
+          }
+        },
+        kill: () => undefined,
+      },
+      cwd,
+      startedAt: Date.now(),
+      conversationId: conv,
+      output: '',
+      screen: { text: () => 'Enter a coding task or / for commands' },
+      exited: false,
+    };
+    (manager as unknown as { sessions: Map<string, unknown> }).sessions.set('pty-submit-baseline', session);
+    try {
+      const result = await manager.send('pty-submit-baseline', 'run a small task', cwd, undefined, (markers) => { baseline = markers; });
+      assert.equal(result.conversationId, conv);
+      assert.equal(baseline?.logBytes, initialBytes);
+      assert.ok((await fs.stat(path.join(dir, 'log.jsonl'))).size > initialBytes);
+    } finally {
+      manager.dispose();
+    }
   });
 });
 

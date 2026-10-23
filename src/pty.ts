@@ -96,6 +96,27 @@ export function cliTerminalIsReady(screen: string): boolean {
 
 export function cliSessionIsOver(text: string): boolean { return CLI_SESSION_OVER.test(text); }
 
+function cliSessionNeedsRejoin(text: string): boolean {
+  let sawSessionOver = false;
+  let sawCrashResume = false;
+  for (const line of text.split(/\r?\n/)) {
+    let message = line;
+    let via: unknown;
+    try {
+      const record = asRecord(JSON.parse(line));
+      if (record) {
+        message = [record.msg, record.message, record.text].filter((part): part is string => typeof part === 'string').join(' ');
+        via = record.via;
+      }
+    } catch { /* also accept the CLI's human-readable log format */ }
+    if (CLI_SESSION_OVER.test(message)) sawSessionOver = true;
+    if (/resuming the hour a previous CLI left behind/i.test(message) && (
+      via === 'crash' || /via\s*[:=]\s*["']?crash\b/i.test(line)
+    )) sawCrashResume = true;
+  }
+  return sawSessionOver && sawCrashResume;
+}
+
 function cliCandidates(): string[] {
   const home = os.homedir();
   const pathEntries = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean).flatMap((entry) => [path.join(entry, process.platform === 'win32' ? 'freebuff.exe' : 'freebuff'), path.join(entry, 'freebuff')]);
@@ -443,10 +464,12 @@ export class CliPtyManager {
     if (!file) throw new Error('FREEBUFF_CLI_NOT_INSTALLED');
     const args = ['--cwd', cwd];
     if (continueId) args.push('--continue', assertSafeId(continueId));
+    const priorChatDir = continueId ? await findChatDir(cwd, continueId) : null;
+    const startupLogBytes = priorChatDir ? (await fs.stat(path.join(priorChatDir, 'log.jsonl')).catch(() => null))?.size ?? 0 : 0;
     const startedAt = Date.now();
     let term: pty.IPty;
     try { term = pty.spawn(file, args, { name: 'xterm-256color', cols: 160, rows: 48, cwd, ...(process.platform === 'win32' ? { useConpty: true } : {}), env: { ...process.env, TERM: 'xterm-256color' } }); } catch (error) { throw describePtyLaunchError(error, file, cwd); }
-    const state = { term, cwd, startedAt, conversationId: continueId, output: '', screen: new CliTerminalScreen(), exited: false, exitCode: undefined as number | undefined };
+    const state = { term, cwd, startedAt, conversationId: continueId, startupLogBytes, output: '', screen: new CliTerminalScreen(), exited: false, exitCode: undefined as number | undefined };
     this.sessions.set(safeId, state);
     term.onData((data) => { state.output = (state.output + data).slice(-2_000_000); state.screen.write(data); });
     term.onExit(({ exitCode }) => { state.exited = true; state.exitCode = exitCode; const timer = setTimeout(() => { if (this.sessions.get(safeId) === state) this.sessions.delete(safeId); }, 300_000); timer.unref?.(); });
@@ -470,14 +493,17 @@ export class CliPtyManager {
     return { id: safeId, conversationId: state.conversationId, pid: term.pid, output: state.output, exited: state.exited, exitCode: state.exitCode };
   }
 
-  private async assertSessionAvailable(state: { cwd: string; conversationId?: string; output: string; screen: CliTerminalScreen }): Promise<void> {
-    const combined = `${state.output}\n${state.screen.text()}`;
-    if (cliSessionIsOver(combined) || (state.conversationId && cliSessionIsOver(await readCliLogText(state.cwd, state.conversationId)))) {
+  private async assertSessionAvailable(state: { cwd: string; conversationId?: string; startupLogBytes?: number; output: string; screen: CliTerminalScreen }): Promise<void> {
+    const logText = state.conversationId
+      ? await readCliLogText(state.cwd, state.conversationId, state.startupLogBytes ?? 0)
+      : '';
+    const combined = `${state.output}\n${state.screen.text()}\n${logText}`;
+    if (cliSessionNeedsRejoin(combined)) {
       throw new Error('FREEBUFF_SESSION_OVER: Freebuff has ended the active session and is holding queued messages until it rejoins. Restart or rejoin Freebuff before continuing.');
     }
   }
 
-  async send(id: string, text: string, cwd = process.cwd(), continueId?: string): Promise<CliSessionSnapshot> {
+  async send(id: string, text: string, cwd = process.cwd(), continueId?: string, onBeforeSubmit?: (markers: CliTurnMarkers) => void): Promise<CliSessionSnapshot> {
     if (!text || text.length > 100_000) throw new Error('Message must be 1 to 100000 characters');
     const session = await this.start(id, cwd, continueId);
     const state = this.sessions.get(assertSafeId(id));
@@ -492,8 +518,12 @@ export class CliPtyManager {
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
     state.term.write(`\x1b[200~${clean}\x1b[201~`);
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
-    state.term.write('\r');
     state.conversationId ??= (await findLatestCliConversationId(cwd, state.startedAt - 1000)) ?? undefined;
+    const baseline = state.conversationId
+      ? await readCliTurnMarkers(cwd, state.conversationId).catch(() => ({ capturedAtMs: Date.now(), runStateMtimeMs: 0, logBytes: 0, logMtimeMs: 0 }))
+      : { capturedAtMs: Date.now(), runStateMtimeMs: 0, logBytes: 0, logMtimeMs: 0 };
+    onBeforeSubmit?.(baseline);
+    state.term.write('\r');
     return { id: session.id, conversationId: state.conversationId, pid: state.term.pid, output: state.output, exited: state.exited, exitCode: state.exitCode };
   }
   async sendToLatest(id: string, text: string, cwd = process.cwd()): Promise<CliSessionSnapshot> { return this.send(id, text, cwd, (await findLatestCliConversationId(cwd)) ?? undefined); }

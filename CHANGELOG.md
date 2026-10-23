@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.2.4 (2026-10-23)
+
+- Treat the CLI session-over startup log as normal while a new turn is idle; fail fast before submission only when current-process logs confirm crash recovery is waiting to rejoin.
+- Capture completion and session-state baselines after prompt paste, immediately before Enter, so startup output cannot be mistaken for a turn result.
+- Ignore crash-recovery log records left over from earlier CLI processes when continuing a conversation.
+
 ## 0.2.3 (2026-10-20)
 
 - Restrict project-file reads and listings to roots returned by Freebuff's current project list, including in CLI-only mode.
