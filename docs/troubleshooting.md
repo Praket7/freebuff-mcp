@@ -89,6 +89,14 @@ Run `freebuff-mcp doctor` (or `freebuff-mcp doctor --json`) first — it reports
 
 **Fixes:** The bridge only reports `completed` after the Desktop stops reporting `running` (or `lastTurnFinishedAt` advances). `waiting_for_user` means that could not be confirmed within bounds — the turn may still be running. Poll `get_turn`/`watch_turn`, and check the Desktop UI for the thread's real state.
 
+## The CLI does not acknowledge a submitted prompt
+
+**Symptoms:** A CLI-backed `run_turn` returns `state: "rate_limited"`, or fails with a message that no conversation id was created and the prompt was not acknowledged.
+
+**Fixes:** `rate_limited` is returned only for explicit quota or capacity messages, such as “Session limit reached” or “Free mode is briefly at capacity.” Wait for Freebuff's quota window, or choose another available model. A slow model, a countdown, “session over,” or generic queue text alone does not prove a rate limit. If the CLI never acknowledges the prompt and shows no explicit quota message, inspect its screen for a sign-in, session-rejoin, or provider error before retrying.
+
+`resume_thread` cannot reclaim a CLI waiting-room session. The CLI's `/resume` command restores chat context; it does not rejoin the Freebuff session lease. Use `freebuff --continue` in an interactive terminal only after the prior CLI process has exited, then reconnect the bridge to the resulting conversation. Do not erase `message-history.json` or delete `freebuff-live-*.json` as a general recovery step: those files can contain queued work or a live, account-bound session, and the bridge cannot safely determine which entries belong to it.
+
 ## `start_thread` fails with `FREEBUFF_DESKTOP_API_INCOMPATIBLE`
 
 **Symptoms:** creating a session on the Desktop fails while reads still work.
@@ -99,4 +107,5 @@ Run `freebuff-mcp doctor` (or `freebuff-mcp doctor --json`) first — it reports
 
 - `FREEBUFF_SESSION_NOT_FOUND` / `FREEBUFF_TURN_NOT_FOUND` — the bridge restarted or the id was mistyped; call `start_thread` again.
 - `FREEBUFF_TURN_ALREADY_ACTIVE` — one active turn per session; `stop_turn` first or wait for the terminal state.
+- `FREEBUFF_CLI_SESSION_REJOIN_UNSUPPORTED` — `resume_thread` cannot reclaim a CLI waiting-room lease; use the interactive CLI recovery steps above.
 - `FREEBUFF_DESKTOP_HANDOFF_INVALID` — the handoff file failed validation; the reason (`handoff_expired`, `handoff_dead_pid`, …) appears in doctor output.

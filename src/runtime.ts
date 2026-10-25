@@ -91,6 +91,7 @@ const KIND_BY_TYPE: Record<BridgeEventType, ThreadProgressKind> = {
   command_started: 'tool_start',
   command_finished: 'tool_output',
   waiting_for_user: 'turn_state',
+  rate_limited: 'failed',
   completed: 'completed',
   failed: 'failed',
   cancelled: 'cancelled',

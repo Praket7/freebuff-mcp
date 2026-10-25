@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.2.5 (2026-10-25)
+
+- Report explicit CLI quota and capacity denials as the terminal `rate_limited` state; keep generic slow, queue, and countdown text from being misclassified.
+- Fail promptly with an actionable unconfirmed-submission message when the CLI creates no conversation id, instead of returning a misleading `waiting_for_user` state.
+- Route `resume_thread` through the owning backend, stop treating `/resume` as a Freebuff session rejoin, and return a CLI-specific recovery error when the original project cwd is needed.
+- Document why shared CLI message history and account-bound live-session leases are not cleared or killed automatically.
 
 ## 0.2.4 (2026-10-23)
 

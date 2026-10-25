@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { CliBackend } from '../src/backends/cli-backend.js';
-import { CliPtyManager, readCliConversationSnapshot, readCliTurnMarkers, waitForCliTurnEnd } from '../src/pty.js';
+import { CliPtyManager, detectCliRateLimit, readCliConversationSnapshot, readCliTurnMarkers, waitForCliTurnEnd } from '../src/pty.js';
 
 /**
  * P0: the CLI must never invent completion.
@@ -128,6 +128,18 @@ test('cli completion: a post-submit Main prompt finished log entry proves comple
     await fs.appendFile(path.join(dir, 'log.jsonl'), `${JSON.stringify({ message: 'Main prompt finished' })}\n`, 'utf8');
     const result = await waiting;
     assert.deepEqual(result, { state: 'completed', proven: true });
+  });
+});
+
+test('cli completion: an explicit quota denial in the post-submit PTY tail is rate_limited', async () => {
+  await withHome(async (home) => {
+    const cwd = path.join(home, 'proj');
+    const conv = 'conv-rate-limit';
+    await makeConv(home, cwd, conv, { runState: { mainAgentState: { turnState: 'running' } } });
+    const baseline = await readCliTurnMarkers(cwd, conv);
+    const end = await waitForCliTurnEnd(cwd, conv, baseline, undefined, 3_000, () => 'Session limit reached. Choose another model.');
+    assert.equal(end.state, 'rate_limited');
+    assert.match(end.error ?? '', /quota window/i);
   });
 });
 
@@ -339,8 +351,29 @@ test('cli completion: sendMessage without a conversation id is unconfirmed, not 
     dispose: () => undefined,
   };
   const result = await backend.sendMessage({ session: { id: 'pty-1', backend: 'cli', cwd: '/tmp/project' }, text: 'hello' });
-  assert.equal(result.state, 'waiting_for_user');
+  assert.equal(result.state, 'failed');
   assert.match(String(result.error ?? ''), /no conversation id/i);
+});
+
+test('cli completion: an explicit PTY quota denial returns rate_limited without a conversation id', async () => {
+  const backend = new CliBackend('/tmp/project');
+  (backend as unknown as { manager: unknown }).manager = {
+    send: async (id: string) => ({ id, pid: 1, output: '', exited: false }),
+    snapshot: (id: string) => ({ id, pid: 1, output: '', screenText: 'Session limit reached. Choose another model or visit plans.', exited: false }),
+    dispose: () => undefined,
+  };
+  const result = await backend.sendMessage({ session: { id: 'pty-rate-1', backend: 'cli', cwd: '/tmp/project' }, text: 'hello' });
+  assert.equal(result.state, 'rate_limited');
+  assert.match(String(result.error ?? ''), /quota window|available model/i);
+});
+
+test('cli rate-limit detection requires an explicit quota or capacity signal', () => {
+  assert.match(detectCliRateLimit('Session limit reached. Choose another model.') ?? '', /rate-limited/i);
+  assert.match(detectCliRateLimit('Free mode is briefly at capacity; your request will be retried automatically.') ?? '', /rate-limited/i);
+  assert.match(detectCliRateLimit('Rate limited. Try again in 2 hours.') ?? '', /rate-limited/i);
+  assert.equal(detectCliRateLimit('Slow model · 2/5 hours remaining'), undefined, 'model speed and remaining quota alone are not proof of a rate limit');
+  assert.equal(detectCliRateLimit('Freebuff session over; holding queued messages until rejoin'), undefined, 'rejoin state is not a quota denial');
+  assert.equal(detectCliRateLimit('The queue is slow; wait 3 minutes'), undefined, 'generic queue and countdown text is ambiguous');
 });
 
 test('cli stop: a cancelled turn keeps its healthy PTY alive (no hard kill)', async () => {

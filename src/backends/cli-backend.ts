@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { CliPtyManager, cliConversationExists, findFreebuffCli, findLatestCliConversationId, readCliConversationMessages, readCliConversationSnapshot, readCliRunState, cliTurnStateString, findChatDir, waitForCliTurnEnd, type CliTurnMarkers } from '../pty.js';
+import { CliPtyManager, detectCliRateLimit, cliConversationExists, findFreebuffCli, findLatestCliConversationId, readCliConversationMessages, readCliConversationSnapshot, readCliRunState, cliTurnStateString, findChatDir, waitForCliTurnEnd, type CliTurnMarkers } from '../pty.js';
 import { assertSafeId, redact } from '../security.js';
 import { BackendCapabilities, BackendEventInput, BackendSession, BackendTurnResult, BridgeError, ErrorCodes, FreebuffBackend } from '../bridge/types.js';
 
@@ -89,7 +89,7 @@ export class CliBackend implements FreebuffBackend {
       canCreateSession: this.authVerified,
       canSendMessage: this.authVerified,
       canStop: this.authVerified,
-      canResume: this.authVerified,
+      canResume: false,
       canSetModel: this.authVerified,
       canSetReasoning: this.authVerified,
       notes: [
@@ -97,6 +97,7 @@ export class CliBackend implements FreebuffBackend {
         this.authVerified
           ? 'Write authorization verified by a successful authenticated PTY session.'
           : 'Authentication is unverified: the binary exists but no signed-in PTY session has succeeded yet. An installed-but-signed-out CLI is never reported write-authorized.',
+        'CLI waiting-room rejoin is not supported by the bridge; resume_thread returns a CLI-specific recovery error instead of claiming the session resumed.',
         ...(this.lastSessionError ? [this.lastSessionError] : []),
       ],
     };
@@ -168,13 +169,19 @@ export class CliBackend implements FreebuffBackend {
       this.authVerified = true;
       this.lastSessionError = undefined;
       const activeConvId = conversationId ?? snapshot.conversationId;
-      // No conversation id means no completion proof is possible: report
-      // unconfirmed, never completed.
+      // When the CLI has not created a conversation yet, inspect a bounded
+      // post-submit PTY tail for an explicit quota denial. Without one, do not
+      // label an unacknowledged prompt as user input; report the ambiguity as
+      // a failed/unconfirmed submission so callers can act on it.
       const turnEnd = activeConvId
-        ? await waitForCliTurnEnd(session.cwd, activeConvId, baseline, signal)
-        : { state: 'waiting_for_user' as const, proven: false, error: 'The CLI turn outcome is unconfirmed: no conversation id was observed after submission.' };
+        ? await waitForCliTurnEnd(session.cwd, activeConvId, baseline, signal, 15 * 60_000, () => {
+          return this.readSubmissionTail(session.id, outputBefore);
+        })
+        : await this.waitForCliSubmissionWithoutConversation(session.id, signal);
       // Emit coarse progress events derived from PTY output deltas.
-      const output = snapshot.output.slice(outputBefore);
+      let currentOutput = snapshot.output;
+      try { currentOutput = this.manager.snapshot(session.id).output; } catch { /* retain the send-time snapshot */ }
+      const output = currentOutput.slice(outputBefore);
       this.emitPtyProgress(session, output, onEvent);
       const exited = snapshot.exited;
       const finalState = exited ? 'failed' : turnEnd.state;
@@ -188,6 +195,37 @@ export class CliBackend implements FreebuffBackend {
       return this.rethrowCliError(error);
     } finally {
       this.pending.delete(turnKey);
+    }
+  }
+
+  private async waitForCliSubmissionWithoutConversation(sessionId: string, signal?: AbortSignal): Promise<{ state: 'failed' | 'rate_limited' | 'cancelled'; proven: boolean; error?: string }> {
+    const deadline = Date.now() + 1_500;
+    do {
+      if (signal?.aborted) return { state: 'cancelled', proven: true };
+      // An explicit rate denial is often rendered before the CLI creates its
+      // chat directory, so inspect the bounded visible PTY tail rather than a
+      // conversation-only delta.
+      let snapshot: ReturnType<CliPtyManager['snapshot']> | undefined;
+      try { snapshot = this.manager.snapshot(sessionId); } catch { /* the PTY may have exited and been removed */ }
+      const output = this.readSubmissionTail(sessionId);
+      const rateLimit = detectCliRateLimit(output);
+      if (rateLimit) return { state: 'rate_limited', proven: true, error: rateLimit };
+      if (snapshot?.exited) return { state: 'failed', proven: true, error: `Freebuff CLI exited before creating a conversation id (exit code ${snapshot.exitCode ?? 'unknown'}).` };
+      if (Date.now() >= deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    } while (true);
+    return { state: 'failed', proven: false, error: 'No conversation id was created and the CLI did not acknowledge the submitted prompt. Check the Freebuff CLI screen for a session, quota, or sign-in message, then retry after resolving it.' };
+  }
+
+  private readSubmissionTail(sessionId: string, fromOutput = 0): string {
+    try {
+      const snapshot = this.manager.snapshot(sessionId);
+      let visible = `${snapshot.output.slice(fromOutput)}\n${snapshot.screenText ?? ''}`;
+      const submitted = this.pending.get(sessionId)?.text;
+      if (submitted) visible = visible.replace(submitted, '[submitted prompt]');
+      return visible.slice(-4_096);
+    } catch {
+      return '';
     }
   }
 
@@ -243,10 +281,11 @@ export class CliBackend implements FreebuffBackend {
   async resume(session: BackendSession): Promise<BackendTurnResult> {
     const conversationId = session.backendSessionId;
     if (!conversationId) throw new BridgeError(ErrorCodes.INVALID_INPUT, 'Cannot resume: no verified conversation id for this session.');
-    let snapshot;
-    try { snapshot = await this.manager.send(session.id, '/resume', session.cwd, conversationId); } catch (error) { this.invalidateAuthorizationOnAuthError(error); throw error; }
-    this.authVerified = true;
-    return { backendTurnId: conversationId, state: snapshot.exited ? 'failed' : 'completed', result: redact({ output: snapshot.output.slice(-20_000) }) };
+    throw new BridgeError(
+      ErrorCodes.CLI_SESSION_REJOIN_UNSUPPORTED,
+      'The CLI bridge cannot safely rejoin a Freebuff session by sending /resume. That command restores chat context, not the Freebuff session lease. Use an interactive Freebuff CLI to continue a session whose previous process has exited; if the bridge still owns a live CLI process, stop the bridge before taking it over. Shared message history and session leases were left untouched.',
+      'Use `freebuff --continue` in an interactive terminal after the previous CLI process has exited, or wait for the quota window and start a new thread.',
+    );
   }
 
   /**

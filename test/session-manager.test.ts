@@ -6,6 +6,7 @@ import { FreebuffBackend, BackendSession, BackendTurnResult, BackendEventInput, 
 
 interface FakeOptions {
   fail?: boolean;
+  rateLimited?: boolean;
   hang?: Promise<void>;
   events?: BackendEventInput[];
   onSend?: (session: BackendSession, text: string, signal?: AbortSignal) => void;
@@ -39,6 +40,7 @@ function fakeBackend(options: FakeOptions = {}): FreebuffBackend & { callCount: 
         });
       }
       if (options.fail) return { state: 'failed', error: 'injected backend failure' };
+      if (options.rateLimited) return { state: 'rate_limited', error: 'Freebuff is rate-limited or at capacity.' };
       return { state: 'completed', result: { echoed: text } };
     },
     async stop() { /* not used directly here */ },
@@ -93,6 +95,17 @@ test('turn manager: failed turn surfaces error and terminal state', async () => 
   assert.equal(turn.state, 'failed');
   assert.match(turn.error ?? '', /injected backend failure/);
   assert.equal(session.state, 'ready', 'session clears running state after terminal turn');
+});
+
+test('turn manager: rate-limited is a distinct terminal outcome with actionable detail', async () => {
+  const manager = new SessionManager(fakeBackend({ rateLimited: true }));
+  const turns = new TurnManager(manager);
+  const session = await manager.createSession({ cwd: '/tmp/project' });
+  const turn = await turns.startTurn(session.id, { text: 'work' });
+  assert.equal(turn.state, 'rate_limited');
+  assert.match(turn.error ?? '', /rate-limited/i);
+  assert.equal(session.state, 'ready');
+  assert.equal(manager.events.read({ turnId: turn.id }).events.at(-1)?.type, 'rate_limited');
 });
 
 test('session manager: cancellation aborts the turn and clears active state', async () => {

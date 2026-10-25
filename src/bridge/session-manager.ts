@@ -280,6 +280,8 @@ export class SessionManager {
           setState('cancelled', { backendTurnId: result.backendTurnId });
         } else if (result.state === 'waiting_for_user') {
           setState('waiting_for_user', { backendTurnId: result.backendTurnId });
+        } else if (result.state === 'rate_limited') {
+          setState('rate_limited', { error: result.error ?? 'Freebuff is rate-limited or at capacity.', backendTurnId: result.backendTurnId });
         } else {
           setState('failed', { error: result.error ?? 'The Freebuff backend reported an unspecified failure.', backendTurnId: result.backendTurnId });
         }

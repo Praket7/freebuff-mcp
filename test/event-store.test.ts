@@ -144,10 +144,11 @@ test('event store: session and turn filters partition correctly', () => {
 
 test('event store: turn state transitions are recorded with correct event types', () => {
   const store = new EventStore();
-  const states: BridgeTurnState[] = ['running', 'waiting_for_user', 'completed'];
+  const states: BridgeTurnState[] = ['running', 'waiting_for_user', 'rate_limited', 'completed'];
   states.forEach((state, index) => store.setTurnState('th1', 's1', `turn-${index}`, state === 'running' ? 'running' : state));
   const types = store.read({}).events.map((e) => e.type);
   assert.ok(types.includes('turn_started'));
   assert.ok(types.includes('waiting_for_user'));
+  assert.ok(types.includes('rate_limited'));
   assert.ok(types.includes('completed'));
 });

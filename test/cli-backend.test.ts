@@ -62,7 +62,7 @@ test('cli backend: writes are authorized only after a PTY session succeeds', asy
     assert.equal(after.canCreateSession, true, 'write capabilities revealed after auth');
     assert.equal(after.canSendMessage, true, 'write capabilities revealed after auth');
     assert.equal(after.canStop, true);
-    assert.equal(after.canResume, true);
+    assert.equal(after.canResume, false, 'the CLI cannot safely rejoin Freebuff session leases through the bridge');
   } finally {
     if (previous === undefined) delete process.env.FREEBUFF_CLI_PATH; else process.env.FREEBUFF_CLI_PATH = previous;
     await fs.rm(dir, { recursive: true, force: true });
@@ -118,6 +118,20 @@ test('cli backend: session-over startup fails clearly and appears in status note
     if (previous === undefined) delete process.env.FREEBUFF_CLI_PATH; else process.env.FREEBUFF_CLI_PATH = previous;
     await fs.rm(dir, { recursive: true, force: true });
   }
+});
+
+test('cli backend: resume never reports success after typing a chat slash command', async () => {
+  const backend = new CliBackend('/tmp/project');
+  const calls: string[] = [];
+  (backend as unknown as { manager: unknown }).manager = {
+    send: async (_id: string, text: string) => { calls.push(text); return { id: 'pty-1', pid: 1, output: '', exited: false }; },
+    dispose: () => undefined,
+  };
+  await assert.rejects(
+    () => backend.resume({ id: 'pty-1', backend: 'cli', backendSessionId: 'conversation-1', cwd: '/tmp/project' }),
+    (error: unknown) => error instanceof BridgeError && error.code === ErrorCodes.CLI_SESSION_REJOIN_UNSUPPORTED && /cannot safely rejoin/i.test(error.message),
+  );
+  assert.deepEqual(calls, [], 'resume must not send /resume and claim the queue was drained');
 });
 
 test('CLI PTY disposal requests graceful termination instead of hanging up the process', () => {

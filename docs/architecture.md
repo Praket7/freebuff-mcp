@@ -81,11 +81,11 @@ The bridge speaks the routes the Desktop UI itself uses. Shapes that are easy to
 - `GET /api/events` → SSE frames `data: {"type":"state","snapshot":{ threads: [...] }}` (no `event:` field).
 - Thread `turnState` is `running | idle`; a finished turn records `lastTurnOutcome` (`closed` / `error`) and `lastTurnFinishedAt`.
 
-A turn is only reported `completed` after the Desktop stops reporting `running` (or `lastTurnFinishedAt` advances). If that cannot be confirmed within bounds the bridge returns the non-terminal `waiting_for_user` instead of claiming success.
+A turn is only reported `completed` after the Desktop stops reporting `running` (or `lastTurnFinishedAt` advances). If that cannot be confirmed within bounds the bridge returns the non-terminal `waiting_for_user` instead of claiming success. The CLI also reports the terminal `rate_limited` state when it observes an explicit quota or capacity denial; generic slow or waiting text is not enough to infer rate limiting.
 
 ## Turn lifecycle (`bridge/session-manager.ts`)
 
-`startTurn` → `queued` → `running` → (terminal: `completed` | `failed` | `cancelled`, or `waiting_for_user`). The turn's AbortController is registered so `cancelTurn`/MCP cancellation/ACP cancel abort the backend; terminal states clear the session's active turn. One active turn per session; concurrent attempts fail with `FREEBUFF_TURN_ALREADY_ACTIVE`.
+`startTurn` → `queued` → `running` → (terminal: `completed` | `failed` | `rate_limited` | `cancelled`, or `waiting_for_user`). The turn's AbortController is registered so `cancelTurn`/MCP cancellation/ACP cancel abort the backend; terminal states clear the session's active turn. One active turn per session; concurrent attempts fail with `FREEBUFF_TURN_ALREADY_ACTIVE`.
 
 ## Error model (`bridge/types.ts`)
 

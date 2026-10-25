@@ -6,7 +6,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { CompositeBackend } from '../src/backends/backend.js';
 import { SessionManager } from '../src/bridge/session-manager.js';
-import { BackendCapabilities, FreebuffBackend } from '../src/bridge/types.js';
+import { BackendCapabilities, BridgeError, ErrorCodes, FreebuffBackend } from '../src/bridge/types.js';
 import { createV2ServerFromAdapter, V2Adapter } from '../src/mcp-v2.js';
 import { TurnManager } from '../src/bridge/turn-manager.js';
 import { EventStore } from '../src/bridge/event-store.js';
@@ -66,6 +66,7 @@ function cliStubWithModel(calls: string[]): FreebuffBackend {
     probe: async () => ({ backend: 'cli', connection: 'cli_ready', authorization: 'write_authorized', liveProgress: 'unavailable', canCreateSession: true, canSendMessage: true, canStop: true, canResume: true, canSetModel: true, canSetReasoning: true, notes: [] }),
     createSession: async ({ cwd }: { cwd: string }) => ({ id: 'c1', backend: 'cli' as const, backendSessionId: 'conv-c1', cwd }),
     sendMessage: async ({ session, text }: { session: { id: string }; text: string }) => { calls.push(`send:${session.id}:${text}`); return { state: 'completed' as const, result: {} }; },
+    resume: async (session: { id: string }) => { calls.push(`resume:${session.id}`); throw new BridgeError(ErrorCodes.CLI_SESSION_REJOIN_UNSUPPORTED, 'CLI session rejoin is unsupported.'); },
     setModel: async (session: { id: string }, model: string) => { calls.push(`setModel:${session.id}:${model}`); return { model }; },
     setReasoning: async (session: { id: string }, effort: string | null) => { calls.push(`setReasoning:${session.id}:${effort}`); return { effort }; },
     listProjects: async () => [],
@@ -135,7 +136,7 @@ test('set_model: a CLI-owned session bypasses read-only Desktop capability gates
   });
 });
 
-test('resume_thread: a bare CLI conversation id resumes on the CLI, not the Desktop', async () => {
+test('resume_thread: a bare CLI conversation id routes to CLI resume and does not submit /resume as a prompt', async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'freebuff-cli-home-'));
   const previousHome = process.env.HOME;
   const previousRoot = process.env.FREEBUFF_PROJECT_ROOT;
@@ -158,8 +159,19 @@ test('resume_thread: a bare CLI conversation id resumes on the CLI, not the Desk
     const adapter: V2Adapter = { backend: composite, sessions, turns: new TurnManager(sessions) };
     const server = createV2ServerFromAdapter(adapter);
     const out = await toolOf(server, 'resume_thread').handler({ threadId: 'cli-resume-9' }, ctx);
-    assert.equal(out.structuredContent?.ok, true);
-    assert.ok(cliCalls.some((c) => c === 'send:cli-resume-9:/resume'), `CLI owner received /resume: ${cliCalls.join(',')}`);
+    assert.equal(out.structuredContent?.ok, false);
+    assert.equal(out.structuredContent?.code, 'FREEBUFF_CLI_SESSION_REJOIN_UNSUPPORTED');
+    assert.ok(cliCalls.some((c) => c === 'resume:cli-resume-9'), `CLI resume implementation was called: ${cliCalls.join(',')}`);
+    assert.ok(!cliCalls.some((c) => c.includes('/resume')), 'resume is never disguised as a user prompt');
+
+    const cliOnlyCalls: string[] = [];
+    const cliOnly = new CompositeBackend({ desktop: desktopStubWithStream('not_running', []) as never, cli: cliStubWithModel(cliOnlyCalls) as never });
+    const cliOnlySessions = new SessionManager(cliOnly);
+    const cliOnlyServer = createV2ServerFromAdapter({ backend: cliOnly, sessions: cliOnlySessions, turns: new TurnManager(cliOnlySessions) });
+    const unknownCwd = await toolOf(cliOnlyServer, 'resume_thread').handler({ threadId: 'not-in-current-project' }, ctx);
+    assert.equal(unknownCwd.structuredContent?.ok, false);
+    assert.equal(unknownCwd.structuredContent?.code, 'FREEBUFF_CLI_SESSION_REJOIN_UNSUPPORTED');
+    assert.match(String(unknownCwd.structuredContent?.message), /project cwd/i);
   } finally {
     (os as unknown as { homedir: () => string }).homedir = originalHomedir;
     if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;

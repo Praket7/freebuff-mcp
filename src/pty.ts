@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import * as pty from 'node-pty';
 import { assertSafeId } from './security.js';
 
-export interface CliSessionSnapshot { id: string; conversationId?: string; pid: number; output: string; exited: boolean; exitCode?: number; }
+export interface CliSessionSnapshot { id: string; conversationId?: string; pid: number; output: string; screenText?: string; exited: boolean; exitCode?: number; }
 
 const CLI_ROWS = 48;
 const CLI_COLS = 160;
@@ -89,6 +89,21 @@ export class CliTerminalScreen {
 const CLI_READY_PROMPT = /(?:Enter a coding task or \/ for commands|Start coding for)\b/i;
 const CLI_CONNECTING = /\bConnecting\b/i;
 const CLI_SESSION_OVER = /(?:Freebuff session over|holding queued messages until rejoin)/i;
+
+/** Return a user-facing diagnosis only for explicit quota/capacity denials.
+ * Generic mentions of "slow", queues, durations, or remaining quota are not
+ * enough to infer rate limiting and must never be treated as such. */
+export function detectCliRateLimit(text: string): string | undefined {
+  const tail = text.slice(-4_096).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
+  const explicitDenial = /(?:^|\n)\s*(?:error:\s*)?session limit reached\b/i.test(tail)
+    || /(?:^|\n)\s*rate[- ]limited(?:[.!:]|$)/i.test(tail)
+    || /free mode is briefly at capacity/i.test(tail)
+    || /too many freebuff sessions on this network/i.test(tail)
+    || /(?:freebuff|free mode|free tier).{0,100}\b(?:rate[- ]limited|quota exhausted|limit reached)\b/i.test(tail);
+  return explicitDenial
+    ? 'Freebuff is rate-limited or at capacity. Wait for the quota window to reset, or choose another available model, then retry.'
+    : undefined;
+}
 
 export function cliTerminalIsReady(screen: string): boolean {
   return CLI_READY_PROMPT.test(screen) && !CLI_CONNECTING.test(screen);
@@ -338,7 +353,7 @@ export async function readCliTurnMarkers(cwd: string, conversationId: string): P
 }
 
 export interface CliTurnEnd {
-  state: 'completed' | 'failed' | 'waiting_for_user' | 'cancelled';
+  state: 'completed' | 'failed' | 'waiting_for_user' | 'rate_limited' | 'cancelled';
   /** True only when a post-submit terminal transition was actually observed. */
   proven: boolean;
   error?: string;
@@ -384,12 +399,15 @@ export async function waitForCliTurnEnd(
   conversationId: string,
   baseline: CliTurnMarkers,
   signal?: AbortSignal,
-  timeoutMs = 15 * 60_000
+  timeoutMs = 15 * 60_000,
+  getPtyOutput?: () => string
 ): Promise<CliTurnEnd> {
   const deadline = Date.now() + Math.max(1_000, timeoutMs);
   let sawActive = false;
   for (;;) {
     if (signal?.aborted) return { state: 'cancelled', proven: true };
+    const rateLimit = detectCliRateLimit(getPtyOutput?.() ?? '');
+    if (rateLimit) return { state: 'rate_limited', proven: true, error: rateLimit };
     if (Date.now() >= deadline) {
       return {
         state: 'waiting_for_user',
@@ -405,6 +423,8 @@ export async function waitForCliTurnEnd(
     const state = await readCliRunState(dir);
     const turnState = cliTurnStateString(state)?.toLowerCase();
     const logText = await readCliLogText(cwd, conversationId, baseline.logBytes, baseline.logMtimeMs);
+    const logRateLimit = detectCliRateLimit(logText);
+    if (logRateLimit) return { state: 'rate_limited', proven: true, error: logRateLimit };
     if (cliSessionIsOver(logText)) {
       return { state: 'failed', proven: true, error: 'FREEBUFF_SESSION_OVER: The Freebuff CLI session has ended and is holding queued messages until it rejoins. Restart or rejoin Freebuff before sending another message.' };
     }
@@ -458,7 +478,7 @@ export class CliPtyManager {
         throw new Error('FREEBUFF_CLI_NOT_READY: the CLI is no longer interactive. Check CLI connectivity, then retry.');
       }
       await this.assertSessionAvailable(existing);
-      return { id: safeId, pid: existing.term.pid, output: existing.output, exited: existing.exited, exitCode: existing.exitCode };
+      return { id: safeId, pid: existing.term.pid, output: existing.output, screenText: existing.screen.text(), exited: existing.exited, exitCode: existing.exitCode };
     }
     const file = await findFreebuffCli();
     if (!file) throw new Error('FREEBUFF_CLI_NOT_INSTALLED');
@@ -490,7 +510,7 @@ export class CliPtyManager {
     }
     state.conversationId ??= (await findLatestCliConversationId(cwd, startedAt - 1000)) ?? undefined;
     await this.assertSessionAvailable(state);
-    return { id: safeId, conversationId: state.conversationId, pid: term.pid, output: state.output, exited: state.exited, exitCode: state.exitCode };
+    return { id: safeId, conversationId: state.conversationId, pid: term.pid, output: state.output, screenText: state.screen.text(), exited: state.exited, exitCode: state.exitCode };
   }
 
   private async assertSessionAvailable(state: { cwd: string; conversationId?: string; startupLogBytes?: number; output: string; screen: CliTerminalScreen }): Promise<void> {
@@ -524,7 +544,7 @@ export class CliPtyManager {
       : { capturedAtMs: Date.now(), runStateMtimeMs: 0, logBytes: 0, logMtimeMs: 0 };
     onBeforeSubmit?.(baseline);
     state.term.write('\r');
-    return { id: session.id, conversationId: state.conversationId, pid: state.term.pid, output: state.output, exited: state.exited, exitCode: state.exitCode };
+    return { id: session.id, conversationId: state.conversationId, pid: state.term.pid, output: state.output, screenText: state.screen.text(), exited: state.exited, exitCode: state.exitCode };
   }
   async sendToLatest(id: string, text: string, cwd = process.cwd()): Promise<CliSessionSnapshot> { return this.send(id, text, cwd, (await findLatestCliConversationId(cwd)) ?? undefined); }
   async resumeLatest(id: string, cwd = process.cwd()): Promise<CliSessionSnapshot> { return this.send(id, '/resume', cwd, (await findLatestCliConversationId(cwd)) ?? undefined); }
@@ -533,7 +553,7 @@ export class CliPtyManager {
     if (!state) throw new Error('FREEBUFF_CLI_SESSION_NOT_FOUND');
     state.term.write('\x1b');
     state.term.write('\x03');
-    return { id: assertSafeId(id), conversationId: state.conversationId, pid: state.term.pid, output: state.output, exited: state.exited, exitCode: state.exitCode };
+    return { id: assertSafeId(id), conversationId: state.conversationId, pid: state.term.pid, output: state.output, screenText: state.screen.text(), exited: state.exited, exitCode: state.exitCode };
   }
 
   /** Hard-terminate a stuck child process tree. */
@@ -564,6 +584,6 @@ export class CliPtyManager {
       return out;
     })();
   }
-  snapshot(id: string): CliSessionSnapshot { const state = this.sessions.get(assertSafeId(id)); if (!state) throw new Error('FREEBUFF_CLI_SESSION_NOT_FOUND'); return { id: assertSafeId(id), conversationId: state.conversationId, pid: state.term.pid, output: state.output, exited: state.exited, exitCode: state.exitCode }; }
+  snapshot(id: string): CliSessionSnapshot { const state = this.sessions.get(assertSafeId(id)); if (!state) throw new Error('FREEBUFF_CLI_SESSION_NOT_FOUND'); return { id: assertSafeId(id), conversationId: state.conversationId, pid: state.term.pid, output: state.output, screenText: state.screen.text(), exited: state.exited, exitCode: state.exitCode }; }
   dispose(): void { for (const state of this.sessions.values()) { if (!state.exited) state.term.kill('SIGTERM'); } this.sessions.clear(); }
 }

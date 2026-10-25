@@ -73,6 +73,22 @@ test('contract: unproven work reports waiting, never completed', async () => {
   assert.equal(ran.state, 'waiting_for_user');
 });
 
+test('contract: explicit CLI quota denial reaches run_turn as a distinct terminal state', async () => {
+  const backend: FreebuffBackend = {
+    kind: 'cli',
+    probe: async () => ({ backend: 'cli', connection: 'cli_ready', authorization: 'write_authorized', liveProgress: 'unavailable', canCreateSession: true, canSendMessage: true, canStop: true, canResume: true, canSetModel: true, canSetReasoning: true, notes: [] }),
+    createSession: async ({ cwd }: { cwd: string }) => ({ id: 'c1', backend: 'cli' as const, backendSessionId: 'conv-1', cwd }),
+    sendMessage: async () => ({ state: 'rate_limited' as const, error: 'Freebuff is rate-limited or at capacity.' }),
+    dispose: () => undefined,
+  } as unknown as FreebuffBackend;
+  const server = createV2ServerFromAdapter(adapterFor(backend));
+  const started = (await toolOf(server, 'start_thread').handler({ cwd: '/tmp/p' }, ctx)).structuredContent as { sessionId: string };
+  const ran = (await toolOf(server, 'run_turn').handler({ sessionId: started.sessionId, text: 'work' }, ctx)).structuredContent as { ok: boolean; state: string; error?: string };
+  assert.equal(ran.ok, false);
+  assert.equal(ran.state, 'rate_limited');
+  assert.match(ran.error ?? '', /rate-limited/i);
+});
+
 test('contract: a failed backend stop is loud at the tool surface', async () => {
   const backend: FreebuffBackend = {
     kind: 'desktop',

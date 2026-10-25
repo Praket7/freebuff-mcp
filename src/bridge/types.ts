@@ -46,12 +46,13 @@ export type BridgeTurnState =
   | 'queued'
   | 'running'
   | 'waiting_for_user'
+  | 'rate_limited'
   | 'completed'
   | 'failed'
   | 'cancelled';
 
 export function isTerminalTurnState(state: BridgeTurnState): boolean {
-  return state === 'completed' || state === 'failed' || state === 'cancelled';
+  return state === 'completed' || state === 'failed' || state === 'rate_limited' || state === 'cancelled';
 }
 
 export interface BridgeTurn {
@@ -80,6 +81,7 @@ export type BridgeEventType =
   | 'command_started'
   | 'command_finished'
   | 'waiting_for_user'
+  | 'rate_limited'
   | 'completed'
   | 'failed'
   | 'cancelled'
@@ -129,6 +131,7 @@ export const ErrorCodes = {
   CLI_SESSION_EXITED: 'FREEBUFF_CLI_SESSION_EXITED',
   CLI_SESSION_NOT_FOUND: 'FREEBUFF_CLI_SESSION_NOT_FOUND',
   CLI_SESSION_OVER: 'FREEBUFF_SESSION_OVER',
+  CLI_SESSION_REJOIN_UNSUPPORTED: 'FREEBUFF_CLI_SESSION_REJOIN_UNSUPPORTED',
   DESKTOP_NOT_FOUND: 'FREEBUFF_DESKTOP_NOT_FOUND',
   DESKTOP_AUTH_REQUIRED: 'FREEBUFF_DESKTOP_AUTH_REQUIRED',
   DESKTOP_API_INCOMPATIBLE: 'FREEBUFF_DESKTOP_API_INCOMPATIBLE',

@@ -196,7 +196,7 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
       });
       try {
         const turn = await handle.done;
-        return { ok: turn.state !== 'failed', turnId: turn.id, sessionId, state: turn.state, backendTurnId: turn.backendTurnId, result: turn.result, ...(turn.error ? { error: turn.error } : {}) };
+        return { ok: turn.state !== 'failed' && turn.state !== 'rate_limited', turnId: turn.id, sessionId, state: turn.state, backendTurnId: turn.backendTurnId, result: turn.result, ...(turn.error ? { error: turn.error } : {}) };
       } finally {
         unsubscribe();
         adapter.sessions.unregisterController(handle.turn.id);
@@ -234,25 +234,34 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
     throw new BridgeError(ErrorCodes.SESSION_NOT_FOUND, 'Stopping requires a bridge session created through start_thread.', 'Call start_thread with the conversation id, then stop_turn.');
   }));
 
-  write('resume_thread', 'Resume a paused Freebuff thread.', { threadId: id, sessionId: id.optional() }, async (args) => shapeError(async () => {
+  write('resume_thread', 'Resume a paused Freebuff thread. For a CLI conversation, pass its project cwd if it was not created in the current working directory.', { threadId: id, sessionId: id.optional(), cwd: z.string().min(1).max(4096).optional() }, async (args) => shapeError(async () => {
     const threadId = assertSafeId(args.threadId);
+    const cwd = args.cwd ?? process.env.FREEBUFF_PROJECT_ROOT ?? process.cwd();
     // `threadId` is the required argument: resolve ownership through the same
     // registerExisting/resolveExisting path as set_model, so a CLI
     // conversation id resumes on the CLI instead of defaulting to Desktop.
     const session = args.sessionId
       ? adapter.sessions.getSession(assertSafeId(args.sessionId))
-      : await findSessionByBackendId(adapter, threadId);
+      : await findSessionByBackendId(adapter, threadId, cwd);
+    // With no remembered bridge session, a CLI-only install can otherwise
+    // misroute an unverified id to the absent Desktop when its chat is under a
+    // different project cwd. Surface a CLI-specific recovery hint instead.
+    if (session?.backend === 'desktop') {
+      const capabilities = await adapter.backend.probe();
+      if (capabilities.connection === 'cli_ready') {
+        throw new BridgeError(
+          ErrorCodes.CLI_SESSION_REJOIN_UNSUPPORTED,
+          `The CLI is available, but conversation ${threadId} could not be verified under ${cwd}. Pass its project cwd or create a bridge session for that conversation first.`,
+          'Use `resume_thread` with the original project cwd. The bridge will not clear shared message history or session leases.',
+        );
+      }
+    }
     const backendSession: BackendSession = session ? adapter.sessions.toBackendSession(session) : { id: threadId, backend: 'desktop' as const, backendSessionId: threadId, cwd: process.cwd() };
-    // Resuming is backend-specific. The Desktop unpauses the thread's queue
-    // through its own route (`POST /api/thread/:id/resume`), which needs only
-    // the thread id; only the CLI harness takes `/resume` as a command.
-    // Submitting `/resume` as Desktop prompt text would start a turn with that
-    // literal text instead.
-    const result = backendSession.backend === 'cli'
-      ? await adapter.backend.sendMessage({ session: backendSession, text: '/resume' })
-      : await (adapter.backend as unknown as { resume(session: BackendSession): Promise<BackendTurnResult> }).resume(backendSession);
+    // Resuming is backend-specific. Route to the owning backend implementation
+    // so a CLI slash command cannot be mistaken for Freebuff session rejoin.
+    const result = await (adapter.backend as unknown as { resume(session: BackendSession): Promise<BackendTurnResult> }).resume(backendSession);
     if (session) adapter.sessions.reconcileResume(session.id, result);
-    return { ok: true, ...result } as Json;
+    return { ok: result.state !== 'failed' && result.state !== 'rate_limited', ...result } as Json;
   }));
 
   write('set_model', 'Set the model for an existing thread.', { threadId: id, model: z.string().min(1).max(200), harnessId: z.string().optional() }, async (args) => shapeError(async () => {
@@ -410,8 +419,8 @@ async function resolveSessionId(adapter: V2Adapter, args: { sessionId?: unknown;
   return created.id;
 }
 
-async function findSessionByBackendId(adapter: V2Adapter, backendId: string) {
-  return adapter.sessions.listSessions().find((s) => s.backendSessionId === backendId) ?? (await adapter.sessions.registerExisting({ backendSessionId: backendId, cwd: process.env.FREEBUFF_PROJECT_ROOT ?? process.cwd() }));
+async function findSessionByBackendId(adapter: V2Adapter, backendId: string, cwd = process.env.FREEBUFF_PROJECT_ROOT ?? process.cwd()) {
+  return adapter.sessions.listSessions().find((s) => s.backendSessionId === backendId) ?? (await adapter.sessions.registerExisting({ backendSessionId: backendId, cwd }));
 }
 
 async function resolveListedProjectRoot(backend: FreebuffBackend, projectId: string): Promise<string> {

@@ -140,11 +140,12 @@ export async function runAcp(): Promise<void> {
           }
         }
         if (turn.state === 'cancelled') return { stopReason: 'cancelled' as const };
-        if (turn.state === 'failed') {
+        if (turn.state === 'failed' || turn.state === 'rate_limited') {
           // Infrastructure/backend failure: surface the error text and use
           // end_turn with the error message instead of claiming a model refusal.
-          const detail = turn.error ?? 'The Freebuff backend reported a failure.';
-          await client.notify(CLIENT_METHODS.session_update, { sessionId: params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `Freebuff backend error: ${detail}` } } }).catch(() => undefined);
+          const detail = turn.error ?? (turn.state === 'rate_limited' ? 'Freebuff is rate-limited or at capacity.' : 'The Freebuff backend reported a failure.');
+          const prefix = turn.state === 'rate_limited' ? 'Freebuff rate limit: ' : 'Freebuff backend error: ';
+          await client.notify(CLIENT_METHODS.session_update, { sessionId: params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `${prefix}${detail}` } } }).catch(() => undefined);
           return { stopReason: 'end_turn' as const };
         }
         return { stopReason: 'end_turn' as const };

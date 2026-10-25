@@ -242,7 +242,7 @@ export class EventStore {
         this.turns.delete(oldest.value);
       }
     }
-    const type: BridgeEventType = state === 'queued' ? 'queued' : state === 'completed' ? 'completed' : state === 'failed' ? 'failed' : state === 'cancelled' ? 'cancelled' : state === 'waiting_for_user' ? 'waiting_for_user' : 'turn_started';
+    const type: BridgeEventType = state === 'queued' ? 'queued' : state === 'completed' ? 'completed' : state === 'failed' ? 'failed' : state === 'rate_limited' ? 'rate_limited' : state === 'cancelled' ? 'cancelled' : state === 'waiting_for_user' ? 'waiting_for_user' : 'turn_started';
     this.append({ sessionId, turnId, threadId, type, state, ...(error ? { error } : {}) });
   }
 
