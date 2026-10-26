@@ -390,11 +390,11 @@ export class SessionManager {
   registerController(turnId: string, controller: AbortController): void { this.controllers.set(turnId, controller); }
   unregisterController(turnId: string): void { this.controllers.delete(turnId); }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
     this.streamHealthUnsubscribe?.();
     this.streamHealthUnsubscribe = undefined;
     for (const controller of this.controllers.values()) controller.abort();
     this.controllers.clear();
-    void this.backend.dispose?.();
+    await this.backend.dispose?.();
   }
 }

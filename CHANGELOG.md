@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.6 (2026-10-26)
+
+- Return the assistant's stored reply from CLI-backed `run_turn` instead of the raw PTY screen transcript.
+- Report write authorization and capabilities from the CLI when it owns the working write path behind a read-only Desktop.
+- Include `threadId` from `start_thread` when known, and allow `stop_thread` to accept the returned `sessionId` alone.
+- Await managed CLI process exit during bridge shutdown and remove only the matching process's stale live-session lease.
+
 ## 0.2.5 (2026-10-25)
 
 - Report explicit CLI quota and capacity denials as the terminal `rate_limited` state; keep generic slow, queue, and countdown text from being misclassified.

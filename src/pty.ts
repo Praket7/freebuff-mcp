@@ -247,6 +247,45 @@ function assistantLastMessageSentAt(state: Record<string, unknown>): number | un
   return timestamps.length ? Math.max(...timestamps) : undefined;
 }
 
+function assistantText(message: Record<string, unknown>): string | undefined {
+  const parts = Array.isArray(message.parts) ? message.parts : Array.isArray(message.content) ? message.content : undefined;
+  const text = typeof message.text === 'string' ? message.text
+    : typeof message.content === 'string' ? message.content
+    : parts?.map((part) => {
+      const value = asRecord(part);
+      return typeof value?.text === 'string' ? value.text : '';
+    }).filter(Boolean).join('');
+  return typeof text === 'string' && text ? text : undefined;
+}
+
+/** Extract the latest assistant text from the CLI's structured run-state output. */
+export function cliAssistantMessage(state: Record<string, unknown>): string | undefined {
+  const output = asRecord(state.output);
+  if (output?.type !== 'lastMessage' || !Array.isArray(output.value)) return undefined;
+  for (const value of [...output.value].reverse()) {
+    const message = asRecord(value);
+    if (message?.role === 'assistant') {
+      const text = assistantText(message);
+      if (text) return text;
+    }
+  }
+  return undefined;
+}
+
+function latestAssistantMessageFromLog(text: string): string | undefined {
+  const messages: string[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    try {
+      const message = asRecord(JSON.parse(line));
+      if (message?.role === 'assistant') {
+        const reply = assistantText(message);
+        if (reply) messages.push(reply);
+      }
+    } catch { /* ignore non-JSON log lines */ }
+  }
+  return messages.at(-1);
+}
+
 /** Read a bounded tail or post-baseline append from a conversation log. */
 async function readCliLogText(cwd: string, conversationId: string, fromByte?: number, previousMtimeMs?: number): Promise<string> {
   const dir = await findChatDir(cwd, conversationId);
@@ -357,6 +396,7 @@ export interface CliTurnEnd {
   /** True only when a post-submit terminal transition was actually observed. */
   proven: boolean;
   error?: string;
+  assistantMessage?: string;
 }
 
 const CLI_ACTIVE_STATES = new Set(['running', 'active', 'busy', 'working', 'thinking']);
@@ -444,7 +484,10 @@ export async function waitForCliTurnEnd(
         : currentAssistantSentAt >= baseline.capturedAtMs
     );
     if (freshAssistantMessage || (/Main prompt finished/i.test(logText) && progressed)) {
-      return { state: 'completed', proven: true };
+      const assistantMessage = freshAssistantMessage
+        ? cliAssistantMessage(state)
+        : latestAssistantMessageFromLog(await readCliLogText(cwd, conversationId, baseline.logBytes, baseline.logMtimeMs)) ?? cliAssistantMessage(state);
+      return { state: 'completed', proven: true, ...(assistantMessage ? { assistantMessage } : {}) };
     }
     if (turnState && CLI_ACTIVE_STATES.has(turnState)) sawActive = true;
     if (turnState && CLI_FAILED_STATES.has(turnState) && (progressed || sawActive)) {
@@ -465,7 +508,7 @@ export async function waitForCliTurnEnd(
 }
 
 export class CliPtyManager {
-  private sessions = new Map<string, { term: pty.IPty; cwd: string; startedAt: number; conversationId?: string; output: string; screen: CliTerminalScreen; exited: boolean; exitCode?: number }>();
+  private sessions = new Map<string, { term: pty.IPty; cwd: string; startedAt: number; conversationId?: string; output: string; screen: CliTerminalScreen; exited: boolean; exitCode?: number; exitPromise: Promise<void>; resolveExit: () => void }>();
   async start(id: string, cwd: string, continueId?: string): Promise<CliSessionSnapshot> {
     const safeId = assertSafeId(id);
     const existing = this.sessions.get(safeId);
@@ -489,10 +532,18 @@ export class CliPtyManager {
     const startedAt = Date.now();
     let term: pty.IPty;
     try { term = pty.spawn(file, args, { name: 'xterm-256color', cols: 160, rows: 48, cwd, ...(process.platform === 'win32' ? { useConpty: true } : {}), env: { ...process.env, TERM: 'xterm-256color' } }); } catch (error) { throw describePtyLaunchError(error, file, cwd); }
-    const state = { term, cwd, startedAt, conversationId: continueId, startupLogBytes, output: '', screen: new CliTerminalScreen(), exited: false, exitCode: undefined as number | undefined };
+    let resolveExit!: () => void;
+    const exitPromise = new Promise<void>((resolve) => { resolveExit = resolve; });
+    const state = { term, cwd, startedAt, conversationId: continueId, startupLogBytes, output: '', screen: new CliTerminalScreen(), exited: false, exitCode: undefined as number | undefined, exitPromise, resolveExit };
     this.sessions.set(safeId, state);
     term.onData((data) => { state.output = (state.output + data).slice(-2_000_000); state.screen.write(data); });
-    term.onExit(({ exitCode }) => { state.exited = true; state.exitCode = exitCode; const timer = setTimeout(() => { if (this.sessions.get(safeId) === state) this.sessions.delete(safeId); }, 300_000); timer.unref?.(); });
+    term.onExit(({ exitCode }) => {
+      state.exited = true;
+      state.exitCode = exitCode;
+      state.resolveExit();
+      void removeManagedCliLease(term.pid);
+      const timer = setTimeout(() => { if (this.sessions.get(safeId) === state) this.sessions.delete(safeId); }, 300_000); timer.unref?.();
+    });
     const deadline = Date.now() + 12_000;
     while (Date.now() < deadline && !state.exited && !cliTerminalIsReady(state.screen.text()) && !/Not authenticated|Press ENTER to login/i.test(state.output)) await new Promise<void>((resolve) => setTimeout(resolve, 250));
     if (/Freebuff is already running/i.test(state.output) && process.env.FREEBUFF_CLI_TAKEOVER === '1') {
@@ -585,5 +636,36 @@ export class CliPtyManager {
     })();
   }
   snapshot(id: string): CliSessionSnapshot { const state = this.sessions.get(assertSafeId(id)); if (!state) throw new Error('FREEBUFF_CLI_SESSION_NOT_FOUND'); return { id: assertSafeId(id), conversationId: state.conversationId, pid: state.term.pid, output: state.output, screenText: state.screen.text(), exited: state.exited, exitCode: state.exitCode }; }
-  dispose(): void { for (const state of this.sessions.values()) { if (!state.exited) state.term.kill('SIGTERM'); } this.sessions.clear(); }
+  async dispose(): Promise<void> {
+    const sessions = [...this.sessions.values()];
+    await Promise.all(sessions.map(async (state) => {
+      if (!state.exited) {
+        try { state.term.kill(process.platform === 'win32' ? undefined : 'SIGTERM'); }
+        catch { try { state.term.kill(); } catch { /* process already exited */ } }
+        await waitForPtyExit(state.exitPromise, 1_500);
+      }
+      if (!state.exited) {
+        try { state.term.kill(); } catch { /* process already exited */ }
+        if (process.platform !== 'win32') {
+          try { process.kill(-state.term.pid, 'SIGKILL'); } catch { /* process group already exited */ }
+        }
+        await waitForPtyExit(state.exitPromise, 1_000);
+      }
+      if (state.exited) await removeManagedCliLease(state.term.pid);
+    }));
+    this.sessions.clear();
+  }
+}
+
+async function waitForPtyExit(exitPromise: Promise<void>, timeoutMs: number): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([exitPromise, new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs); })]);
+  if (timer) clearTimeout(timer);
+}
+
+/** Remove only the lease whose filename is owned by this exited PTY child. */
+async function removeManagedCliLease(pid: number): Promise<void> {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return;
+  const leasePath = path.join(os.homedir(), '.config', 'manicode', `freebuff-live-${pid}.json`);
+  await fs.rm(leasePath, { force: true }).catch(() => undefined);
 }

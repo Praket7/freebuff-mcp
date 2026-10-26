@@ -132,6 +132,37 @@ test('ownership: a read-only Desktop routes session creation (a write) to the CL
   });
 });
 
+test('status: verified CLI write access is reflected when Desktop is connected read-only', async () => {
+  await withCliBinary(async () => {
+    const cliCaps = {
+      backend: 'cli' as const,
+      connection: 'cli_ready' as const,
+      authorization: 'write_authorized' as const,
+      liveProgress: 'unavailable' as const,
+      canCreateSession: true,
+      canSendMessage: true,
+      canStop: true,
+      canResume: false,
+      canSetModel: true,
+      canSetReasoning: true,
+      notes: ['authenticated CLI'],
+    };
+    const cli = { ...cliStub({ create: [], send: [], read: [] }), probe: async () => cliCaps };
+    const composite = new CompositeBackend({
+      desktop: desktopStub({ connection: 'connected_read_only', calls: [] }) as never,
+      cli: cli as never,
+    });
+
+    const caps = await composite.probe();
+    assert.equal(caps.authorization, 'write_authorized');
+    assert.equal(caps.canCreateSession, true);
+    assert.equal(caps.canSendMessage, true);
+    assert.equal(caps.canStop, true);
+    assert.equal(caps.canSetModel, true);
+    assert.equal(caps.canSetReasoning, true);
+  });
+});
+
 test('ownership: a writable Desktop stays the primary Session creator when a CLI is also present', async () => {
   await withCliBinary(async () => {
     const desktopCalls: string[] = [];

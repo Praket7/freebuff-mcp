@@ -134,16 +134,32 @@ test('cli backend: resume never reports success after typing a chat slash comman
   assert.deepEqual(calls, [], 'resume must not send /resume and claim the queue was drained');
 });
 
-test('CLI PTY disposal requests graceful termination instead of hanging up the process', () => {
+test('CLI PTY disposal waits for its child and removes only that child PID lease', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'freebuff-pty-lease-'));
+  const originalHome = os.homedir;
+  const previousHome = process.env.HOME;
+  (os as unknown as { homedir: () => string }).homedir = () => home;
+  process.env.HOME = home;
+  const pid = 42137;
+  const leaseDir = path.join(home, '.config', 'manicode');
+  const leasePath = path.join(leaseDir, `freebuff-live-${pid}.json`);
+  await fs.mkdir(leaseDir, { recursive: true });
+  await fs.writeFile(leasePath, '{"pid":42137}');
   const manager = new CliPtyManager();
   const signals: string[] = [];
-  const session = {
-    term: { pid: 1, kill: (signal?: string) => { signals.push(signal ?? 'default'); }, write: () => undefined },
-    cwd: '/tmp/project', startedAt: Date.now(), output: '', screen: { text: () => '' }, exited: false,
-  };
+  let resolveExit!: () => void;
+  const exitPromise = new Promise<void>((resolve) => { resolveExit = resolve; });
+  const session = { term: { pid, kill: (signal?: string) => { signals.push(signal ?? 'default'); session.exited = true; resolveExit(); }, write: () => undefined }, cwd: '/tmp/project', startedAt: Date.now(), output: '', screen: { text: () => '' }, exited: false, exitPromise };
   (manager as unknown as { sessions: Map<string, unknown> }).sessions.set('pty-1', session);
-  manager.dispose();
-  assert.deepEqual(signals, ['SIGTERM']);
+  try {
+    await manager.dispose();
+    assert.deepEqual(signals, [process.platform === 'win32' ? 'default' : 'SIGTERM']);
+    await assert.rejects(fs.stat(leasePath), { code: 'ENOENT' });
+  } finally {
+    (os as unknown as { homedir: () => string }).homedir = originalHome;
+    if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+    await fs.rm(home, { recursive: true, force: true });
+  }
 });
 
 interface StubCall { id: string; text: string; cwd: string; conversationId?: string }

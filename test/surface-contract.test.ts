@@ -58,6 +58,26 @@ test('contract: stop_turn confirms the backend stop and the turn reports cancell
   assert.equal(turn.state, 'cancelled');
 });
 
+test('contract: start_thread can be stopped using its returned sessionId alone', async () => {
+  const stops: string[] = [];
+  const backend: FreebuffBackend = {
+    kind: 'desktop',
+    probe: async () => ({ backend: 'desktop', connection: 'connected_writable', authorization: 'write_authorized', liveProgress: 'connected', canCreateSession: true, canSendMessage: true, canStop: true, canResume: true, canSetModel: true, canSetReasoning: true, notes: [] }),
+    createSession: async ({ cwd }: { cwd: string }) => ({ id: 'h1', backend: 'desktop' as const, backendSessionId: 'thread-1', cwd }),
+    stop: async (session: { backendSessionId?: string }) => { stops.push(session.backendSessionId ?? ''); },
+    dispose: () => undefined,
+  } as unknown as FreebuffBackend;
+  const server = createV2ServerFromAdapter(adapterFor(backend));
+  const started = (await toolOf(server, 'start_thread').handler({ cwd: '/tmp/p' }, ctx)).structuredContent as { sessionId: string; threadId?: string };
+  assert.equal(started.threadId, 'thread-1');
+
+  const stopTool = (server as unknown as { _registeredTools: Record<string, { inputSchema: { shape: Record<string, { isOptional?: () => boolean }> }; handler: (args: unknown, ctx: unknown) => Promise<{ structuredContent?: Record<string, unknown> }> }> })._registeredTools.stop_thread!;
+  assert.equal(stopTool.inputSchema.shape.threadId?.isOptional?.(), true, 'threadId is optional when sessionId is supplied');
+  const stopped = await stopTool.handler({ sessionId: started.sessionId }, ctx);
+  assert.equal(stopped.structuredContent?.ok, true);
+  assert.deepEqual(stops, ['thread-1']);
+});
+
 test('contract: unproven work reports waiting, never completed', async () => {
   const backend: FreebuffBackend = {
     kind: 'desktop',

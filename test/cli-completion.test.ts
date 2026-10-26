@@ -112,7 +112,34 @@ test('cli completion: a post-submit assistant lastMessage proves completion with
       output: { type: 'lastMessage', value: [{ role: 'assistant', text: 'READY', sentAt: new Date().toISOString() }] },
     }), 'utf8');
     const result = await waiting;
-    assert.deepEqual(result, { state: 'completed', proven: true });
+    assert.deepEqual(result, { state: 'completed', proven: true, assistantMessage: 'READY' });
+  });
+});
+
+test('cli backend: completed turn output is assistant text, not the raw PTY redraw stream', async () => {
+  await withHome(async (home) => {
+    const cwd = path.join(home, 'proj');
+    const conv = 'conv-output-text';
+    await makeConv(home, cwd, conv, {
+      runState: { output: { type: 'lastMessage', value: [{ role: 'assistant', text: 'old', sentAt: new Date(Date.now() - 60_000).toISOString() }] } },
+      messages: [userMsg],
+    });
+    const backend = new CliBackend(cwd);
+    const manager = {
+      snapshot: () => ({ id: 'bridge-1', conversationId: conv, pid: 1234, output: '\u001b[2K spinner\r\u001b[2K READY', screenText: 'READY', exited: false }),
+      send: async () => {
+        const dir = path.join(home, '.config', 'manicode', 'projects', projectKey(cwd), 'chats', conv);
+        await fs.writeFile(path.join(dir, 'run-state.json'), JSON.stringify({ output: { type: 'lastMessage', value: [{ role: 'assistant', text: 'READY', sentAt: new Date().toISOString() }] } }));
+        return { id: 'bridge-1', conversationId: conv, pid: 1234, output: '\u001b[2K spinner\r\u001b[2K READY', screenText: 'READY', exited: false };
+      },
+      dispose: () => undefined,
+    };
+    (backend as unknown as { manager: unknown }).manager = manager;
+
+    const result = await backend.sendMessage({ session: { id: 'bridge-1', backend: 'cli', backendSessionId: conv, cwd }, text: 'reply READY' });
+    const output = (result.result as { output?: string } | undefined)?.output;
+    assert.equal(output, 'READY');
+    assert.doesNotMatch(output ?? '', /\u001b|spinner/);
   });
 });
 

@@ -181,14 +181,14 @@ export class CliBackend implements FreebuffBackend {
       // Emit coarse progress events derived from PTY output deltas.
       let currentOutput = snapshot.output;
       try { currentOutput = this.manager.snapshot(session.id).output; } catch { /* retain the send-time snapshot */ }
-      const output = currentOutput.slice(outputBefore);
-      this.emitPtyProgress(session, output, onEvent);
+      const ptyOutput = currentOutput.slice(outputBefore);
+      this.emitPtyProgress(session, ptyOutput, onEvent);
       const exited = snapshot.exited;
       const finalState = exited ? 'failed' : turnEnd.state;
       return {
         ...(activeConvId ? { backendTurnId: activeConvId } : {}),
         state: finalState,
-        result: redact({ output: output.slice(-20_000), conversationId: activeConvId, pid: snapshot.pid, completionProven: turnEnd.proven, ...(exited ? { exitCode: snapshot.exitCode } : {}) }),
+        result: redact({ output: turnEnd.assistantMessage?.slice(-20_000) ?? '', conversationId: activeConvId, pid: snapshot.pid, completionProven: turnEnd.proven, ...(exited ? { exitCode: snapshot.exitCode } : {}) }),
         ...(exited ? { error: `Freebuff CLI exited with code ${snapshot.exitCode ?? 'unknown'}.` } : turnEnd.error ? { error: turnEnd.error } : {}),
       };
     } catch (error) {
@@ -198,7 +198,7 @@ export class CliBackend implements FreebuffBackend {
     }
   }
 
-  private async waitForCliSubmissionWithoutConversation(sessionId: string, signal?: AbortSignal): Promise<{ state: 'failed' | 'rate_limited' | 'cancelled'; proven: boolean; error?: string }> {
+  private async waitForCliSubmissionWithoutConversation(sessionId: string, signal?: AbortSignal): Promise<{ state: 'failed' | 'rate_limited' | 'cancelled'; proven: boolean; error?: string; assistantMessage?: string }> {
     const deadline = Date.now() + 1_500;
     do {
       if (signal?.aborted) return { state: 'cancelled', proven: true };
@@ -414,8 +414,8 @@ export class CliBackend implements FreebuffBackend {
     return this.manager.snapshot(sessionId);
   }
 
-  dispose(): void {
-    this.manager.dispose();
+  async dispose(): Promise<void> {
+    await this.manager.dispose();
     this.sessions.clear();
   }
 }

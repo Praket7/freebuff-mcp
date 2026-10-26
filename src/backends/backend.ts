@@ -94,10 +94,11 @@ export class CompositeBackend implements FreebuffBackend {
       // used by selectFor(). A read-only Desktop still allows reads; writes
       // fall through to CLI when available.
       const writable = desktopCaps.connection === 'connected_writable';
+      const cliWriteAuthorized = cliCaps?.authorization === 'write_authorized';
       const merged: BackendCapabilities = {
         backend: 'desktop',
         connection: desktopCaps.connection,
-        authorization: desktopCaps.authorization,
+        authorization: writable || cliWriteAuthorized ? 'write_authorized' : desktopCaps.authorization,
         liveProgress: desktopCaps.liveProgress,
         lastEventAt: desktopCaps.lastEventAt,
         canCreateSession: writable || (cliCaps?.canCreateSession ?? false),
@@ -106,7 +107,7 @@ export class CompositeBackend implements FreebuffBackend {
         canResume: writable || (cliCaps?.canResume ?? false),
         canSetModel: writable || (cliCaps?.canSetModel ?? false),
         canSetReasoning: writable || (cliCaps?.canSetReasoning ?? false),
-        notes: [...desktopCaps.notes, ...(cliCaps ? cliCaps.notes : [])].filter(Boolean),
+        notes: [...desktopCaps.notes, ...(cliCaps ? cliCaps.notes : []), ...(cliWriteAuthorized && !writable ? ['Write authorization verified by the CLI backend.'] : [])].filter(Boolean),
       };
       // If Desktop is read-only but CLI is available, note the fallback
       if (!writable && cliCaps) {
@@ -291,8 +292,8 @@ export class CompositeBackend implements FreebuffBackend {
     return backend.onStreamHealth?.(listener) ?? (() => undefined);
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
     this.desktop.dispose();
-    this.cli.dispose();
+    await this.cli.dispose();
   }
 }

@@ -31,7 +31,7 @@ import type { BridgeEvent, BridgeEventType, BridgePhase } from './bridge/types.j
 export { discoverDesktopCandidate };
 
 export interface Runtime {
-  dispose?(): void;
+  dispose?(): void | Promise<void>;
   capabilities(): Promise<Capabilities>;
   listProjects(): Promise<ProjectSummary[]>;
   listThreads(projectId?: string): Promise<ThreadSummary[]>;
@@ -625,7 +625,7 @@ export class CliPtyRuntime implements Runtime {
 
   async setModel(id: string, model: string): Promise<Json> { return redact(await this.manager.send(id, `/model ${model}`, this.root, assertSafeId(id))) as Json; }
   async setReasoning(id: string, effort: string | null): Promise<Json> { return redact(await this.manager.send(id, `/reasoning ${effort ?? ''}`, this.root, assertSafeId(id))) as Json; }
-  dispose(): void { this.manager.dispose(); }
+  async dispose(): Promise<void> { await this.manager.dispose(); }
   async createSession(cwd: string): Promise<string> { return `cli-${createHash('sha256').update(path.resolve(cwd)).digest('hex').slice(0, 24)}-${Date.now()}`; }
 }
 
@@ -694,7 +694,7 @@ export class HybridRuntime implements Runtime {
   resume(id: string) { return this.desktop.capabilities().then((c) => c.readOnly ? Promise.reject(new Error('DESKTOP_THREAD_WRITE_REQUIRES_EXACT_CLI_SESSION')) : this.desktop.resume(id)); }
   setModel(id: string, m: string, h?: string) { return this.desktop.capabilities().then((c) => c.readOnly ? Promise.reject(new Error('DESKTOP_THREAD_WRITE_REQUIRES_EXACT_CLI_SESSION')) : this.desktop.setModel(id, m, h)); }
   setReasoning(id: string, e: string | null) { return this.desktop.capabilities().then((c) => c.readOnly ? Promise.reject(new Error('DESKTOP_THREAD_WRITE_REQUIRES_EXACT_CLI_SESSION')) : this.desktop.setReasoning(id, e)); }
-  dispose() { this.desktop.dispose(); this.cli.dispose(); }
+  async dispose() { this.desktop.dispose(); await this.cli.dispose(); }
   onProgress(listener: (threadId: string) => void): () => void { return this.desktop.onProgress?.(listener) ?? (() => undefined); }
   createSession(cwd: string): Promise<string> { return this.cli.createSession(cwd); }
 }

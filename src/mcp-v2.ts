@@ -159,7 +159,7 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
   write('start_thread', 'Create a bridge session backed by a real Freebuff identity.', { cwd: z.string().optional(), continueConversationId: id.optional() }, async (args) => shapeError(async () => {
     const cwd = typeof args.cwd === 'string' && args.cwd ? args.cwd : (process.env.FREEBUFF_PROJECT_ROOT ?? process.cwd());
     const session = await adapter.sessions.createSession({ cwd, ...(args.continueConversationId ? { continueBackendId: assertSafeId(args.continueConversationId) } : {}) });
-    return { ok: true, sessionId: session.id, backend: session.backend, backendSessionId: session.backendSessionId, backendHandleId: session.backendHandleId, state: session.state };
+    return { ok: true, sessionId: session.id, ...(session.backendSessionId ? { threadId: session.backendSessionId } : {}), backend: session.backend, backendSessionId: session.backendSessionId, backendHandleId: session.backendHandleId, state: session.state };
   }));
 
   write('send_message', 'Submit text to a bridge session without waiting for completion (async).', { sessionId: id.optional(), threadId: id.optional(), text: z.string().min(1).max(100000) }, async (args) => shapeError(async () => {
@@ -223,7 +223,8 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
     };
   }));
 
-  write('stop_thread', 'Stop a running Freebuff turn.', { threadId: id, sessionId: id.optional() }, async (args) => shapeError(async () => {
+  write('stop_thread', 'Stop a running Freebuff turn. Pass the sessionId returned by start_thread or a Freebuff threadId.', { threadId: id.optional(), sessionId: id.optional() }, async (args) => shapeError(async () => {
+    if (!args.sessionId && !args.threadId) throw new BridgeError(ErrorCodes.INVALID_INPUT, 'Pass the sessionId returned by start_thread or a Freebuff threadId.');
     // Resolve ownership exactly like set_model does: a bare thread id is
     // wrapped through registerExisting/resolveExisting so CLI conversations
     // stop on the CLI instead of being forced onto the Desktop.
@@ -437,17 +438,19 @@ async function resolveListedProjectRoot(backend: FreebuffBackend, projectId: str
   throw new BridgeError(ErrorCodes.INVALID_INPUT, 'Project not found in the current Freebuff project list.');
 }
 
-export function createDefaultAdapter(): V2Adapter & { dispose(): void } {
+export function createDefaultAdapter(): V2Adapter & { dispose(): Promise<void> } {
   const backend = new CompositeBackend();
   const sessions = new SessionManager(backend);
   const turns = new TurnManager(sessions);
-  return { backend, sessions, turns, dispose: () => { sessions.dispose(); backend.dispose(); } };
+  return { backend, sessions, turns, dispose: () => sessions.dispose() };
 }
 
 export async function runStdioV2(): Promise<void> {
   const adapter = createDefaultAdapter();
   const server = createV2ServerFromAdapter(adapter);
   const handle = serveStdio(() => server, { legacy: 'serve', maxSubscriptions: 64, onerror: (error) => console.error(error.message) });
-  const cleanup = () => { adapter.dispose(); void handle.close(); };
-  process.once('SIGINT', cleanup); process.once('SIGTERM', cleanup); process.once('exit', cleanup);
+  let shutdown: Promise<void> | undefined;
+  const cleanup = () => shutdown ??= (async () => { await adapter.dispose(); await handle.close(); })();
+  process.once('SIGINT', () => { void cleanup(); });
+  process.once('SIGTERM', () => { void cleanup(); });
 }

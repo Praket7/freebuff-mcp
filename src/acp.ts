@@ -162,16 +162,17 @@ export async function runAcp(): Promise<void> {
 
   const stream = ndJsonStream(Writable.toWeb(process.stdout) as unknown as WritableStream<Uint8Array>, Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>);
   const connection = app.connect(stream);
-  const cleanup = () => {
+  let shutdown: Promise<void> | undefined;
+  const cleanup = () => shutdown ??= (async () => {
     for (const session of acpSessions.values()) {
       session.controller.abort();
       void turns.cancelTurn(session.bridgeSessionId).catch(() => undefined);
     }
-    sessions.dispose();
+    await sessions.dispose();
     connection.close();
-  };
-  process.once('SIGINT', cleanup);
-  process.once('SIGTERM', cleanup);
+  })();
+  process.once('SIGINT', () => { void cleanup(); });
+  process.once('SIGTERM', () => { void cleanup(); });
 }
 
 export { isTerminalTurnState };

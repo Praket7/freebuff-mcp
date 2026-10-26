@@ -36,7 +36,7 @@ export function createServer(runtime: Runtime, includeWrites = true, allowedWrit
   if (allowedWrites.has('set_model')) write('set_model','Set the model for an existing thread when supported.',{threadId:z.string(),model:z.string().min(1),harnessId:z.string().optional()},(a)=>runtime.setModel(a.threadId,a.model,a.harnessId));
   if (allowedWrites.has('set_reasoning')) write('set_reasoning','Set the reasoning effort for an existing thread when supported.',{threadId:z.string(),effort:z.string().nullable()},(a)=>runtime.setReasoning(a.threadId,a.effort));
   return s; }
-export async function runStdio(){const runtime=await detectRuntime();const caps=await runtime.capabilities();const server=createServer(runtime,!caps.readOnly,writeNames(caps));const cleanup=()=>runtime.dispose?.();process.once('SIGINT',cleanup);process.once('SIGTERM',cleanup);process.once('exit',cleanup);await server.connect(new StdioServerTransport());}
+export async function runStdio(){const runtime=await detectRuntime();const caps=await runtime.capabilities();const server=createServer(runtime,!caps.readOnly,writeNames(caps));const transport=new StdioServerTransport();let shutdown:Promise<void>|undefined;const cleanup=()=>shutdown??=(async()=>{await runtime.dispose?.();await transport.close();})();process.once('SIGINT',()=>{void cleanup();});process.once('SIGTERM',()=>{void cleanup();});await server.connect(transport);}
 function isLoopback(host: string): boolean { return host === '127.0.0.1' || host === 'localhost' || host === '::1'; }
 function authorized(req: IncomingMessage): boolean {
   const expected = process.env.FREEBUFF_MCP_TOKEN;
@@ -137,11 +137,12 @@ export async function runHttp(): Promise<void> {
     }
   });
 
-  const cleanup = () => { adapter.dispose(); void mcpHandler.close().catch(() => undefined); };
-  httpServer.once('close', cleanup);
-  process.once('SIGINT', () => { cleanup(); httpServer.close(); });
-  process.once('SIGTERM', () => { cleanup(); httpServer.close(); });
-  process.once('exit', cleanup);
+  let shutdown: Promise<void> | undefined;
+  const cleanup = () => shutdown ??= (async () => { await adapter.dispose(); await mcpHandler.close().catch(() => undefined); })();
+  httpServer.once('close', () => { void cleanup(); });
+  const stop = () => { void cleanup(); httpServer.close(); };
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
 
   await new Promise<void>((resolve, reject) => { httpServer.once('error', reject); httpServer.listen(port, host, () => resolve()); });
   console.error(`freebuff-mcp HTTP listening on http://${host}:${port}/mcp`);
