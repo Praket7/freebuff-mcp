@@ -285,6 +285,8 @@ export interface FreebuffBackend {
   listThreads?(): Promise<unknown>;
   getThread?(backendSessionId: string): Promise<unknown>;
   getMessages?(backendSessionId: string): Promise<unknown>;
+  /** List attachment metadata when the owning backend exposes it. */
+  listAttachments?(backendSessionId: string): Promise<unknown>;
   /** True only when this backend can prove it owns the supplied real session id. */
   ownsSessionId?(backendSessionId: string): Promise<boolean>;
   /**

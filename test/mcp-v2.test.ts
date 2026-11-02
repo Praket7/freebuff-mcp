@@ -22,10 +22,90 @@ test('MCP v2 server exposes the stable guarded tool surface', () => {
   const server = createV2ServerFromAdapter(adapter);
   const tools = (server as unknown as { _registeredTools: Record<string, unknown> })._registeredTools;
   const names = Object.keys(tools).sort();
-  for (const expected of ['freebuff_status', 'get_freebuff_status', 'list_projects', 'list_threads', 'get_thread', 'get_thread_settings', 'get_thread_messages', 'get_active_work', 'get_turn', 'get_thread_progress', 'get_thread_progress_summary', 'watch_thread', 'watch_turn', 'watch_active_threads', 'list_project_files', 'read_project_file', 'get_project_file', 'list_thread_attachments', 'list_models', 'search_history', 'start_thread', 'create_thread', 'send_message', 'run_turn', 'stop_turn', 'stop_thread', 'resume_thread', 'set_model', 'set_reasoning', 'get_changed_files', 'get_diff', 'get_changes']) {
+  for (const expected of ['freebuff_status', 'get_freebuff_status', 'list_projects', 'list_threads', 'get_thread', 'get_thread_settings', 'get_thread_messages', 'get_thread_messages_page', 'get_active_work', 'get_turn', 'get_thread_progress', 'get_thread_progress_summary', 'watch_thread', 'watch_turn', 'watch_active_threads', 'list_project_files', 'read_project_file', 'get_project_file', 'list_thread_attachments', 'list_models', 'get_model_catalog_status', 'search_history', 'search_threads', 'search_thread_messages', 'start_thread', 'create_thread', 'send_message', 'run_turn', 'stop_turn', 'stop_thread', 'resume_thread', 'set_model', 'set_reasoning', 'get_changed_files', 'get_diff', 'get_changes']) {
     assert.ok(names.includes(expected), `missing tool ${expected}`);
   }
-  assert.equal(names.length, 32, `unexpected extra tools: ${names.join(', ')}`);
+  assert.equal(names.length, 36, `unexpected extra tools: ${names.join(', ')}`);
+});
+
+test('canonical search tools search visible threads and bounded messages accurately', async () => {
+  const backend = {
+    kind: 'desktop' as const,
+    probe: async () => ({ backend: 'desktop' as const, connection: 'connected_read_only' as const, authorization: 'none' as const, liveProgress: 'unavailable' as const, canCreateSession: false, canSendMessage: false, canStop: false, canResume: false, canSetModel: false, canSetReasoning: false, notes: [] }),
+    listThreads: async () => [{ id: 'thread-a', title: 'Build parser' }, { id: 'thread-b', title: 'Release notes' }],
+    getMessages: async () => [{ role: 'user', content: 'Please fix the parser' }, { role: 'assistant', content: 'Parser fixed' }, { role: 'user', content: 'Unrelated' }],
+    dispose: () => undefined,
+  } as unknown as CompositeBackend;
+  const sessions = new SessionManager(backend as unknown as FreebuffBackend);
+  const server = createV2ServerFromAdapter({ backend, sessions, turns: new TurnManager(sessions) });
+  const ctx = { mcpReq: { _meta: {}, signal: new AbortController().signal, notify: async () => undefined } };
+
+  const threads = await toolOf(server, 'search_threads').handler({ query: 'PARSER' }, ctx);
+  assert.deepEqual(threads.structuredContent, [{ id: 'thread-a', title: 'Build parser' }]);
+  const messages = await toolOf(server, 'search_thread_messages').handler({ threadId: 'thread-a', query: 'parser' }, ctx);
+  assert.equal((messages.structuredContent?.matches as unknown[]).length, 2);
+  assert.deepEqual((messages.structuredContent?.matches as Array<Record<string, unknown>>).map((match) => match.index), [0, 1]);
+  assert.equal((messages.structuredContent?.matches as Array<Record<string, unknown>>)[1]?.excerpt, 'Parser fixed');
+  assert.equal(messages.structuredContent?.truncated, false);
+  const page = await toolOf(server, 'get_thread_messages_page').handler({ threadId: 'thread-a', offset: 1, limit: 1 }, ctx);
+  assert.equal(page.structuredContent?.totalMessages, 3);
+  assert.equal(page.structuredContent?.hasMore, true);
+  assert.equal(page.structuredContent?.nextOffset, 2);
+  const pageSchema = (server as any)._registeredTools.get_thread_messages_page.outputSchema as { safeParse(value: unknown): { success: boolean } };
+  assert.equal(pageSchema.safeParse(page.structuredContent).success, true);
+});
+
+test('list_thread_attachments routes to the owner and reports unsupported capability', async () => {
+  const desktopCalls: string[] = [];
+  const desktop = { kind: 'desktop' as const, listAttachments: async (id: string) => { desktopCalls.push(`desktop:${id}`); return [{ name: 'image.png' }]; }, dispose: () => undefined };
+  const cli = { kind: 'cli' as const, dispose: () => undefined };
+  const backend = new CompositeBackend({ desktop, cli } as never);
+  backend.useExisting('cli', 'conversation-1', '/tmp/project');
+  const sessions = new SessionManager(backend);
+  const server = createV2ServerFromAdapter({ backend, sessions, turns: new TurnManager(sessions) });
+  const ctx = { mcpReq: { _meta: {}, signal: new AbortController().signal, notify: async () => undefined } };
+  const response = await toolOf(server, 'list_thread_attachments').handler({ threadId: 'conversation-1' }, ctx);
+  assert.equal(response.structuredContent?.ok, false);
+  assert.equal(response.structuredContent?.code, 'FREEBUFF_BACKEND_UNAVAILABLE');
+  assert.deepEqual(desktopCalls, [], 'a CLI conversation must never be read through Desktop');
+});
+
+test('write tools reject conflicting bridge and backend identities', async () => {
+  const backend = {
+    kind: 'desktop' as const,
+    probe: async () => ({ backend: 'desktop' as const, connection: 'connected_writable' as const, authorization: 'write_authorized' as const, liveProgress: 'unavailable' as const, canCreateSession: true, canSendMessage: true, canStop: true, canResume: true, canSetModel: true, canSetReasoning: true, notes: [] }),
+    createSession: async ({ cwd }: { cwd: string }) => ({ id: 'bridge-session', backend: 'desktop' as const, backendSessionId: 'thread-a', cwd }),
+    sendMessage: async () => ({ state: 'completed' as const }),
+    stop: async () => undefined,
+    dispose: () => undefined,
+  } as unknown as FreebuffBackend;
+  const sessions = new SessionManager(backend);
+  const session = await sessions.createSession({ cwd: '/tmp/project' });
+  const server = createV2ServerFromAdapter({ backend: backend as unknown as CompositeBackend, sessions, turns: new TurnManager(sessions) });
+  const ctx = { mcpReq: { _meta: {}, signal: new AbortController().signal, notify: async () => undefined } };
+  const send = await toolOf(server, 'send_message').handler({ sessionId: session.id, threadId: 'thread-b', text: 'do work' }, ctx);
+  assert.equal(send.structuredContent?.ok, false);
+  assert.equal(send.structuredContent?.code, 'FREEBUFF_INVALID_INPUT');
+  const stop = await toolOf(server, 'stop_thread').handler({ sessionId: session.id, threadId: 'thread-a' }, ctx);
+  assert.equal(stop.structuredContent?.ok, false);
+  assert.equal(stop.structuredContent?.code, 'FREEBUFF_INVALID_INPUT');
+  const resume = await toolOf(server, 'resume_thread').handler({ sessionId: session.id, threadId: 'thread-b' }, ctx);
+  assert.equal(resume.structuredContent?.ok, false);
+  assert.equal(resume.structuredContent?.code, 'FREEBUFF_INVALID_INPUT');
+});
+
+test('declared output schemas accept structured failures as well as successful results', async () => {
+  const backend = {
+    kind: 'desktop' as const,
+    probe: async () => { throw new Error('status probe failed'); },
+    dispose: () => undefined,
+  } as unknown as CompositeBackend;
+  const sessions = new SessionManager(backend as unknown as FreebuffBackend);
+  const server = createV2ServerFromAdapter({ backend, sessions, turns: new TurnManager(sessions) });
+  const response = await toolOf(server, 'get_freebuff_status').handler({}, undefined);
+  assert.equal(response.structuredContent?.ok, false);
+  const outputSchema = (server as any)._registeredTools.get_freebuff_status.outputSchema as { safeParse(value: unknown): { success: boolean } };
+  assert.equal(outputSchema.safeParse(response.structuredContent).success, true);
 });
 
 test('MCP v2 tools publish complete behavioral hints and described input fields', () => {

@@ -407,9 +407,6 @@ export class CliBackend implements FreebuffBackend {
     return [];
   }
 
-  /** The CLI chat store exposes no attachment listing. */
-  listAttachments(): Promise<unknown> { return Promise.resolve([]); }
-
   snapshot(sessionId: string): { id: string; conversationId?: string; pid: number; output: string; exited: boolean; exitCode?: number } {
     return this.manager.snapshot(sessionId);
   }

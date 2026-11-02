@@ -269,8 +269,21 @@ export class CompositeBackend implements FreebuffBackend {
 
   async getMessages(backendSessionId: string): Promise<Json> {
     const backend = await this.backendForReadId(backendSessionId);
-    if (!backend.getMessages) return [] as Json;
+    if (!backend.getMessages) throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, `The ${backend.kind} backend cannot read thread messages.`);
     return sanitizeFreebuff(await backend.getMessages(backendSessionId)) as Json;
+  }
+
+  /** Read attachments through the backend that owns the real thread id. */
+  async listAttachments(backendSessionId: string): Promise<Json> {
+    const backend = await this.backendForReadId(backendSessionId);
+    if (!backend.listAttachments) {
+      throw new BridgeError(
+        ErrorCodes.BACKEND_UNAVAILABLE,
+        `The ${backend.kind} backend does not expose attachment metadata.`,
+        'Use the Freebuff Desktop thread view to inspect attachments, or retry with a Desktop-owned thread.',
+      );
+    }
+    return sanitizeFreebuff(await backend.listAttachments(backendSessionId)) as Json;
   }
 
   private async readVia(method: 'listProjects' | 'listThreads', whenMissing: () => unknown, ...args: string[]): Promise<unknown> {

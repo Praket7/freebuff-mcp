@@ -26,9 +26,24 @@ const result = (value: unknown) => {
   };
 };
 const id = z.string().min(1).max(200);
+const toolErrorOutput = z.object({ ok: z.literal(false), code: z.string(), message: z.string(), recovery: z.string().optional() });
+const withToolErrorOutput = (schema: z.ZodType): z.ZodType => z.union([schema, toolErrorOutput]);
 
 const asObject = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+
+/** Extract user-visible message text without searching ids or transport metadata. */
+function messageText(value: unknown, depth = 0): string {
+  if (depth > 8) return '';
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return value.slice(0, 500).map((part) => messageText(part, depth + 1)).filter(Boolean).join('\n');
+  const record = asObject(value);
+  if (!record) return '';
+  return ['content', 'text', 'message', 'value', 'parts', 'segments']
+    .map((key) => messageText(record[key], depth + 1))
+    .filter(Boolean)
+    .join('\n');
+}
 
 interface DesktopChangesApi {
   getChanges(threadId: string, scope?: 'all' | 'uncommitted'): Promise<unknown>;
@@ -90,8 +105,8 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
     }),
   ) as z.ZodRawShape);
   const titleFor = (name: string) => name.split('_').map((part) => part[0]!.toUpperCase() + part.slice(1)).join(' ');
-  const read = (name: string, description: string, inputSchema: z.ZodRawShape, fn: (args: any) => Promise<unknown>, openWorldHint = true, outputSchema?: z.ZodType) => server.registerTool(name, { title: titleFor(name), description, inputSchema: describeInputs(inputSchema), ...(outputSchema ? { outputSchema } : {}), annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint } }, async (args) => result(await fn(args ?? {})));
-  const write = (name: string, description: string, inputSchema: z.ZodRawShape, fn: (args: any, ctx: { signal: AbortSignal; progressToken: unknown; progress: (message: string) => Promise<void>; notifyProgress: (params: { progressToken: unknown; progress: number; message: string }) => Promise<void> }) => Promise<unknown>, hints: { destructiveHint?: boolean; idempotentHint?: boolean; outputSchema?: z.ZodType } = {}) => server.registerTool(name, { title: titleFor(name), description, inputSchema: describeInputs(inputSchema), ...(hints.outputSchema ? { outputSchema: hints.outputSchema } : {}), annotations: { readOnlyHint: false, destructiveHint: hints.destructiveHint ?? false, idempotentHint: hints.idempotentHint ?? false, openWorldHint: true } }, async (args, ctx) => {
+  const read = (name: string, description: string, inputSchema: z.ZodRawShape, fn: (args: any) => Promise<unknown>, openWorldHint = true, outputSchema?: z.ZodType) => server.registerTool(name, { title: titleFor(name), description, inputSchema: describeInputs(inputSchema), ...(outputSchema ? { outputSchema: withToolErrorOutput(outputSchema) } : {}), annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint } }, async (args) => result(await fn(args ?? {})));
+  const write = (name: string, description: string, inputSchema: z.ZodRawShape, fn: (args: any, ctx: { signal: AbortSignal; progressToken: unknown; progress: (message: string) => Promise<void>; notifyProgress: (params: { progressToken: unknown; progress: number; message: string }) => Promise<void> }) => Promise<unknown>, hints: { destructiveHint?: boolean; idempotentHint?: boolean; outputSchema?: z.ZodType } = {}) => server.registerTool(name, { title: titleFor(name), description, inputSchema: describeInputs(inputSchema), ...(hints.outputSchema ? { outputSchema: withToolErrorOutput(hints.outputSchema) } : {}), annotations: { readOnlyHint: false, destructiveHint: hints.destructiveHint ?? false, idempotentHint: hints.idempotentHint ?? false, openWorldHint: true } }, async (args, ctx) => {
     const progressToken = (ctx.mcpReq._meta as { progressToken?: unknown } | undefined)?.progressToken;
     return result(await fn(args ?? {}, {
       signal: ctx.mcpReq.signal,
@@ -163,7 +178,18 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
       unavailableFields: settingFields.filter((field) => !availableFields.includes(field)),
     };
   }), true, threadSettingsOutput);
-  read('get_thread_messages', 'Read messages that the selected Freebuff backend exposes for one thread. Use get_thread for metadata; message history may be unavailable when the backend does not provide it.', { threadId: id }, (args) => shapeError(() => adapter.backend.getMessages(assertSafeId(args.threadId))));
+  read('get_thread_messages', 'Read all messages that the selected Freebuff backend exposes for one thread. Large conversations can produce large results; use get_thread_messages_page for bounded paging.', { threadId: id }, (args) => shapeError(() => adapter.backend.getMessages(assertSafeId(args.threadId))));
+  const messagePageOutput = z.object({ ok: z.literal(true), threadId: z.string(), messages: z.array(z.unknown()), offset: z.number().int(), limit: z.number().int(), totalMessages: z.number().int(), hasMore: z.boolean(), nextOffset: z.number().int().nullable() });
+  read('get_thread_messages_page', 'Read a bounded page of messages from one thread. Continue with the returned nextOffset while hasMore is true; use get_thread_messages to retrieve the full history in one response.', { threadId: id, offset: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(200).optional() }, (args) => shapeError(async () => {
+    const threadId = assertSafeId(args.threadId);
+    const data = await adapter.backend.getMessages(threadId);
+    if (!Array.isArray(data)) throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, 'Freebuff returned an unreadable message list for this thread.');
+    const offset = args.offset ?? 0;
+    const limit = args.limit ?? 50;
+    const messages = data.slice(offset, offset + limit);
+    const nextOffset = offset + messages.length;
+    return { ok: true, threadId, messages, offset, limit, totalMessages: data.length, hasMore: nextOffset < data.length, nextOffset: nextOffset < data.length ? nextOffset : null };
+  }), true, messagePageOutput);
   read('get_active_work', 'Find visible threads whose reported turn state is not idle or terminal. Returns an empty list when no active work is visible; use list_threads to include idle threads.', {}, () => shapeError(async () => {
     await requireSessions();
     const threads = await adapter.backend.listThreads();
@@ -205,9 +231,9 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
   });
   read('get_project_file', 'Read one safe, redacted file inside a project returned by list_projects. The path must stay inside that project root.', { projectId: id, path: z.string() }, readProjectFile);
   read('read_project_file', 'Compatibility name for get_project_file. Reads one safe, redacted file inside a project returned by list_projects.', { projectId: id, path: z.string() }, readProjectFile);
-  read('list_thread_attachments', 'List attachment metadata the Desktop exposes for one thread. This returns metadata only and does not download attachment contents.', { threadId: id }, (args) => shapeError(() => adapter.backend.desktop.listAttachments(assertSafeId(args.threadId))));
+  read('list_thread_attachments', 'List attachment metadata exposed by the backend that owns this thread. Returns metadata only and does not download attachment contents; the CLI currently does not expose attachments.', { threadId: id }, (args) => shapeError(() => adapter.backend.listAttachments(assertSafeId(args.threadId))));
   const modelCatalogStatusOutput = z.object({ ok: z.literal(true), catalogAvailable: z.literal(false), backend: z.string(), connection: z.string(), note: z.string() });
-  read('list_models', 'Check whether this Freebuff installation exposes a standalone model catalog. The current Desktop and CLI backends do not enumerate models; use get_thread_settings to read a selected thread or set_model to request a change.', {}, () => shapeError(async () => {
+  const getModelCatalogStatus = () => shapeError(async () => {
     // The Desktop exposes no model-catalog route, and getThread('') is an
     // invalid id that must never be called. Report honestly what is known.
     const caps = await requireSessions();
@@ -218,12 +244,43 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
       connection: caps.connection,
       note: 'The installed Freebuff backends expose no standalone model-catalog route. Use get_thread_settings to read the current thread model and set_model to request a change.',
     };
-  }), true, modelCatalogStatusOutput);
-  read('search_history', 'Search serialized metadata for visible Freebuff threads using a case-insensitive substring. This does not search message bodies or hidden local history files.', { query: z.string().min(1).max(200) }, (args) => shapeError(async () => {
+  });
+  read('get_model_catalog_status', 'Check whether this Freebuff installation exposes a standalone model catalog. The current Desktop and CLI backends do not enumerate models; use get_thread_settings to read a selected thread or set_model to request a change.', {}, getModelCatalogStatus, true, modelCatalogStatusOutput);
+  read('list_models', 'Compatibility name for get_model_catalog_status. Reports whether this installation can enumerate models; it does not return a model list.', {}, getModelCatalogStatus, true, modelCatalogStatusOutput);
+  const searchThreads = (args: { query: string }) => shapeError(async () => {
     await requireSessions();
     const threads = await adapter.backend.listThreads();
     const q = args.query.toLowerCase();
     return (Array.isArray(threads) ? threads : []).filter((t) => JSON.stringify(t).toLowerCase().includes(q)).slice(0, 100);
+  });
+  read('search_threads', 'Search visible Freebuff thread metadata using a case-insensitive substring. This does not search message bodies or hidden local history files.', { query: z.string().trim().min(1).max(200) }, searchThreads);
+  read('search_history', 'Compatibility name for search_threads. Searches visible thread metadata, not conversation messages or hidden local history files.', { query: z.string().trim().min(1).max(200) }, searchThreads);
+  read('search_thread_messages', 'Search messages exposed for one thread. Returns matching message excerpts only, capped at the requested limit; it does not search other threads or hidden history.', { threadId: id, query: z.string().trim().min(1).max(200), limit: z.number().int().min(1).max(50).optional() }, (args) => shapeError(async () => {
+    const messages = await adapter.backend.getMessages(assertSafeId(args.threadId));
+    if (!Array.isArray(messages)) throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, 'Freebuff returned an unreadable message list for this thread.');
+    const query = args.query.toLocaleLowerCase();
+    const scanned = messages.slice(0, 10_000);
+    const maxMatches = args.limit ?? 20;
+    const matches: Array<{ index: number; role?: string; timestamp?: string; excerpt: string }> = [];
+    let totalMatches = 0;
+    for (let index = 0; index < scanned.length; index += 1) {
+      const raw = scanned[index];
+      const text = messageText(raw).slice(0, 100_000);
+      const offset = text.toLocaleLowerCase().indexOf(query);
+      if (offset < 0) continue;
+      totalMatches += 1;
+      if (matches.length >= maxMatches) continue;
+      const message = asObject(raw);
+      const start = Math.max(0, offset - 250);
+      const excerpt = String(redact(text.slice(start, Math.min(text.length, offset + query.length + 750))));
+      matches.push({
+        index,
+        ...(typeof message?.role === 'string' ? { role: message.role } : {}),
+        ...(typeof message?.sentAt === 'string' ? { timestamp: message.sentAt } : typeof message?.timestamp === 'string' ? { timestamp: message.timestamp } : {}),
+        excerpt,
+      });
+    }
+    return { ok: true, threadId: args.threadId, query: args.query, matches, matchesInScannedMessages: totalMatches, scannedMessages: scanned.length, totalMessages: messages.length, truncated: totalMatches > matches.length || messages.length > scanned.length };
   }));
 
   // --- Session/turn lifecycle ---
@@ -240,7 +297,7 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
   write('create_thread', 'Create a bridge session in the selected project, or attach to an existing Freebuff conversation. The result includes a sessionId and, when provided by Freebuff, a threadId.', createThreadSchema, createThread, { outputSchema: createThreadOutput });
   write('start_thread', 'Compatibility name for create_thread. Creates a bridge session or attaches to an existing conversation and returns the identifiers needed by later tools.', createThreadSchema, createThread, { outputSchema: createThreadOutput });
 
-  write('send_message', 'Queue a request on an existing bridge session and return immediately with a turnId. Poll get_turn or watch_turn for progress and the final result; Freebuff may edit files or run commands.', { sessionId: id.optional(), threadId: id.optional(), text: z.string().min(1).max(100000) }, async (args) => shapeError(async () => {
+  write('send_message', 'Queue a request on an existing bridge session and return immediately with a turnId. Pass sessionId or threadId, or omit both to create a session in the configured project. Poll get_turn or watch_turn for progress and the final result; Freebuff may edit files or run commands.', { sessionId: id.optional(), threadId: id.optional(), text: z.string().min(1).max(100000) }, async (args) => shapeError(async () => {
     const sessionId = await resolveSessionId(adapter, args);
     const { turnId, done } = adapter.turns.startTurnDetached(sessionId, { text: args.text });
     void done.catch(() => undefined);
@@ -248,7 +305,7 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
     return { ok: true, turnId, sessionId, state: turn.state, note: 'Poll get_turn or watch_turn with this turnId for progress and the final result.' };
   }), { destructiveHint: true });
 
-  write('run_turn', 'Send a request to Freebuff and wait for a terminal turn result while reporting MCP progress. Cancellation asks the owning backend to stop; the result distinguishes confirmed stops, waiting states, and rate limits. Freebuff may edit files or run commands.', { sessionId: id.optional(), threadId: id.optional(), text: z.string().min(1).max(100000) }, async (args, ctx) => shapeError(async () => {
+  write('run_turn', 'Send a request to Freebuff and wait for a terminal turn result while reporting MCP progress. Pass sessionId or threadId, or omit both to create a session in the configured project. Cancellation asks the owning backend to stop; the result distinguishes confirmed stops, waiting states, and rate limits. Freebuff may edit files or run commands.', { sessionId: id.optional(), threadId: id.optional(), text: z.string().min(1).max(100000) }, async (args, ctx) => shapeError(async () => {
     const sessionId = await resolveSessionId(adapter, args);
     const controller = new AbortController();
     const onClientAbort = () => controller.abort();
@@ -303,6 +360,7 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
 
   write('stop_thread', 'Ask Freebuff to stop work for a bridge session or known thread. Supply sessionId or threadId; stopping an unknown thread requires creating or attaching a bridge session first.', { threadId: id.optional(), sessionId: id.optional() }, async (args) => shapeError(async () => {
     if (!args.sessionId && !args.threadId) throw new BridgeError(ErrorCodes.INVALID_INPUT, 'Pass the sessionId returned by start_thread or a Freebuff threadId.');
+    if (args.sessionId && args.threadId) throw new BridgeError(ErrorCodes.INVALID_INPUT, 'Pass either sessionId or threadId, not both.');
     // Resolve ownership exactly like set_model does: a bare thread id is
     // wrapped through registerExisting/resolveExisting so CLI conversations
     // stop on the CLI instead of being forced onto the Desktop.
@@ -315,6 +373,11 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
 
   write('resume_thread', 'Ask the owning Freebuff backend to resume a paused thread. For CLI conversations outside the current project, pass the original cwd. Resume may continue work that edits files or runs commands, and uncertain outcomes remain marked as unconfirmed.', { threadId: id, sessionId: id.optional(), cwd: z.string().min(1).max(4096).optional() }, async (args) => shapeError(async () => {
     const threadId = assertSafeId(args.threadId);
+    if (args.sessionId) {
+      const bySession = adapter.sessions.getSession(assertSafeId(args.sessionId));
+      if (!bySession) throw new BridgeError(ErrorCodes.SESSION_NOT_FOUND, `Unknown bridge session ${args.sessionId}.`, 'Call create_thread first.');
+      if (bySession.backendSessionId && bySession.backendSessionId !== threadId) throw new BridgeError(ErrorCodes.INVALID_INPUT, 'The sessionId and threadId refer to different conversations.');
+    }
     const cwd = args.cwd ?? process.env.FREEBUFF_PROJECT_ROOT ?? process.cwd();
     // `threadId` is the required argument: resolve ownership through the same
     // registerExisting/resolveExisting path as set_model, so a CLI
@@ -480,6 +543,9 @@ function describeEvent(type: string, message?: string, tool?: string, phase?: st
 }
 
 async function resolveSessionId(adapter: V2Adapter, args: { sessionId?: unknown; threadId?: unknown }): Promise<string> {
+  if (typeof args.sessionId === 'string' && args.sessionId && typeof args.threadId === 'string' && args.threadId) {
+    throw new BridgeError(ErrorCodes.INVALID_INPUT, 'Pass either sessionId or threadId, not both.');
+  }
   if (typeof args.sessionId === 'string' && args.sessionId) {
     const session = adapter.sessions.getSession(args.sessionId);
     if (session) return session.id;

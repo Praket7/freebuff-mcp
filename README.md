@@ -39,16 +39,18 @@ The automatic write option adds the entry to your app settings. It preserves oth
 
 ## What you can ask it to do
 
-The bridge can find projects and threads, read thread messages, start a request, continue earlier work, show live progress, stop a turn, resume a paused thread, change model settings, inspect changed files, read project files, and list attachments.
+The bridge can find projects and threads, search visible thread metadata or one thread's messages, read thread messages in full or in pages, start a request, continue earlier work, show live progress, stop a turn, resume a paused thread, change model settings, inspect changed files, and read project files. Attachment metadata is available when the owning backend exposes it.
 
 The tools are grouped around the work you can do:
 
-- Find projects and threads with `list_projects`, `list_threads`, and `get_active_work`. Read one thread with `get_thread`, `get_thread_messages`, or `get_thread_settings`.
+- Find projects and threads with `list_projects`, `list_threads`, `search_threads`, and `get_active_work`. Search one conversation with `search_thread_messages`. Read a thread with `get_thread`, `get_thread_settings`, or `get_thread_messages`. Use `get_thread_messages_page` for bounded results and continue with its `nextOffset` while `hasMore` is true.
 - Read files with `list_project_files` and `get_project_file`. The older `read_project_file` name remains available. Thread attachment metadata is available through `list_thread_attachments`.
 - Start or attach to a session with `create_thread`. The older `start_thread` name remains available. Send a request with `send_message` and follow it with `get_turn` or `watch_turn`, or use `run_turn` to wait for its result.
 - Follow work with `get_thread_progress`, `watch_thread`, `get_thread_progress_summary`, and `watch_active_threads`. Review changed paths and Desktop diffs with `get_changed_files`, `get_changes`, and `get_diff`.
 - Stop work with `stop_turn` or `stop_thread`, resume with `resume_thread`, and request model or reasoning changes with `set_model` and `set_reasoning`. `get_freebuff_status` reports connection, authorization, and actions the bridge supports. The older `freebuff_status` name remains available.
-- `search_history` searches visible thread metadata. `list_models` reports whether the installed backend exposes a model catalog. Current Freebuff backends do not provide that catalog, so use `get_thread_settings` for the model already selected on a thread. Freebuff still controls which models your account can use.
+- `search_history` remains available as a compatibility name for `search_threads`. `list_models` remains available as a compatibility name for `get_model_catalog_status`. Current Freebuff backends do not provide a standalone model catalog, so use `get_thread_settings` for the model reported on a thread. Freebuff still controls which models your account can use.
+
+The bridge keeps compatibility names for existing clients. New integrations should use `get_freebuff_status`, `get_project_file`, `create_thread`, `search_threads`, and `get_model_catalog_status` as the canonical names.
 
 MCP tool definitions include parameter descriptions and explicit read, write, repeatability, and external-system hints. Agent-run tools are marked as potentially destructive because Freebuff may edit files or run commands. A backend may omit settings it cannot report; the settings tool lists those fields as unavailable instead of guessing. Project creation and thread deletion are not exposed because the supported Freebuff interfaces do not provide verified operations for them.
 

@@ -64,6 +64,18 @@ test('composite backend: a backend without model support fails with a structured
   );
 });
 
+test('composite backend: missing message support is an explicit error, not an empty conversation', async () => {
+  const composite = new CompositeBackend({
+    desktop: { kind: 'desktop' as const, dispose: () => undefined },
+    cli: { kind: 'cli' as const, dispose: () => undefined },
+  } as never);
+  composite.useExisting('desktop', 'thread-no-messages-api', '/tmp/project');
+  await assert.rejects(
+    () => composite.getMessages('thread-no-messages-api'),
+    (error: unknown) => (error as { name?: string }).name === 'BridgeError' && /cannot read thread messages/.test((error as Error).message),
+  );
+});
+
 test('desktop event mapping: types map to bridge events without fabricating text', () => {
   const mapped = mapDesktopEvent({ threadId: 'th1', type: 'assistant_update', text: 'partial answer' }, undefined);
   assert.equal(mapped?.type, 'assistant_delta');
