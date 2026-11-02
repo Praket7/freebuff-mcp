@@ -25,6 +25,26 @@ test('redacts password lines, PEM keys, nested transcript text, errors, and URLs
   const clean = redact({ messages: [{ text: 'passwd: SYNTHETIC_PASSWD' }], error: 'password=SYNTHETIC_ERROR', url: 'https://example.test/?pwd=SYNTHETIC_URL' });
   assert.doesNotMatch(JSON.stringify(clean), /SYNTHETIC_(PASSWD|ERROR|URL)/);
 });
+test('redacts prefixed credential keys and quoted values containing spaces without leaking suffixes', () => {
+  const secrets = [
+    'OPENAI_API_KEY=SYNTHETIC_OPENAI_KEY',
+    'AWS_SECRET_ACCESS_KEY=SYNTHETIC_AWS_SECRET',
+    'GITHUB_TOKEN=SYNTHETIC_GITHUB_TOKEN',
+    'password = "SYNTHETIC_PASSWORD with spaces"',
+    '"client_secret": "SYNTHETIC_CLIENT_SECRET with spaces",',
+    'note=value with spaces',
+  ].join('\n');
+  const clean = safeTextContent(Buffer.from(secrets), 'config.example');
+  assert.doesNotMatch(clean, /SYNTHETIC_/);
+  assert.match(clean, /OPENAI_API_KEY=\[REDACTED\]/);
+  assert.match(clean, /AWS_SECRET_ACCESS_KEY=\[REDACTED\]/);
+  assert.match(clean, /GITHUB_TOKEN=\[REDACTED\]/);
+  assert.match(clean, /password\s*=\s*"\[REDACTED\]"/);
+  assert.match(clean, /"client_secret": "\[REDACTED\]",/);
+  assert.match(clean, /note=value with spaces/);
+  const structured = redact({ OPENAI_API_KEY: 'SYNTHETIC_OBJECT_KEY', AWS_SECRET_ACCESS_KEY: 'SYNTHETIC_OBJECT_SECRET' });
+  assert.doesNotMatch(JSON.stringify(structured), /SYNTHETIC_/);
+});
 test('protected file rules cover common credential files and directories', () => {
   for (const name of ['.git-credentials', '.aws', '.ssh', '.gnupg', '.azure', '.kube', '.docker', '.npmrc', 'id_ed25519', 'client.pem']) {
     assert.equal(blocked.test(name), true, `${name} should be protected`);

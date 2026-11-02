@@ -6,10 +6,12 @@ export const MAX_READ_BYTES = 1_000_000;
 
 // Key-name based redaction: any key that looks credential-like.
 const SENSITIVE_KEY = /^(authorization|proxy-authorization|www-authenticate|bearer|access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|apikey|api-key|client[_-]?secret|private[_-]?key|secret|secret[_-]?key|password|passwd|pwd|cookie|set-cookie|session[_-]?token|auth[_-]?token|fingerprinthash|x-api-key|x-auth-token|x-csrf-token|csrf)$/i;
-const SENSITIVE_KEY_SUBSTRING = /token|secret|password|cookie|credential|authkey|privatekey|fingerprint/i;
+const SENSITIVE_KEY_SUBSTRING = /token|secret|password|cookie|credential|authkey|privatekey|fingerprint|api[_-]?key|access[_-]?key/i;
 
 // Value-pattern based redaction for strings.
 const secretText = /(authorization\s*[:=]\s*|bearer\s+|(?:access|refresh|id)[_-]?token\s*["']?\s*[:=]\s*["']?|api[_-]?key\s*["']?\s*[:=]\s*["']?|client[_-]?secret\s*["']?\s*[:=]\s*["']?|private[_-]?key\s*[:=]\s*|cookie\s*[:=]\s*|session[_-]?token\s*[:=]\s*|(?:pass(?:word|wd|phrase)?|pwd)\s*[:=]\s*["']?)[^\s,;'"}]+/gi;
+const secretAssignment = /(^|[\s,{;])(["']?)([A-Za-z_][A-Za-z0-9_.-]*)(["']?)(\s*[:=]\s*)(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|([^\r\n,}]+))/g;
+const sensitiveAssignmentKey = /(?:^|[_-])(?:authorization|proxy[_-]?authorization|www[_-]?authenticate|api[_-]?key|access[_-]?key|refresh[_-]?token|id[_-]?token|auth[_-]?token|session[_-]?token|token|secret|password|passwd|pwd|credential|private[_-]?key|cookie|signature|signing[_-]?key|client[_-]?secret)$/i;
 // Query-string tokens (e.g. ?token=..., &api_key=...) when recognizable.
 const queryStringToken = /([?&](?:token|access_token|refresh_token|api_key|apikey|api-key|key|secret|password|passwd|passphrase|pwd|sig|signature|session)")[^&\s"']*/gi;
 const queryStringToken2 = /([?&](?:token|access_token|refresh_token|api_key|apikey|api-key|key|secret|password|passwd|passphrase|pwd|sig|signature|session)=)[^&\s"']+/gi;
@@ -17,7 +19,12 @@ const bearerHeader = /bearer\s+[\w.\-~+/=]{8,}/gi;
 
 export function redactString(value: string): string {
   let out = value.replace(bearerHeader, 'Bearer [REDACTED]');
-  out = out.replace(secretText, (match) => `${match.split(/[:=]/)[0]?.trim() ?? match}=[REDACTED]`);
+  out = out.replace(secretAssignment, (match, prefix: string, keyQuote: string, key: string, closingQuote: string, separator: string, doubleQuotedValue?: string, singleQuotedValue?: string) => {
+    if (!sensitiveAssignmentKey.test(key)) return match;
+    const redactedValue = doubleQuotedValue !== undefined ? '"[REDACTED]"' : singleQuotedValue !== undefined ? "'[REDACTED]'" : '[REDACTED]';
+    return `${prefix}${keyQuote}${key}${closingQuote}${separator}${redactedValue}`;
+  });
+  out = out.replace(secretText, (match) => match.includes('[REDACTED]') ? match : `${match.split(/[:=]/)[0]?.trim() ?? match}=[REDACTED]`);
   out = out.replace(/-----BEGIN ((?:[A-Z0-9]+ )*PRIVATE KEY)-----[\s\S]*?-----END \1-----/g, (_match, label: string) => `-----BEGIN ${label}-----[REDACTED]-----END ${label}-----`);
   out = out.replace(queryStringToken, '$1[REDACTED]');
   out = out.replace(queryStringToken2, '$1[REDACTED]');
