@@ -60,5 +60,11 @@
     "@types/node": "^24.19.2",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3"
+  },
+  "pnpm": {
+    "overrides": {
+      "@hono/node-server": "2.1.5",
+      "express-rate-limit": "8.7.2"
+    }
   }
 }
