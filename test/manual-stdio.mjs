@@ -37,7 +37,11 @@ const tools = await rpc('tools/list', {});
 const toolDefinitions = tools.result.tools;
 const names = toolDefinitions.map((t) => t.name);
 console.log('tools:', names.length);
-if (names.length !== 32) { console.error(`Expected 32 MCP v2 tools, received ${names.length}`); process.exit(1); }
+const requiredTools = ['get_model_catalog_status', 'search_threads', 'search_thread_messages', 'get_thread_messages_page'];
+if (names.length !== 36) { console.error(`Expected 36 MCP v2 tools, received ${names.length}`); process.exit(1); }
+for (const name of requiredTools) {
+  if (!names.includes(name)) { console.error(`Missing MCP v2 tool ${name}`); process.exit(1); }
+}
 for (const tool of toolDefinitions) {
   for (const hint of ['readOnlyHint', 'destructiveHint', 'idempotentHint', 'openWorldHint']) {
     if (typeof tool.annotations?.[hint] !== 'boolean') { console.error(`${tool.name} is missing boolean ${hint}`); process.exit(1); }
