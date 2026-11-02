@@ -4,3 +4,7 @@ packages:
 allowBuilds:
   esbuild: true
   node-pty: true
+
+overrides:
+  "@hono/node-server": 2.1.5
+  express-rate-limit: 8.7.2
