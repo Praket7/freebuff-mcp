@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.7 (2026-11-02)
+
+- Add action-oriented `get_freebuff_status`, `get_project_file`, and `create_thread` names while preserving their existing names as compatibility aliases.
+- Add `get_thread_settings` to read model, harness, and reasoning effort when reported by the backend, with unavailable fields made explicit.
+- Add display titles, parameter descriptions, complete MCP behavior annotations, and stable output schemas where the bridge can guarantee the result shape. Mark agent-run tools as potentially destructive because Freebuff may edit files or run commands.
+- Report that this Freebuff integration cannot enumerate a user-specific model catalog; model availability and entitlement remain controlled by Freebuff.
+- Clarify that project creation and thread deletion are not exposed because the supported Freebuff interfaces do not provide verified operations for them.
+
 ## 0.2.6 (2026-10-26)
 
 - Return the assistant's stored reply from CLI-backed `run_turn` instead of the raw PTY screen transcript.

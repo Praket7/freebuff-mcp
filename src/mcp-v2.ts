@@ -63,8 +63,35 @@ export interface V2Adapter {
 
 export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
   const server = new McpServer({ name: 'freebuff-mcp', version: VERSION, description: 'Freebuff MCP v2 interoperability surface' });
-  const read = (name: string, description: string, inputSchema: z.ZodRawShape, fn: (args: any) => Promise<unknown>) => server.registerTool(name, { description, inputSchema: z.object(inputSchema), annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } }, async (args) => result(await fn(args ?? {})));
-  const write = (name: string, description: string, inputSchema: z.ZodRawShape, fn: (args: any, ctx: { signal: AbortSignal; progressToken: unknown; progress: (message: string) => Promise<void>; notifyProgress: (params: { progressToken: unknown; progress: number; message: string }) => Promise<void> }) => Promise<unknown>) => server.registerTool(name, { description, inputSchema: z.object(inputSchema), annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false } }, async (args, ctx) => {
+  const inputDescriptions: Record<string, string> = {
+    projectId: 'Project id or exact project path returned by list_projects.',
+    threadId: 'Freebuff thread id returned by list_threads or create_thread.',
+    sessionId: 'Bridge session id returned by create_thread.',
+    turnId: 'Turn id returned by send_message or run_turn.',
+    cwd: 'Absolute project directory to use as the session working directory.',
+    continueConversationId: 'Existing Freebuff conversation id to attach this bridge session to.',
+    text: 'Request text to send to Freebuff. The agent may edit project files or run commands.',
+    model: 'Exact model id accepted by the selected Freebuff thread.',
+    harnessId: 'Freebuff harness id to pair with the selected model, when needed.',
+    effort: 'Reasoning effort accepted by the selected Freebuff thread; null clears the override.',
+    path: 'Path relative to the selected project root. Absolute paths and escapes are rejected.',
+    relative: 'Optional directory path relative to the selected project root.',
+    scope: 'Change range to inspect. all includes the full thread history; uncommitted limits results to current uncommitted work.',
+    file: 'Optional exact changed-file path to limit diff output.',
+    query: 'Case-insensitive text to find in visible thread metadata, limited to 200 characters.',
+    afterSequence: 'Return events after this sequence number; use the last received sequence to continue paging.',
+    limit: 'Maximum number of events to return, from 1 to 100.',
+    timeoutMs: 'Maximum time to wait in milliseconds, from 0 to 30000.',
+  };
+  const describeInputs = (shape: z.ZodRawShape): z.ZodObject<z.ZodRawShape> => z.object(Object.fromEntries(
+    Object.entries(shape).map(([key, schema]) => {
+      const typed = schema as z.ZodType;
+      return [key, typed.description ? schema : typed.describe(inputDescriptions[key] ?? `Value for ${key}.`) as unknown as typeof schema];
+    }),
+  ) as z.ZodRawShape);
+  const titleFor = (name: string) => name.split('_').map((part) => part[0]!.toUpperCase() + part.slice(1)).join(' ');
+  const read = (name: string, description: string, inputSchema: z.ZodRawShape, fn: (args: any) => Promise<unknown>, openWorldHint = true, outputSchema?: z.ZodType) => server.registerTool(name, { title: titleFor(name), description, inputSchema: describeInputs(inputSchema), ...(outputSchema ? { outputSchema } : {}), annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint } }, async (args) => result(await fn(args ?? {})));
+  const write = (name: string, description: string, inputSchema: z.ZodRawShape, fn: (args: any, ctx: { signal: AbortSignal; progressToken: unknown; progress: (message: string) => Promise<void>; notifyProgress: (params: { progressToken: unknown; progress: number; message: string }) => Promise<void> }) => Promise<unknown>, hints: { destructiveHint?: boolean; idempotentHint?: boolean; outputSchema?: z.ZodType } = {}) => server.registerTool(name, { title: titleFor(name), description, inputSchema: describeInputs(inputSchema), ...(hints.outputSchema ? { outputSchema: hints.outputSchema } : {}), annotations: { readOnlyHint: false, destructiveHint: hints.destructiveHint ?? false, idempotentHint: hints.idempotentHint ?? false, openWorldHint: true } }, async (args, ctx) => {
     const progressToken = (ctx.mcpReq._meta as { progressToken?: unknown } | undefined)?.progressToken;
     return result(await fn(args ?? {}, {
       signal: ctx.mcpReq.signal,
@@ -84,31 +111,72 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
   };
 
   // --- Status & discovery (always registered; availability is data, not absence) ---
-  read('freebuff_status', 'Detect Freebuff and bridge capabilities.', {}, (args) => shapeError(async () => {
-    void args;
+  const readFreebuffStatus = async () => shapeError(async () => {
     const caps = await adapter.backend.probe();
-    return { ok: true, backend: caps.backend, connection: caps.connection, authorization: caps.authorization, liveProgress: caps.liveProgress, capabilities: { canCreateSession: caps.canCreateSession, canSendMessage: caps.canSendMessage, canStop: caps.canStop, canResume: caps.canResume, canSetModel: caps.canSetModel, canSetReasoning: caps.canSetReasoning }, notes: caps.notes };
-  }));
+    return { ok: true, backend: caps.backend, connection: caps.connection, authorization: caps.authorization, liveProgress: caps.liveProgress, capabilities: { canCreateSession: caps.canCreateSession, canSendMessage: caps.canSendMessage, canStop: caps.canStop, canResume: caps.canResume, canSetModel: caps.canSetModel, canSetReasoning: caps.canSetReasoning, canListModels: false }, notes: caps.notes };
+  });
+  const statusOutput = z.object({
+    ok: z.boolean(), backend: z.string(), connection: z.string(), authorization: z.string(), liveProgress: z.string(),
+    capabilities: z.object({ canCreateSession: z.boolean(), canSendMessage: z.boolean(), canStop: z.boolean(), canResume: z.boolean(), canSetModel: z.boolean(), canSetReasoning: z.boolean(), canListModels: z.boolean() }),
+    notes: z.array(z.string()),
+  });
+  read('get_freebuff_status', 'Check whether Freebuff is installed, connected, authorized, and which actions this bridge can perform. A detected app may still be signed out or read-only.', {}, readFreebuffStatus, true, statusOutput);
+  read('freebuff_status', 'Compatibility name for get_freebuff_status. Returns the same connection, authorization, and supported-action report.', {}, readFreebuffStatus, true, statusOutput);
 
   const requireSessions = async () => { const caps = await adapter.backend.probe(); if (caps.connection === 'unavailable' || caps.connection === 'not_running' || caps.connection === 'not_installed') throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, 'Freebuff is not available.', JSON.stringify(toErrorShape(new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, 'Freebuff is not available.')).recovery)); return caps; };
 
-  read('list_projects', 'List discovered Freebuff projects.', {}, () => shapeError(async () => { await requireSessions(); return adapter.backend.listProjects(); }));
-  read('list_threads', 'List Freebuff threads.', { projectId: id.optional() }, (args) => shapeError(async () => { await requireSessions(); const threads = await adapter.backend.listThreads(); return args.projectId ? (Array.isArray(threads) ? threads : []).filter((t) => (t as Record<string, unknown>).projectId === args.projectId || (t as Record<string, unknown>).projectPath === args.projectId) : threads; }));
-  read('get_thread', 'Read thread metadata.', { threadId: id }, (args) => shapeError(() => adapter.backend.getThread(assertSafeId(args.threadId))));
-  read('get_thread_messages', 'Read visible thread messages.', { threadId: id }, (args) => shapeError(() => adapter.backend.getMessages(assertSafeId(args.threadId))));
-  read('get_active_work', 'Read visible active work.', {}, () => shapeError(async () => {
+  read('list_projects', 'List project records visible to the selected Freebuff backend. Use a returned project id or path with project file tools.', {}, () => shapeError(async () => { await requireSessions(); return adapter.backend.listProjects(); }));
+  read('list_threads', 'List threads visible to Freebuff, optionally filtered to one project id or path. Use get_thread for one thread or get_active_work for nonterminal work.', { projectId: id.optional() }, (args) => shapeError(async () => { await requireSessions(); const threads = await adapter.backend.listThreads(); return args.projectId ? (Array.isArray(threads) ? threads : []).filter((t) => (t as Record<string, unknown>).projectId === args.projectId || (t as Record<string, unknown>).projectPath === args.projectId) : threads; }));
+  read('get_thread', 'Read metadata for one Freebuff thread, including fields the backend exposes. Use get_thread_messages for conversation text or get_thread_settings for model and reasoning settings.', { threadId: id }, (args) => shapeError(() => adapter.backend.getThread(assertSafeId(args.threadId))));
+  const threadSettingsOutput = z.object({
+    ok: z.literal(true), threadId: z.string(),
+    settings: z.object({ model: z.string().optional(), harnessId: z.string().optional(), reasoningEffort: z.string().nullable().optional() }),
+    availableFields: z.array(z.enum(['model', 'harnessId', 'reasoningEffort'])),
+    unavailableFields: z.array(z.enum(['model', 'harnessId', 'reasoningEffort'])),
+  });
+  read('get_thread_settings', 'Read the model, harness, and reasoning effort reported for a thread. Missing fields are reported as unavailable, never inferred.', { threadId: id }, (args) => shapeError(async () => {
+    const threadId = assertSafeId(args.threadId);
+    const thread = asObject(await adapter.backend.getThread(threadId));
+    if (!thread) throw new BridgeError(ErrorCodes.DESKTOP_API_INCOMPATIBLE, 'Freebuff returned unreadable thread settings.', 'Read the thread again or update Freebuff Desktop.');
+    const settingFields = ['model', 'harnessId', 'reasoningEffort'] as const;
+    const isPresent = (record: Record<string, unknown>, field: typeof settingFields[number]) => field === 'reasoningEffort'
+      ? typeof record[field] === 'string' || record[field] === null
+      : typeof record[field] === 'string';
+    const needsFallback = settingFields.some((field) => !isPresent(thread, field));
+    const threadRows = needsFallback ? await adapter.backend.listThreads().catch(() => []) : [];
+    const listedThread = Array.isArray(threadRows)
+      ? threadRows.map(asObject).find((row) => row?.id === threadId)
+      : undefined;
+    const settings: { model?: string; harnessId?: string; reasoningEffort?: string | null } = {};
+    const availableFields = settingFields.filter((field) => {
+      const record = isPresent(thread, field) ? thread : listedThread;
+      if (!record || !isPresent(record, field)) return false;
+      if (field === 'reasoningEffort') settings.reasoningEffort = record[field] as string | null;
+      else settings[field] = record[field] as string;
+      return true;
+    });
+    return {
+      ok: true,
+      threadId,
+      settings,
+      availableFields,
+      unavailableFields: settingFields.filter((field) => !availableFields.includes(field)),
+    };
+  }), true, threadSettingsOutput);
+  read('get_thread_messages', 'Read messages that the selected Freebuff backend exposes for one thread. Use get_thread for metadata; message history may be unavailable when the backend does not provide it.', { threadId: id }, (args) => shapeError(() => adapter.backend.getMessages(assertSafeId(args.threadId))));
+  read('get_active_work', 'Find visible threads whose reported turn state is not idle or terminal. Returns an empty list when no active work is visible; use list_threads to include idle threads.', {}, () => shapeError(async () => {
     await requireSessions();
     const threads = await adapter.backend.listThreads();
     return (Array.isArray(threads) ? threads : []).filter((t) => { const state = (t as Record<string, unknown>).turnState; return typeof state === 'string' && !['idle', 'completed', 'failed', 'cancelled'].includes(state); });
   }));
-  read('get_turn', 'Read canonical turn state and recent events.', { turnId: id, afterSequence: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(100).optional() }, (args) => shapeError(async () => {
+  read('get_turn', 'Read the bridge’s canonical state and a bounded page of recent events for one turn. Use watch_turn to wait for an update or continue from a later sequence.', { turnId: id, afterSequence: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(100).optional() }, (args) => shapeError(async () => {
     const snapshot = adapter.turns.progressForTurn(assertSafeId(args.turnId), args.afterSequence ?? 0, args.limit ?? 50);
     const turn = adapter.turns.getTurn(assertSafeId(args.turnId));
     return { ok: true, turnId: turn.id, sessionId: turn.sessionId, state: turn.state, backendTurnId: turn.backendTurnId, error: turn.error, snapshot };
-  }));
-  read('get_thread_progress', 'Read bounded live thread progress.', { threadId: id, afterSequence: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(100).optional() }, (args) => shapeError(async () => adapter.sessions.events.progress(assertSafeId(args.threadId), args.afterSequence ?? 0, args.limit ?? 50)));
-  read('watch_thread', 'Wait up to 30 seconds for live thread progress.', { threadId: id, afterSequence: z.number().int().nonnegative().optional(), timeoutMs: z.number().int().min(0).max(30000).optional(), limit: z.number().int().min(1).max(100).optional() }, (args) => shapeError(() => adapter.sessions.events.wait(assertSafeId(args.threadId), args.afterSequence ?? 0, args.timeoutMs ?? 30_000, args.limit ?? 50)));
-  read('get_thread_progress_summary', 'Return a compact user-facing live progress summary without raw event detail.', { threadId: id }, (args) => shapeError(async () => {
+  }), false);
+  read('get_thread_progress', 'Read a bounded snapshot of events and state tracked by this bridge for one thread. Use watch_thread to wait for the next update.', { threadId: id, afterSequence: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(100).optional() }, (args) => shapeError(async () => adapter.sessions.events.progress(assertSafeId(args.threadId), args.afterSequence ?? 0, args.limit ?? 50)), false);
+  read('watch_thread', 'Wait up to 30 seconds for bridge-tracked progress after a sequence number. Poll again with the last event sequence to continue; use get_thread_progress for a non-waiting snapshot.', { threadId: id, afterSequence: z.number().int().nonnegative().optional(), timeoutMs: z.number().int().min(0).max(30000).optional(), limit: z.number().int().min(1).max(100).optional() }, (args) => shapeError(() => adapter.sessions.events.wait(assertSafeId(args.threadId), args.afterSequence ?? 0, args.timeoutMs ?? 30_000, args.limit ?? 50)), false);
+  read('get_thread_progress_summary', 'Return one compact bridge-tracked progress snapshot without raw event detail. Use get_thread_progress when event-level data is needed.', { threadId: id }, (args) => shapeError(async () => {
     const snapshot = adapter.sessions.events.progress(assertSafeId(args.threadId), 0, 1);
     return {
       ok: true,
@@ -124,19 +192,22 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
       secondsSinceLastEvent: snapshot.secondsSinceLastEvent,
       lastError: snapshot.lastError,
     };
-  }));
-  read('watch_turn', 'Wait up to 30 seconds for canonical turn progress.', { turnId: id, timeoutMs: z.number().int().min(0).max(30000).optional(), afterSequence: z.number().int().nonnegative().optional() }, (args) => shapeError(() => adapter.turns.waitForTurn(assertSafeId(args.turnId), args.timeoutMs ?? 30_000, args.afterSequence ?? 0)));
-  read('watch_active_threads', 'Read compact progress summaries for active threads.', {}, () => shapeError(async () => adapter.sessions.events.activeThreads().map((threadId) => adapter.sessions.events.progress(threadId, 0, 1))));
-  read('list_project_files', 'List safe files in a project.', { projectId: id, relative: z.string().optional() }, (args) => shapeError(async () => {
+  }), false);
+  read('watch_turn', 'Wait up to 30 seconds for a canonical turn update. Use the returned sequence to request only newer events; get_turn gives the current state without waiting.', { turnId: id, timeoutMs: z.number().int().min(0).max(30000).optional(), afterSequence: z.number().int().nonnegative().optional() }, (args) => shapeError(() => adapter.turns.waitForTurn(assertSafeId(args.turnId), args.timeoutMs ?? 30_000, args.afterSequence ?? 0)), false);
+  read('watch_active_threads', 'Return compact bridge progress snapshots for threads with tracked activity. This does not discover idle or untracked Freebuff threads; use list_threads for backend discovery.', {}, () => shapeError(async () => adapter.sessions.events.activeThreads().map((threadId) => adapter.sessions.events.progress(threadId, 0, 1))), false);
+  read('list_project_files', 'List files the bridge permits reading inside a project returned by list_projects. Optionally limit the result to a relative subdirectory.', { projectId: id, relative: z.string().optional() }, (args) => shapeError(async () => {
     const root = await resolveListedProjectRoot(adapter.backend, args.projectId);
     return (adapter.backend.desktop as unknown as { listFiles(root: string, relative?: string): Promise<string[]> }).listFiles(root, args.relative);
   }));
-  read('read_project_file', 'Read one safe project file.', { projectId: id, path: z.string() }, (args) => shapeError(async () => {
+  const readProjectFile = (args: { projectId: string; path: string }) => shapeError(async () => {
     const root = await resolveListedProjectRoot(adapter.backend, args.projectId);
     return (adapter.backend.desktop as unknown as { readFile(root: string, relative: string): Promise<{ path: string; content: string }> }).readFile(root, args.path);
-  }));
-  read('list_thread_attachments', 'List safe attachment metadata for a thread.', { threadId: id }, (args) => shapeError(() => adapter.backend.desktop.listAttachments(assertSafeId(args.threadId))));
-  read('list_models', 'List available model information.', {}, () => shapeError(async () => {
+  });
+  read('get_project_file', 'Read one safe, redacted file inside a project returned by list_projects. The path must stay inside that project root.', { projectId: id, path: z.string() }, readProjectFile);
+  read('read_project_file', 'Compatibility name for get_project_file. Reads one safe, redacted file inside a project returned by list_projects.', { projectId: id, path: z.string() }, readProjectFile);
+  read('list_thread_attachments', 'List attachment metadata the Desktop exposes for one thread. This returns metadata only and does not download attachment contents.', { threadId: id }, (args) => shapeError(() => adapter.backend.desktop.listAttachments(assertSafeId(args.threadId))));
+  const modelCatalogStatusOutput = z.object({ ok: z.literal(true), catalogAvailable: z.literal(false), backend: z.string(), connection: z.string(), note: z.string() });
+  read('list_models', 'Check whether this Freebuff installation exposes a standalone model catalog. The current Desktop and CLI backends do not enumerate models; use get_thread_settings to read a selected thread or set_model to request a change.', {}, () => shapeError(async () => {
     // The Desktop exposes no model-catalog route, and getThread('') is an
     // invalid id that must never be called. Report honestly what is known.
     const caps = await requireSessions();
@@ -145,10 +216,10 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
       catalogAvailable: false,
       backend: caps.backend,
       connection: caps.connection,
-      note: 'The installed Freebuff Desktop exposes no standalone model-catalog route. Use get_thread to read the current thread model and set_model to change it.',
+      note: 'The installed Freebuff backends expose no standalone model-catalog route. Use get_thread_settings to read the current thread model and set_model to request a change.',
     };
-  }));
-  read('search_history', 'Search visible Freebuff history.', { query: z.string().min(1).max(200) }, (args) => shapeError(async () => {
+  }), true, modelCatalogStatusOutput);
+  read('search_history', 'Search serialized metadata for visible Freebuff threads using a case-insensitive substring. This does not search message bodies or hidden local history files.', { query: z.string().min(1).max(200) }, (args) => shapeError(async () => {
     await requireSessions();
     const threads = await adapter.backend.listThreads();
     const q = args.query.toLowerCase();
@@ -156,21 +227,28 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
   }));
 
   // --- Session/turn lifecycle ---
-  write('start_thread', 'Create a bridge session backed by a real Freebuff identity.', { cwd: z.string().optional(), continueConversationId: id.optional() }, async (args) => shapeError(async () => {
+  const createThread = async (args: { cwd?: string; continueConversationId?: string }) => shapeError(async () => {
     const cwd = typeof args.cwd === 'string' && args.cwd ? args.cwd : (process.env.FREEBUFF_PROJECT_ROOT ?? process.cwd());
     const session = await adapter.sessions.createSession({ cwd, ...(args.continueConversationId ? { continueBackendId: assertSafeId(args.continueConversationId) } : {}) });
     return { ok: true, sessionId: session.id, ...(session.backendSessionId ? { threadId: session.backendSessionId } : {}), backend: session.backend, backendSessionId: session.backendSessionId, backendHandleId: session.backendHandleId, state: session.state };
-  }));
+  });
+  const createThreadOutput = z.object({
+    ok: z.literal(true), sessionId: z.string(), threadId: z.string().optional(), backend: z.enum(['desktop', 'cli']),
+    backendSessionId: z.string().optional(), backendHandleId: z.string().optional(), state: z.string(),
+  });
+  const createThreadSchema = { cwd: z.string().optional(), continueConversationId: id.optional() };
+  write('create_thread', 'Create a bridge session in the selected project, or attach to an existing Freebuff conversation. The result includes a sessionId and, when provided by Freebuff, a threadId.', createThreadSchema, createThread, { outputSchema: createThreadOutput });
+  write('start_thread', 'Compatibility name for create_thread. Creates a bridge session or attaches to an existing conversation and returns the identifiers needed by later tools.', createThreadSchema, createThread, { outputSchema: createThreadOutput });
 
-  write('send_message', 'Submit text to a bridge session without waiting for completion (async).', { sessionId: id.optional(), threadId: id.optional(), text: z.string().min(1).max(100000) }, async (args) => shapeError(async () => {
+  write('send_message', 'Queue a request on an existing bridge session and return immediately with a turnId. Poll get_turn or watch_turn for progress and the final result; Freebuff may edit files or run commands.', { sessionId: id.optional(), threadId: id.optional(), text: z.string().min(1).max(100000) }, async (args) => shapeError(async () => {
     const sessionId = await resolveSessionId(adapter, args);
     const { turnId, done } = adapter.turns.startTurnDetached(sessionId, { text: args.text });
     void done.catch(() => undefined);
     const turn = adapter.turns.getTurn(turnId);
     return { ok: true, turnId, sessionId, state: turn.state, note: 'Poll get_turn or watch_turn with this turnId for progress and the final result.' };
-  }));
+  }), { destructiveHint: true });
 
-  write('run_turn', 'Run a full Freebuff turn and wait for completion. Emits request-scoped progress and honors MCP cancellation.', { sessionId: id.optional(), threadId: id.optional(), text: z.string().min(1).max(100000) }, async (args, ctx) => shapeError(async () => {
+  write('run_turn', 'Send a request to Freebuff and wait for a terminal turn result while reporting MCP progress. Cancellation asks the owning backend to stop; the result distinguishes confirmed stops, waiting states, and rate limits. Freebuff may edit files or run commands.', { sessionId: id.optional(), threadId: id.optional(), text: z.string().min(1).max(100000) }, async (args, ctx) => shapeError(async () => {
     const sessionId = await resolveSessionId(adapter, args);
     const controller = new AbortController();
     const onClientAbort = () => controller.abort();
@@ -204,9 +282,9 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
     } finally {
       ctx.signal.removeEventListener('abort', onClientAbort);
     }
-  }));
+  }), { destructiveHint: true });
 
-  write('stop_turn', 'Cancel a running canonical turn and stop it on the owning backend.', { sessionId: id, turnId: id.optional() }, async (args) => shapeError(async () => {
+  write('stop_turn', 'Cancel a bridge-tracked turn for the given session and ask its owning backend to stop. The result says whether the backend confirmed the stop; a local cancellation alone is not confirmation.', { sessionId: id, turnId: id.optional() }, async (args) => shapeError(async () => {
     const result = await adapter.turns.cancelTurn(assertSafeId(args.sessionId), args.turnId ? assertSafeId(args.turnId) : undefined);
     return {
       ok: true,
@@ -221,9 +299,9 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
             ? `The active turn was aborted locally, but the backend stop failed (${result.stopError}) — the underlying work may still be running.`
             : 'The active turn was aborted locally; the backend exposes no stop operation to confirm.',
     };
-  }));
+  }), { idempotentHint: true });
 
-  write('stop_thread', 'Stop a running Freebuff turn. Pass the sessionId returned by start_thread or a Freebuff threadId.', { threadId: id.optional(), sessionId: id.optional() }, async (args) => shapeError(async () => {
+  write('stop_thread', 'Ask Freebuff to stop work for a bridge session or known thread. Supply sessionId or threadId; stopping an unknown thread requires creating or attaching a bridge session first.', { threadId: id.optional(), sessionId: id.optional() }, async (args) => shapeError(async () => {
     if (!args.sessionId && !args.threadId) throw new BridgeError(ErrorCodes.INVALID_INPUT, 'Pass the sessionId returned by start_thread or a Freebuff threadId.');
     // Resolve ownership exactly like set_model does: a bare thread id is
     // wrapped through registerExisting/resolveExisting so CLI conversations
@@ -233,9 +311,9 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
       : await findSessionByBackendId(adapter, assertSafeId(args.threadId));
     if (session) { await adapter.backend.stop(adapter.sessions.toBackendSession(session)); return { ok: true }; }
     throw new BridgeError(ErrorCodes.SESSION_NOT_FOUND, 'Stopping requires a bridge session created through start_thread.', 'Call start_thread with the conversation id, then stop_turn.');
-  }));
+  }), { idempotentHint: true });
 
-  write('resume_thread', 'Resume a paused Freebuff thread. For a CLI conversation, pass its project cwd if it was not created in the current working directory.', { threadId: id, sessionId: id.optional(), cwd: z.string().min(1).max(4096).optional() }, async (args) => shapeError(async () => {
+  write('resume_thread', 'Ask the owning Freebuff backend to resume a paused thread. For CLI conversations outside the current project, pass the original cwd. Resume may continue work that edits files or runs commands, and uncertain outcomes remain marked as unconfirmed.', { threadId: id, sessionId: id.optional(), cwd: z.string().min(1).max(4096).optional() }, async (args) => shapeError(async () => {
     const threadId = assertSafeId(args.threadId);
     const cwd = args.cwd ?? process.env.FREEBUFF_PROJECT_ROOT ?? process.cwd();
     // `threadId` is the required argument: resolve ownership through the same
@@ -263,9 +341,9 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
     const result = await (adapter.backend as unknown as { resume(session: BackendSession): Promise<BackendTurnResult> }).resume(backendSession);
     if (session) adapter.sessions.reconcileResume(session.id, result);
     return { ok: result.state !== 'failed' && result.state !== 'rate_limited', ...result } as Json;
-  }));
+  }), { destructiveHint: true });
 
-  write('set_model', 'Set the model for an existing thread.', { threadId: id, model: z.string().min(1).max(200), harnessId: z.string().optional() }, async (args) => shapeError(async () => {
+  write('set_model', 'Request a model change for a thread already known to this bridge. The selected backend validates the model; use get_thread_settings to read the reported value afterward.', { threadId: id, model: z.string().min(1).max(200), harnessId: z.string().optional() }, async (args) => shapeError(async () => {
     const session = await findSessionByBackendId(adapter, assertSafeId(args.threadId));
     if (!session) throw new BridgeError(ErrorCodes.SESSION_NOT_FOUND, 'set_model requires a bridge session for this thread.', 'Call start_thread first.');
     const backendSession = adapter.sessions.toBackendSession(session);
@@ -280,9 +358,9 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
     if (typeof adapter.backend.setModel !== 'function') throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, `The ${session.backend} backend cannot change models.`);
     await adapter.backend.setModel(backendSession, args.model, args.harnessId);
     return { ok: true };
-  }));
+  }), { idempotentHint: true });
 
-  write('set_reasoning', 'Set reasoning effort for an existing thread.', { threadId: id, effort: z.string().nullable() }, async (args) => shapeError(async () => {
+  write('set_reasoning', 'Request a reasoning effort change for a thread already known to this bridge. Pass null to clear the override; use get_thread_settings to read the reported value afterward.', { threadId: id, effort: z.string().nullable() }, async (args) => shapeError(async () => {
     const session = await findSessionByBackendId(adapter, assertSafeId(args.threadId));
     if (!session) throw new BridgeError(ErrorCodes.SESSION_NOT_FOUND, 'set_reasoning requires a bridge session for this thread.', 'Call start_thread first.');
     const backendSession = adapter.sessions.toBackendSession(session);
@@ -293,18 +371,18 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
     if (typeof adapter.backend.setReasoning !== 'function') throw new BridgeError(ErrorCodes.BACKEND_UNAVAILABLE, `The ${session.backend} backend cannot change reasoning effort.`);
     await adapter.backend.setReasoning(backendSession, args.effort);
     return { ok: true };
-  }));
+  }), { idempotentHint: true });
 
-  read('get_changed_files', 'List files changed during the most recent events for a thread.', { threadId: id }, (args) => shapeError(async () => {
+  read('get_changed_files', 'List unique file paths observed in this bridge’s recent progress events for a thread. This event-derived list may not include earlier or unreported changes.', { threadId: id }, (args) => shapeError(async () => {
     const snapshot = adapter.sessions.events.progress(assertSafeId(args.threadId), 0, 100);
     return { ok: true, threadId: args.threadId, files: snapshot.filesChanged ?? [] };
-  }));
-  read('get_changes', 'Read the Desktop change summary (files, adds, dels) for a thread.', { threadId: id, scope: z.enum(['all', 'uncommitted']).optional() }, (args) => shapeError(async () => {
+  }), false);
+  read('get_changes', 'Read Freebuff Desktop’s change summary for a thread, including changed paths and line totals when the installed version exposes the route. Use get_diff for per-file patch text.', { threadId: id, scope: z.enum(['all', 'uncommitted']).optional() }, (args) => shapeError(async () => {
     const changes = await desktopChanges(adapter).getChanges(assertSafeId(args.threadId), args.scope ?? 'all');
     return { ok: true, ...(asObject(changes) ?? { changes }) };
   }));
 
-  read('get_diff', 'Read real per-file diffs for a thread from the Desktop, falling back to the changed files observed in live events.', { threadId: id, file: z.string().optional(), scope: z.enum(['all', 'uncommitted']).optional() }, (args) => shapeError(async () => {
+  read('get_diff', 'Read actual per-file patch text from Freebuff Desktop when supported. If Desktop diff access is unavailable, event-derived paths may be returned without invented patch content; use get_changes for totals.', { threadId: id, file: z.string().optional(), scope: z.enum(['all', 'uncommitted']).optional() }, (args) => shapeError(async () => {
     const threadId = assertSafeId(args.threadId);
     const scope = args.scope ?? 'all';
     const desktop = desktopChanges(adapter);

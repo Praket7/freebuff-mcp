@@ -63,3 +63,5 @@ jobs:
           DOCTOR_STATUS="$DOCTOR_STATUS" node -e "const r=require('./doctor.json'); if(typeof r.ok!=='boolean') process.exit(2); if(r.ok&&Number(process.env.DOCTOR_STATUS)!==0) process.exit(2); if(!r.ok&&Number(process.env.DOCTOR_STATUS)!==1) process.exit(2);"
           node "$PWD/smoke/node_modules/freebuff-mcp/dist/src/cli.js" install codex | head -3
           node "$PWD/smoke/node_modules/freebuff-mcp/dist/src/cli.js" install claude | head -3
+          cd "$GITHUB_WORKSPACE"
+          FREEBUFF_MCP_BINARY="work/smoke/node_modules/freebuff-mcp/dist/src/cli.js" node test/manual-stdio.mjs

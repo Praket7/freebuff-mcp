@@ -1,7 +1,8 @@
 // Manual real-client check: speaks MCP stdio to the built server binary.
 import { spawn } from 'node:child_process';
 
-const child = spawn(process.execPath, [new URL('../dist/src/cli.js', import.meta.url).pathname, 'serve'], { stdio: ['pipe', 'pipe', 'pipe'] });
+const serverPath = process.env.FREEBUFF_MCP_BINARY ?? new URL('../dist/src/cli.js', import.meta.url).pathname;
+const child = spawn(process.execPath, [serverPath, 'serve'], { stdio: ['pipe', 'pipe', 'pipe'] });
 let buffer = '';
 const pending = new Map();
 let nextId = 1;
@@ -33,16 +34,35 @@ await rpc('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clien
 child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
 
 const tools = await rpc('tools/list', {});
-const names = tools.result.tools.map((t) => t.name);
+const toolDefinitions = tools.result.tools;
+const names = toolDefinitions.map((t) => t.name);
 console.log('tools:', names.length);
+if (names.length !== 32) { console.error(`Expected 32 MCP v2 tools, received ${names.length}`); process.exit(1); }
+for (const tool of toolDefinitions) {
+  for (const hint of ['readOnlyHint', 'destructiveHint', 'idempotentHint', 'openWorldHint']) {
+    if (typeof tool.annotations?.[hint] !== 'boolean') { console.error(`${tool.name} is missing boolean ${hint}`); process.exit(1); }
+  }
+  if (typeof tool.description !== 'string' || tool.description.length < 30) { console.error(`${tool.name} is missing an actionable description`); process.exit(1); }
+  for (const [field, schema] of Object.entries(tool.inputSchema?.properties ?? {})) {
+    if (typeof schema.description !== 'string' || schema.description.length < 10) { console.error(`${tool.name}.${field} is missing a parameter description`); process.exit(1); }
+  }
+}
+for (const name of ['get_freebuff_status', 'freebuff_status', 'create_thread', 'start_thread', 'get_thread_settings', 'list_models']) {
+  if (!toolDefinitions.find((tool) => tool.name === name)?.outputSchema) { console.error(`${name} is missing its declared output schema`); process.exit(1); }
+}
+console.log('all tools have descriptions and explicit behavior hints; stable outputs have schemas');
 console.log('has run_turn:', names.includes('run_turn'), '| has start_thread:', names.includes('start_thread'), '| has get_turn:', names.includes('get_turn'));
-for (const required of ['get_thread_progress_summary', 'get_diff', 'get_changed_files', 'freebuff_status']) {
+for (const required of ['get_thread_progress_summary', 'get_diff', 'get_changed_files', 'get_freebuff_status', 'freebuff_status', 'get_project_file', 'read_project_file', 'get_thread_settings', 'create_thread', 'start_thread']) {
   if (!names.includes(required)) { console.error(`MISSING TOOL: ${required}`); process.exit(1); }
 }
-console.log('new parity tools present: get_thread_progress_summary, get_diff');
+console.log('canonical names and compatibility aliases present');
 
-const status = await rpc('tools/call', { name: 'freebuff_status', arguments: {} });
+const status = await rpc('tools/call', { name: 'get_freebuff_status', arguments: {} });
 const statusData = JSON.parse(status.result.content[0].text);
+const legacyStatus = await rpc('tools/call', { name: 'freebuff_status', arguments: {} });
+if (JSON.stringify(JSON.parse(legacyStatus.result.content[0].text)) !== JSON.stringify(statusData)) {
+  console.error('freebuff_status compatibility alias returned different data'); process.exit(1);
+}
 console.log('status:', statusData.connection, '/', statusData.authorization, '/ live:', statusData.liveProgress);
 
 const threads = await rpc('tools/call', { name: 'list_projects', arguments: {} });

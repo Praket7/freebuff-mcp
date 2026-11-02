@@ -39,7 +39,18 @@ The automatic write option adds the entry to your app settings. It preserves oth
 
 ## What you can ask it to do
 
-The bridge can find projects plus threads, read thread messages, start a request, continue earlier work, show live progress, stop a turn, resume a paused thread, change model settings, inspect changed files, read project files, plus list attachments.
+The bridge can find projects and threads, read thread messages, start a request, continue earlier work, show live progress, stop a turn, resume a paused thread, change model settings, inspect changed files, read project files, and list attachments.
+
+The tools are grouped around the work you can do:
+
+- Find projects and threads with `list_projects`, `list_threads`, and `get_active_work`. Read one thread with `get_thread`, `get_thread_messages`, or `get_thread_settings`.
+- Read files with `list_project_files` and `get_project_file`. The older `read_project_file` name remains available. Thread attachment metadata is available through `list_thread_attachments`.
+- Start or attach to a session with `create_thread`. The older `start_thread` name remains available. Send a request with `send_message` and follow it with `get_turn` or `watch_turn`, or use `run_turn` to wait for its result.
+- Follow work with `get_thread_progress`, `watch_thread`, `get_thread_progress_summary`, and `watch_active_threads`. Review changed paths and Desktop diffs with `get_changed_files`, `get_changes`, and `get_diff`.
+- Stop work with `stop_turn` or `stop_thread`, resume with `resume_thread`, and request model or reasoning changes with `set_model` and `set_reasoning`. `get_freebuff_status` reports connection, authorization, and actions the bridge supports. The older `freebuff_status` name remains available.
+- `search_history` searches visible thread metadata. `list_models` reports whether the installed backend exposes a model catalog. Current Freebuff backends do not provide that catalog, so use `get_thread_settings` for the model already selected on a thread. Freebuff still controls which models your account can use.
+
+MCP tool definitions include parameter descriptions and explicit read, write, repeatability, and external-system hints. Agent-run tools are marked as potentially destructive because Freebuff may edit files or run commands. A backend may omit settings it cannot report; the settings tool lists those fields as unavailable instead of guessing. Project creation and thread deletion are not exposed because the supported Freebuff interfaces do not provide verified operations for them.
 
 `run_turn` stays open while Freebuff works. It reports progress while the turn runs. When the MCP app cancels the request, the bridge asks the owning Freebuff backend to stop. A local cancel alone does not prove the work stopped.
 

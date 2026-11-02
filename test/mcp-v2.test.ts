@@ -22,10 +22,89 @@ test('MCP v2 server exposes the stable guarded tool surface', () => {
   const server = createV2ServerFromAdapter(adapter);
   const tools = (server as unknown as { _registeredTools: Record<string, unknown> })._registeredTools;
   const names = Object.keys(tools).sort();
-  for (const expected of ['freebuff_status', 'list_projects', 'list_threads', 'get_thread', 'get_thread_messages', 'get_active_work', 'get_turn', 'get_thread_progress', 'get_thread_progress_summary', 'watch_thread', 'watch_turn', 'watch_active_threads', 'list_project_files', 'read_project_file', 'list_thread_attachments', 'list_models', 'search_history', 'start_thread', 'send_message', 'run_turn', 'stop_turn', 'stop_thread', 'resume_thread', 'set_model', 'set_reasoning', 'get_changed_files', 'get_diff', 'get_changes']) {
+  for (const expected of ['freebuff_status', 'get_freebuff_status', 'list_projects', 'list_threads', 'get_thread', 'get_thread_settings', 'get_thread_messages', 'get_active_work', 'get_turn', 'get_thread_progress', 'get_thread_progress_summary', 'watch_thread', 'watch_turn', 'watch_active_threads', 'list_project_files', 'read_project_file', 'get_project_file', 'list_thread_attachments', 'list_models', 'search_history', 'start_thread', 'create_thread', 'send_message', 'run_turn', 'stop_turn', 'stop_thread', 'resume_thread', 'set_model', 'set_reasoning', 'get_changed_files', 'get_diff', 'get_changes']) {
     assert.ok(names.includes(expected), `missing tool ${expected}`);
   }
-  assert.equal(names.length, 28, `unexpected extra tools: ${names.join(', ')}`);
+  assert.equal(names.length, 32, `unexpected extra tools: ${names.join(', ')}`);
+});
+
+test('MCP v2 tools publish complete behavioral hints and described input fields', () => {
+  const server = createV2ServerFromAdapter(makeAdapter());
+  const tools = (server as unknown as { _registeredTools: Record<string, { annotations?: Record<string, unknown>; inputSchema: { shape: Record<string, { description?: string }> }; description?: string }> })._registeredTools;
+  for (const [name, tool] of Object.entries(tools)) {
+    for (const hint of ['readOnlyHint', 'destructiveHint', 'idempotentHint', 'openWorldHint']) {
+      assert.equal(typeof tool.annotations?.[hint], 'boolean', `${name} must declare ${hint}`);
+    }
+    assert.ok(tool.description && tool.description.length >= 30, `${name} needs an actionable description`);
+    for (const [field, schema] of Object.entries(tool.inputSchema.shape)) {
+      assert.ok(schema.description && schema.description.length >= 10, `${name}.${field} needs a useful description`);
+    }
+  }
+  assert.equal(tools.run_turn!.annotations?.destructiveHint, true, 'turns may cause Freebuff to modify project files or run commands');
+  assert.equal(tools.send_message!.annotations?.destructiveHint, true, 'messages may cause Freebuff to modify project files or run commands');
+  assert.equal(tools.get_turn!.annotations?.openWorldHint, false, 'canonical turn state is served from the local bridge store');
+  assert.equal(tools.get_freebuff_status!.annotations?.openWorldHint, true, 'status probes the external Freebuff installation');
+});
+
+test('canonical names keep aliases working and expose thread settings explicitly', async () => {
+  let created = 0;
+  const backend = {
+    kind: 'desktop' as const,
+    probe: async () => ({ backend: 'desktop' as const, connection: 'connected_writable' as const, authorization: 'write_authorized' as const, liveProgress: 'unavailable' as const, canCreateSession: true, canSendMessage: true, canStop: true, canResume: true, canSetModel: true, canSetReasoning: true, notes: [] }),
+    createSession: async ({ cwd }: { cwd: string }) => { created += 1; return { id: `thread-${created}`, backend: 'desktop' as const, backendSessionId: `thread-${created}`, cwd }; },
+    getThread: async () => ({ id: 'thread-settings', model: 'z-ai/glm-5.3-flash', harnessId: 'codebuff', reasoningEffort: null }),
+    sendMessage: async () => ({ state: 'completed' as const }),
+    dispose: () => undefined,
+  } as unknown as FreebuffBackend;
+  const sessions = new SessionManager(backend);
+  const adapter = { backend: backend as unknown as CompositeBackend, sessions, turns: new TurnManager(sessions) };
+  const server = createV2ServerFromAdapter(adapter);
+  const ctx = { mcpReq: { _meta: {}, signal: new AbortController().signal, notify: async () => undefined } };
+
+  const canonical = await toolOf(server, 'create_thread').handler({ cwd: '/tmp/project' }, ctx);
+  const legacy = await toolOf(server, 'start_thread').handler({ cwd: '/tmp/project' }, ctx);
+  assert.equal(created, 2, 'canonical and compatibility names create real backend sessions');
+  assert.equal(canonical.structuredContent?.threadId, 'thread-1');
+  assert.equal(legacy.structuredContent?.threadId, 'thread-2');
+  const registered = (server as any)._registeredTools as Record<string, any>;
+  assert.ok(registered.create_thread.outputSchema?.safeParse(canonical.structuredContent).success, 'create_thread output matches its declared schema');
+  assert.ok(registered.start_thread.outputSchema?.safeParse(legacy.structuredContent).success, 'start_thread alias keeps the same output contract');
+
+  const settings = await toolOf(server, 'get_thread_settings').handler({ threadId: 'thread-settings' }, ctx);
+  assert.deepEqual(settings.structuredContent?.settings, { model: 'z-ai/glm-5.3-flash', harnessId: 'codebuff', reasoningEffort: null });
+  assert.deepEqual(settings.structuredContent?.availableFields, ['model', 'harnessId', 'reasoningEffort']);
+  const settingsOutput = registered.get_thread_settings!.outputSchema as { safeParse(value: unknown): { success: boolean } };
+  assert.ok(settingsOutput?.safeParse(settings.structuredContent).success, 'declared output schema matches returned settings');
+});
+
+test('get_thread_settings reports unavailable fields instead of guessing on a backend that omits them', async () => {
+  const backend = {
+    kind: 'desktop' as const,
+    getThread: async () => ({ id: 'thread-without-settings', turnState: 'idle' }),
+    listThreads: async () => [],
+    dispose: () => undefined,
+  } as unknown as CompositeBackend;
+  const sessions = new SessionManager(backend as unknown as FreebuffBackend);
+  const server = createV2ServerFromAdapter({ backend, sessions, turns: new TurnManager(sessions) });
+  const result = await toolOf(server, 'get_thread_settings').handler({ threadId: 'thread-without-settings' }, undefined);
+  assert.deepEqual(result.structuredContent?.settings, {});
+  assert.deepEqual(result.structuredContent?.unavailableFields, ['model', 'harnessId', 'reasoningEffort']);
+});
+
+test('get_thread_settings fills omitted fields from the matching project thread record', async () => {
+  const backend = {
+    kind: 'desktop' as const,
+    getThread: async () => ({ id: 'thread-settings', model: 'z-ai/glm-5.3-flash', harnessId: 'codebuff' }),
+    listThreads: async () => [{ id: 'thread-settings', reasoningEffort: 'high' }, { id: 'other-thread', reasoningEffort: 'low' }],
+    dispose: () => undefined,
+  } as unknown as CompositeBackend;
+  const sessions = new SessionManager(backend as unknown as FreebuffBackend);
+  const server = createV2ServerFromAdapter({ backend, sessions, turns: new TurnManager(sessions) });
+  const result = await toolOf(server, 'get_thread_settings').handler({ threadId: 'thread-settings' }, undefined);
+  assert.deepEqual(result.structuredContent?.settings, { model: 'z-ai/glm-5.3-flash', harnessId: 'codebuff', reasoningEffort: 'high' });
+  assert.deepEqual(result.structuredContent?.unavailableFields, []);
+  const outputSchema = (server as any)._registeredTools.get_thread_settings.outputSchema as { safeParse(value: unknown): { success: boolean } };
+  assert.ok(outputSchema?.safeParse(result.structuredContent).success);
 });
 
 test('MCP v2 project file tools are restricted to roots returned by list_projects', async () => {
@@ -48,6 +127,8 @@ test('MCP v2 project file tools are restricted to roots returned by list_project
     await fs.writeFile(path.join(outside, 'private.txt'), 'outside the selected project');
     const allowed = await toolOf(server, 'read_project_file').handler({ projectId: root, path: 'README.md' }, ctx);
     assert.equal(allowed.structuredContent?.content, 'inside the selected project');
+    const canonical = await toolOf(server, 'get_project_file').handler({ projectId: root, path: 'README.md' }, ctx);
+    assert.equal(canonical.structuredContent?.content, 'inside the selected project');
 
     const denied = await toolOf(server, 'read_project_file').handler({ projectId: outside, path: 'private.txt' }, ctx);
     assert.equal(denied.structuredContent?.ok, false);
@@ -194,4 +275,7 @@ test('freebuff_status returns structured capability data', async () => {
   const server = createV2ServerFromAdapter(adapter);
   const tools = (server as unknown as { _registeredTools: Record<string, unknown> })._registeredTools;
   assert.ok(tools.freebuff_status, 'freebuff_status registered');
+  const legacy = await toolOf(server, 'freebuff_status').handler({}, undefined);
+  const canonical = await toolOf(server, 'get_freebuff_status').handler({}, undefined);
+  assert.deepEqual(canonical.structuredContent, legacy.structuredContent);
 });
