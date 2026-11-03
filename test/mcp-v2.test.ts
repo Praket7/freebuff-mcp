@@ -27,7 +27,8 @@ test('MCP v2 server exposes the stable guarded tool surface', () => {
   }
   assert.equal(names.length, 38, `unexpected extra tools: ${names.join(', ')}`);
   const insertionOrder = Object.keys((createV2ServerFromAdapter(makeAdapter()) as any)._registeredTools);
-  assert.deepEqual(insertionOrder, Object.keys((createV2ServerFromAdapter(makeAdapter()) as any)._registeredTools), 'tool registration order stays deterministic for clients that cache tool definitions');
+  const secondServerOrder = Object.keys((createV2ServerFromAdapter(makeAdapter()) as any)._registeredTools);
+  assert.deepEqual(insertionOrder, secondServerOrder, 'tool registration order stays deterministic for clients that cache tool definitions');
 });
 
 test('canonical search tools search visible threads and bounded messages accurately', async () => {
@@ -342,6 +343,11 @@ test('MCP v2: progress summary omits raw events and get_diff never fabricates a 
   assert.equal(diff.structuredContent?.ok, true);
   assert.deepEqual(diff.structuredContent?.files, []);
   assert.equal(diff.structuredContent?.diffAvailable, false);
+  assert.equal(diff.structuredContent?.changeSummaryAvailable, false);
+  assert.equal(diff.structuredContent?.source, 'none');
+  assert.match(String(diff.structuredContent?.note), /no Desktop change summary or file events/i);
+  const diffSchema = (server as any)._registeredTools.get_diff.outputSchema as { safeParse(value: unknown): { success: boolean } };
+  assert.equal(diffSchema.safeParse(diff.structuredContent).success, true);
   assert.equal('diff' in (diff.structuredContent ?? {}), false, 'never fabricates a diff');
 
   const changed = await toolOf(server, 'get_changed_files').handler({ threadId: 'thread-1' }, undefined);
@@ -384,6 +390,37 @@ test('MCP v2: get_diff reports real Desktop patches instead of inventing them', 
   const changes = await toolOf(server, 'get_changes').handler({ threadId: 'thread-1' }, undefined);
   assert.equal(changes.structuredContent?.ok, true);
   assert.deepEqual(changes.structuredContent?.totals, { files: 1, adds: 3, dels: 1 });
+});
+
+test('MCP v2: get_diff distinguishes event fallback from Desktop summaries and filters honestly', async () => {
+  const adapter = desktopChangesAdapter();
+  (adapter.backend.desktop as any).getChanges = async () => { throw new Error('route unavailable'); };
+  const server = createV2ServerFromAdapter(adapter);
+  const event = await toolOf(server, 'get_diff').handler({ threadId: 'thread-1' }, undefined);
+  assert.equal(event.structuredContent?.changeSummaryAvailable, false);
+  assert.equal(event.structuredContent?.source, 'none');
+  assert.equal(event.structuredContent?.truncated, false);
+
+  adapter.sessions.events.append({ sessionId: 'session-1', turnId: 'turn-1', threadId: 'thread-1', type: 'file_changed', files: ['src/observed.ts'] });
+  const eventFallback = await toolOf(server, 'get_diff').handler({ threadId: 'thread-1' }, undefined);
+  assert.equal(eventFallback.structuredContent?.source, 'events');
+  assert.equal(eventFallback.structuredContent?.changeSummaryAvailable, false);
+  assert.match(String(eventFallback.structuredContent?.note), /only from progress events/i);
+
+  (adapter.backend.desktop as any).getChanges = async () => ({ files: [
+    { path: 'src/a.ts', adds: 1, dels: 0 },
+    { path: 'src/b.ts', adds: 2, dels: 0 },
+  ] });
+  const filtered = await toolOf(server, 'get_diff').handler({ threadId: 'thread-1', file: 'src/a.ts' }, undefined);
+  assert.equal(filtered.structuredContent?.source, 'desktop');
+  assert.equal(filtered.structuredContent?.changedFileCount, 2);
+  assert.equal(filtered.structuredContent?.requestedFileFound, true);
+  assert.equal(filtered.structuredContent?.truncated, false, 'intentional file filtering is not truncation');
+  const missing = await toolOf(server, 'get_diff').handler({ threadId: 'thread-1', file: 'src/missing.ts' }, undefined);
+  assert.equal(missing.structuredContent?.requestedFileFound, false);
+  assert.equal(missing.structuredContent?.truncated, false);
+  const diffSchema = (server as any)._registeredTools.get_diff.outputSchema as { safeParse(value: unknown): { success: boolean } };
+  assert.equal(diffSchema.safeParse(filtered.structuredContent).success, true);
 });
 
 test('MCP v2: binary, too-large, and failed diffs are surfaced instead of masked as text', async () => {

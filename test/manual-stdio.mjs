@@ -60,7 +60,7 @@ for (const tool of toolDefinitions) {
     }
   }
 }
-for (const name of ['get_freebuff_status', 'freebuff_status', 'create_thread', 'start_thread', 'get_thread_settings', 'list_models', 'get_thread_messages_page', 'search_thread_messages', 'list_threads_page', 'search_threads_page']) {
+for (const name of ['get_freebuff_status', 'freebuff_status', 'create_thread', 'start_thread', 'get_thread_settings', 'list_models', 'get_thread_messages_page', 'search_thread_messages', 'list_threads_page', 'search_threads_page', 'get_diff']) {
   if (!toolDefinitions.find((tool) => tool.name === name)?.outputSchema) { console.error(`${name} is missing its declared output schema`); process.exit(1); }
 }
 console.log('all tools have descriptions and explicit behavior hints; stable outputs have schemas');

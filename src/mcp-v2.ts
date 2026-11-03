@@ -490,7 +490,14 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
     return { ok: true, ...(asObject(changes) ?? { changes }) };
   }));
 
-  read('get_diff', 'Read actual per-file patch text from Freebuff Desktop when supported. If Desktop diff access is unavailable, event-derived paths may be returned without invented patch content; use get_changes for totals.', { threadId: id, file: z.string().optional(), scope: z.enum(['all', 'uncommitted']).optional() }, (args) => shapeError(async () => {
+  const diffOutput = z.object({
+    ok: z.literal(true), threadId: z.string(), scope: z.enum(['all', 'uncommitted']),
+    source: z.enum(['desktop', 'events', 'none']), changeSummaryAvailable: z.boolean(), changedFileCount: z.number().int(),
+    files: z.array(z.object({ path: z.string(), adds: z.number().optional(), dels: z.number().optional(), diff: z.string().optional(), binary: z.boolean().optional(), tooLarge: z.boolean().optional(), error: z.string().optional() })),
+    requestedFile: z.string().optional(), requestedFileFound: z.boolean().optional(), truncated: z.boolean(), diffAvailable: z.boolean(),
+    note: z.string().optional(), branch: z.string().nullable().optional(), totals: z.record(z.string(), z.unknown()).optional(),
+  });
+  read('get_diff', 'Read actual per-file patch text from Freebuff Desktop when supported. The result identifies whether file paths came from Desktop, bridge events, or no source, and reports when a requested file was not found. Event-derived paths may not cover earlier changes.', { threadId: id, file: z.string().optional(), scope: z.enum(['all', 'uncommitted']).optional() }, (args) => shapeError(async () => {
     const threadId = assertSafeId(args.threadId);
     const scope = args.scope ?? 'all';
     const desktop = desktopChanges(adapter);
@@ -499,12 +506,16 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
     let changes: Record<string, unknown> | undefined;
     try { changes = asObject(await desktop.getChanges(threadId, scope)); } catch { changes = undefined; }
 
-    const changed = Array.isArray(changes?.files)
+    const desktopSummaryAvailable = Array.isArray(changes?.files);
+    const source = desktopSummaryAvailable ? 'desktop' : eventFiles.length ? 'events' : 'none';
+    const rawChanged = desktopSummaryAvailable
       ? (changes!.files as unknown[]).flatMap((entry) => { const record = asObject(entry); const path = typeof record?.path === 'string' ? record.path : undefined; return path ? [{ path, adds: typeof record?.adds === 'number' ? record.adds : undefined, dels: typeof record?.dels === 'number' ? record.dels : undefined }] : []; })
       : eventFiles.map((path) => ({ path, adds: undefined as number | undefined, dels: undefined as number | undefined }));
+    const changed = [...new Map(rawChanged.map((file) => [file.path, file])).values()];
 
     const requested = typeof args.file === 'string' && args.file ? args.file : undefined;
-    const targets = (requested ? changed.filter((f) => f.path === requested) : changed).slice(0, MAX_DIFF_FILES);
+    const requestedMatches = requested ? changed.filter((f) => f.path === requested) : changed;
+    const targets = requestedMatches.slice(0, MAX_DIFF_FILES);
 
     const files: Array<Record<string, unknown>> = [];
     let unavailable = 0;
@@ -526,19 +537,28 @@ export function createV2ServerFromAdapter(adapter: V2Adapter): McpServer {
       files.push(entry);
     }
 
+    const notes = [
+      ...(!desktopSummaryAvailable && source === 'events' ? ['The Desktop change summary is unavailable; these paths come only from progress events observed by this bridge and may omit earlier changes.'] : []),
+      ...(source === 'none' ? ['No Desktop change summary or file events are available for this thread, so the bridge cannot determine whether files changed.'] : []),
+      ...(unavailable ? [`${unavailable} file diff(s) could not be read from the Desktop; no diff text is ever invented.`] : []),
+    ];
+
     return {
       ok: true,
       threadId,
       scope,
+      source,
+      changeSummaryAvailable: desktopSummaryAvailable,
+      changedFileCount: changed.length,
       ...(typeof changes?.branch === 'string' || changes?.branch === null ? { branch: changes?.branch } : {}),
       ...(asObject(changes?.totals) ? { totals: changes!.totals } : {}),
       files,
-      ...(requested ? { requestedFile: requested } : {}),
-      ...(changed.length > targets.length ? { truncated: true, changedFileCount: changed.length } : {}),
+      ...(requested ? { requestedFile: requested, requestedFileFound: requestedMatches.length > 0 } : {}),
+      truncated: !requested && changed.length > targets.length,
       diffAvailable: files.some((f) => typeof f.diff === 'string'),
-      ...(unavailable ? { note: `${unavailable} file diff(s) could not be read from the Desktop; no diff text is ever invented.` } : {}),
+      ...(notes.length ? { note: notes.join(' ') } : {}),
     };
-  }));
+  }), true, diffOutput);
 
   // --- Resources (supplementary; throttled updates) ---
   server.registerResource('projects', 'freebuff://projects', { title: 'Freebuff projects', description: 'Current project snapshots', mimeType: 'application/json' }, async (uri) => ({ contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(await shapeError(() => adapter.backend.listProjects())) }] }));

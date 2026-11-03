@@ -54,6 +54,8 @@ The bridge keeps compatibility names for existing clients. New integrations shou
 
 MCP tool definitions include parameter descriptions and explicit read, write, repeatability, and external-system hints. Agent-run tools are marked as potentially destructive because Freebuff may edit files or run commands. A backend may omit settings it cannot report; the settings tool lists those fields as unavailable instead of guessing. Project creation and thread deletion are not exposed because the supported Freebuff interfaces do not provide verified operations for them.
 
+`get_diff` reports whether its paths came from a Desktop change summary, bridge progress events, or no available source. Event-derived paths may omit earlier changes; an unavailable source is reported instead of looking like an empty change list. A file-filtered request also says whether that path was found.
+
 `run_turn` stays open while Freebuff works. It reports progress while the turn runs. When the MCP app cancels the request, the bridge asks the owning Freebuff backend to stop. A local cancel alone does not prove the work stopped.
 
 Freebuff can ask you to approve a step. The turn stays marked as waiting. Resume checks the same thread. The bridge marks the turn complete only after Desktop confirms a finish. Use `stop_turn` to stop a waiting turn. Command line resume may not prove that the original work finished. The bridge keeps that turn open when its result is uncertain.
