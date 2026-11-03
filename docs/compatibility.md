@@ -4,6 +4,8 @@ Feature support by platform, client, and backend. CI checks protocol and platfor
 
 ## Platforms
 
+The package requires Node.js 22 or newer. CI covers Node.js 22, 24, and 26 on each supported operating system. Node.js 20 is end-of-life and is no longer in the supported matrix.
+
 | Capability | Windows | macOS | Linux |
 | --- | --- | --- | --- |
 | MCP v2 stdio | ✅ | ✅ | ✅ |
@@ -26,6 +28,7 @@ Feature support by platform, client, and backend. CI checks protocol and platfor
 | `run_turn` progress | ✅ (request progress) | ✅ (request progress) | Coalesced, request-scoped notifications |
 | Cancellation | ✅ | ✅ | Transport-native request cancellation aborts the backend; modern HTTP closes the request SSE stream |
 | Resources | ✅ | ✅ | Throttled update notifications |
+| Thread and message paging | ✅ | ✅ | Bounded tool results include totals and continuation offsets |
 | `startup_timeout_sec` / `tool_timeout_sec` | ✅ via installer | n/a | Codex config.toml only |
 | `claude mcp add` / `.mcp.json` | n/a | ✅ via installer | user + project scope |
 

@@ -15,30 +15,30 @@ jobs:
       matrix:
         include:
           - os: ubuntu-slim
-            node: 20
-          - os: ubuntu-slim
             node: 22
           - os: ubuntu-slim
             node: 24
-          - os: windows-2025-vs2026
-            node: 20
+          - os: ubuntu-slim
+            node: 26
           - os: windows-2025-vs2026
             node: 22
           - os: windows-2025-vs2026
             node: 24
-          - os: macos-15
-            node: 20
+          - os: windows-2025-vs2026
+            node: 26
           - os: macos-15
             node: 22
           - os: macos-15
             node: 24
+          - os: macos-15
+            node: 26
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with:
-          version: ${{ matrix.node == 20 && 9 || 11 }}
+          version: 11
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}

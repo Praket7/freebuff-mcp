@@ -12,7 +12,7 @@ Your computer runs the bridge. Your Freebuff installation controls access to you
 
 ## Start here
 
-Node.js 20 is the minimum. Install Freebuff Desktop. The command line app works too. Sign in before connecting an MCP app.
+Node.js 22 or newer is required. Install Freebuff Desktop. The command line app works too. Sign in before connecting an MCP app.
 
 ```sh
 npm install --global freebuff-mcp
@@ -43,11 +43,11 @@ The bridge can find projects and threads, search visible thread metadata or one 
 
 The tools are grouped around the work you can do:
 
-- Find projects and threads with `list_projects`, `list_threads`, `search_threads`, and `get_active_work`. Search one conversation with `search_thread_messages`. Read a thread with `get_thread`, `get_thread_settings`, or `get_thread_messages`. Use `get_thread_messages_page` for bounded results and continue with its `nextOffset` while `hasMore` is true.
+- Find projects and threads with `list_projects`, `list_threads`, `list_threads_page`, `search_threads`, and `get_active_work`. Use `search_threads_page` when a metadata search has many matches. Search one conversation with `search_thread_messages`. Read a thread with `get_thread`, `get_thread_settings`, or `get_thread_messages`. Use `get_thread_messages_page` for bounded results and continue with its `nextOffset` while `hasMore` is true.
 - Read files with `list_project_files` and `get_project_file`. The older `read_project_file` name remains available. Thread attachment metadata is available through `list_thread_attachments`.
 - Start or attach to a session with `create_thread`. The older `start_thread` name remains available. Send a request with `send_message` and follow it with `get_turn` or `watch_turn`, or use `run_turn` to wait for its result.
 - Follow work with `get_thread_progress`, `watch_thread`, `get_thread_progress_summary`, and `watch_active_threads`. Review changed paths and Desktop diffs with `get_changed_files`, `get_changes`, and `get_diff`.
-- Stop work with `stop_turn` or `stop_thread`, resume with `resume_thread`, and request model or reasoning changes with `set_model` and `set_reasoning`. `get_freebuff_status` reports connection, authorization, and actions the bridge supports. The older `freebuff_status` name remains available.
+- Stop work with `stop_turn` or `stop_thread`, resume with `resume_thread`, and request model or reasoning changes with `set_model` and `set_reasoning`. `get_freebuff_status` reports connection, authorization, and actions the bridge supports, including whether the selected backend can list attachment metadata. The older `freebuff_status` name remains available.
 - `search_history` remains available as a compatibility name for `search_threads`. `list_models` remains available as a compatibility name for `get_model_catalog_status`. Current Freebuff backends do not provide a standalone model catalog, so use `get_thread_settings` for the model reported on a thread. Freebuff still controls which models your account can use.
 
 The bridge keeps compatibility names for existing clients. New integrations should use `get_freebuff_status`, `get_project_file`, `create_thread`, `search_threads`, and `get_model_catalog_status` as the canonical names.
@@ -91,6 +91,8 @@ Read [the security notes](SECURITY.md) plus [the privacy notes](PRIVACY.md) befo
 The figures above come from the local suite run on this source revision. They describe automated checks. They do not prove live compatibility with every Freebuff version. The Desktop plus command line acceptance steps are in [the acceptance checklist](docs/acceptance_checklist.md).
 
 ## Build from source
+
+CI covers the maintained Node.js LTS lines 22, 24, and 26 on Windows, macOS, and Linux.
 
 ```sh
 pnpm install --frozen-lockfile

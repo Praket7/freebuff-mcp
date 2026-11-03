@@ -107,6 +107,7 @@ export class CompositeBackend implements FreebuffBackend {
         canResume: writable || (cliCaps?.canResume ?? false),
         canSetModel: writable || (cliCaps?.canSetModel ?? false),
         canSetReasoning: writable || (cliCaps?.canSetReasoning ?? false),
+        canListAttachments: desktopCaps.canListAttachments ?? false,
         notes: [...desktopCaps.notes, ...(cliCaps ? cliCaps.notes : []), ...(cliWriteAuthorized && !writable ? ['Write authorization verified by the CLI backend.'] : [])].filter(Boolean),
       };
       // If Desktop is read-only but CLI is available, note the fallback
@@ -116,7 +117,7 @@ export class CompositeBackend implements FreebuffBackend {
       return merged;
     }
     if (cliCaps) return cliCaps;
-    return { backend: 'desktop', connection: 'unavailable', authorization: 'none', liveProgress: 'unavailable', canCreateSession: false, canSendMessage: false, canStop: false, canResume: false, canSetModel: false, canSetReasoning: false, notes: ['No Freebuff backend is available.'] };
+    return { backend: 'desktop', connection: 'unavailable', authorization: 'none', liveProgress: 'unavailable', canCreateSession: false, canSendMessage: false, canStop: false, canResume: false, canSetModel: false, canSetReasoning: false, canListAttachments: false, notes: ['No Freebuff backend is available.'] };
   }
 
   private backendFor(kind: 'desktop' | 'cli'): FreebuffBackend {

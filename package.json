@@ -45,7 +45,7 @@
     "pack:check": "pnpm build && pnpm pack --pack-destination work"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.4.0",

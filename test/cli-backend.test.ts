@@ -50,6 +50,7 @@ test('cli backend: writes are authorized only after a PTY session succeeds', asy
     assert.equal(before.authorization, 'unknown', 'binary present but no session yet');
     assert.equal(before.canCreateSession, false, 'write capabilities hidden before auth');
     assert.equal(before.canSendMessage, false, 'write capabilities hidden before auth');
+    assert.equal(before.canListAttachments, false, 'the CLI chat store does not expose attachment metadata');
     (backend as unknown as { manager: unknown }).manager = {
       start: async (id: string) => ({ id, pid: 1, output: 'Enter a coding task', exited: false }),
       send: async (id: string) => ({ id, pid: 1, output: 'ok', exited: false }),

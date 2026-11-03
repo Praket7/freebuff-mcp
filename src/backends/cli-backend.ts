@@ -77,6 +77,7 @@ export class CliBackend implements FreebuffBackend {
         canResume: false,
         canSetModel: false,
         canSetReasoning: false,
+        canListAttachments: false,
         notes: ['Freebuff CLI not found on PATH or FREEBUFF_CLI_PATH.'],
       };
     }
@@ -92,6 +93,7 @@ export class CliBackend implements FreebuffBackend {
       canResume: false,
       canSetModel: this.authVerified,
       canSetReasoning: this.authVerified,
+      canListAttachments: false,
       notes: [
         `Freebuff CLI found (${path.basename(cli)}); PTY fallback available.`,
         this.authVerified

@@ -478,6 +478,7 @@ export class DesktopBackend implements FreebuffBackend {
       canResume: writable,
       canSetModel: writable,
       canSetReasoning: writable,
+      canListAttachments: true,
       notes: [`Desktop connected at ${this.connection.base.origin}${this.connection.pid ? ` (PID ${this.connection.pid})` : ''} via ${this.connection.source ?? 'discovery'}.`, writable ? 'Write authorization verified through the launch-ID health check.' : 'Read-only: launch authorization is missing or the health check failed.', this.sseConnected ? 'Live event stream connected.' : 'Live event stream is connecting or unavailable.'],
     };
   }

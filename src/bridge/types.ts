@@ -224,6 +224,8 @@ export interface BackendCapabilities {
   canResume: boolean;
   canSetModel: boolean;
   canSetReasoning: boolean;
+  /** True when the probed backend can list attachment metadata for its own threads. */
+  canListAttachments?: boolean;
   notes: string[];
 }
 

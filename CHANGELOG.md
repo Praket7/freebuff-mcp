@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Enforce mutually exclusive session and thread identifiers in published MCP schemas, before tool handlers run.
+- Add bounded thread-list and metadata-search pages, and report attachment-list capability accurately for Desktop and CLI backends.
+- Preserve message and thread compatibility tools while adding explicit pagination for larger results.
+- Require supported Node.js LTS versions, and run the OS matrix on Node.js 22, 24, and 26.
+
 ## 0.2.7 (2026-11-02)
 
 - Add action-oriented `get_freebuff_status`, `get_project_file`, and `create_thread` names while preserving their existing names as compatibility aliases.

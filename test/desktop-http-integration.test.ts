@@ -166,6 +166,7 @@ test('http: a read-only Desktop does not advertise capabilities it cannot perfor
     assert.equal(caps.canResume, false);
     assert.equal(caps.canSetModel, false);
     assert.equal(caps.canSetReasoning, false);
+    assert.equal(caps.canListAttachments, true, 'attachment metadata is readable without write authorization');
     await assert.rejects(
       () => backend.createSession!({ cwd: desktop.projectPath }),
       (error: unknown) => (error as { code?: string }).code === 'FREEBUFF_DESKTOP_AUTH_REQUIRED',

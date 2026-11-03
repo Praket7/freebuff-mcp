@@ -71,8 +71,8 @@ test('contract: start_thread can be stopped using its returned sessionId alone',
   const started = (await toolOf(server, 'start_thread').handler({ cwd: '/tmp/p' }, ctx)).structuredContent as { sessionId: string; threadId?: string };
   assert.equal(started.threadId, 'thread-1');
 
-  const stopTool = (server as unknown as { _registeredTools: Record<string, { inputSchema: { shape: Record<string, { isOptional?: () => boolean }> }; handler: (args: unknown, ctx: unknown) => Promise<{ structuredContent?: Record<string, unknown> }> }> })._registeredTools.stop_thread!;
-  assert.equal(stopTool.inputSchema.shape.threadId?.isOptional?.(), true, 'threadId is optional when sessionId is supplied');
+  const stopTool = (server as unknown as { _registeredTools: Record<string, { inputSchema: { options: Array<{ shape: Record<string, unknown> }> }; handler: (args: unknown, ctx: unknown) => Promise<{ structuredContent?: Record<string, unknown> }> }> })._registeredTools.stop_thread!;
+  assert.deepEqual(stopTool.inputSchema.options.map((variant) => Object.keys(variant.shape)), [['sessionId'], ['threadId']], 'the schema accepts exactly one required identity');
   const stopped = await stopTool.handler({ sessionId: started.sessionId }, ctx);
   assert.equal(stopped.structuredContent?.ok, true);
   assert.deepEqual(stops, ['thread-1']);

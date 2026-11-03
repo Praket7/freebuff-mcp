@@ -22,10 +22,12 @@ test('MCP v2 server exposes the stable guarded tool surface', () => {
   const server = createV2ServerFromAdapter(adapter);
   const tools = (server as unknown as { _registeredTools: Record<string, unknown> })._registeredTools;
   const names = Object.keys(tools).sort();
-  for (const expected of ['freebuff_status', 'get_freebuff_status', 'list_projects', 'list_threads', 'get_thread', 'get_thread_settings', 'get_thread_messages', 'get_thread_messages_page', 'get_active_work', 'get_turn', 'get_thread_progress', 'get_thread_progress_summary', 'watch_thread', 'watch_turn', 'watch_active_threads', 'list_project_files', 'read_project_file', 'get_project_file', 'list_thread_attachments', 'list_models', 'get_model_catalog_status', 'search_history', 'search_threads', 'search_thread_messages', 'start_thread', 'create_thread', 'send_message', 'run_turn', 'stop_turn', 'stop_thread', 'resume_thread', 'set_model', 'set_reasoning', 'get_changed_files', 'get_diff', 'get_changes']) {
+  for (const expected of ['freebuff_status', 'get_freebuff_status', 'list_projects', 'list_threads', 'list_threads_page', 'get_thread', 'get_thread_settings', 'get_thread_messages', 'get_thread_messages_page', 'get_active_work', 'get_turn', 'get_thread_progress', 'get_thread_progress_summary', 'watch_thread', 'watch_turn', 'watch_active_threads', 'list_project_files', 'read_project_file', 'get_project_file', 'list_thread_attachments', 'list_models', 'get_model_catalog_status', 'search_history', 'search_threads', 'search_threads_page', 'search_thread_messages', 'start_thread', 'create_thread', 'send_message', 'run_turn', 'stop_turn', 'stop_thread', 'resume_thread', 'set_model', 'set_reasoning', 'get_changed_files', 'get_diff', 'get_changes']) {
     assert.ok(names.includes(expected), `missing tool ${expected}`);
   }
-  assert.equal(names.length, 36, `unexpected extra tools: ${names.join(', ')}`);
+  assert.equal(names.length, 38, `unexpected extra tools: ${names.join(', ')}`);
+  const insertionOrder = Object.keys((createV2ServerFromAdapter(makeAdapter()) as any)._registeredTools);
+  assert.deepEqual(insertionOrder, Object.keys((createV2ServerFromAdapter(makeAdapter()) as any)._registeredTools), 'tool registration order stays deterministic for clients that cache tool definitions');
 });
 
 test('canonical search tools search visible threads and bounded messages accurately', async () => {
@@ -47,12 +49,43 @@ test('canonical search tools search visible threads and bounded messages accurat
   assert.deepEqual((messages.structuredContent?.matches as Array<Record<string, unknown>>).map((match) => match.index), [0, 1]);
   assert.equal((messages.structuredContent?.matches as Array<Record<string, unknown>>)[1]?.excerpt, 'Parser fixed');
   assert.equal(messages.structuredContent?.truncated, false);
+  const messageSearchSchema = (server as any)._registeredTools.search_thread_messages.outputSchema as { safeParse(value: unknown): { success: boolean } };
+  assert.equal(messageSearchSchema.safeParse(messages.structuredContent).success, true);
   const page = await toolOf(server, 'get_thread_messages_page').handler({ threadId: 'thread-a', offset: 1, limit: 1 }, ctx);
   assert.equal(page.structuredContent?.totalMessages, 3);
   assert.equal(page.structuredContent?.hasMore, true);
   assert.equal(page.structuredContent?.nextOffset, 2);
   const pageSchema = (server as any)._registeredTools.get_thread_messages_page.outputSchema as { safeParse(value: unknown): { success: boolean } };
   assert.equal(pageSchema.safeParse(page.structuredContent).success, true);
+  const lastPage = await toolOf(server, 'get_thread_messages_page').handler({ threadId: 'thread-a', offset: 2, limit: 1 }, ctx);
+  assert.equal(lastPage.structuredContent?.hasMore, false);
+  assert.equal(lastPage.structuredContent?.nextOffset, null);
+  const threadPage = await toolOf(server, 'list_threads_page').handler({ limit: 1 }, ctx);
+  assert.equal(threadPage.structuredContent?.totalThreads, 2);
+  assert.equal(threadPage.structuredContent?.hasMore, true);
+  const threadPageSchema = (server as any)._registeredTools.list_threads_page.outputSchema as { safeParse(value: unknown): { success: boolean } };
+  assert.equal(threadPageSchema.safeParse(threadPage.structuredContent).success, true);
+  const searchPage = await toolOf(server, 'search_threads_page').handler({ query: 'parser', limit: 1 }, ctx);
+  assert.equal(searchPage.structuredContent?.totalMatches, 1);
+  assert.equal(searchPage.structuredContent?.hasMore, false);
+  const searchPageSchema = (server as any)._registeredTools.search_threads_page.outputSchema as { safeParse(value: unknown): { success: boolean } };
+  assert.equal(searchPageSchema.safeParse(searchPage.structuredContent).success, true);
+});
+
+test('message search marks capped results as truncated and preserves total counts', async () => {
+  const backend = {
+    kind: 'desktop' as const,
+    getMessages: async () => Array.from({ length: 25 }, (_, index) => ({ role: 'user', content: `match ${index}` })),
+    dispose: () => undefined,
+  } as unknown as CompositeBackend;
+  const sessions = new SessionManager(backend as unknown as FreebuffBackend);
+  const server = createV2ServerFromAdapter({ backend, sessions, turns: new TurnManager(sessions) });
+  const response = await toolOf(server, 'search_thread_messages').handler({ threadId: 'thread-a', query: 'match', limit: 10 }, undefined);
+  assert.equal((response.structuredContent?.matches as unknown[]).length, 10);
+  assert.equal(response.structuredContent?.matchesInScannedMessages, 25);
+  assert.equal(response.structuredContent?.truncated, true);
+  const outputSchema = (server as any)._registeredTools.search_thread_messages.outputSchema as { safeParse(value: unknown): { success: boolean } };
+  assert.equal(outputSchema.safeParse(response.structuredContent).success, true);
 });
 
 test('list_thread_attachments routes to the owner and reports unsupported capability', async () => {
@@ -94,6 +127,15 @@ test('write tools reject conflicting bridge and backend identities', async () =>
   assert.equal(resume.structuredContent?.code, 'FREEBUFF_INVALID_INPUT');
 });
 
+test('published input schemas reject conflicting or missing identities before handlers run', () => {
+  const tools = (createV2ServerFromAdapter(makeAdapter()) as any)._registeredTools;
+  assert.equal(tools.send_message.inputSchema.safeParse({ text: 'go', sessionId: 's1', threadId: 't1' }).success, false);
+  assert.equal(tools.run_turn.inputSchema.safeParse({ text: 'go', sessionId: 's1', threadId: 't1' }).success, false);
+  assert.equal(tools.send_message.inputSchema.safeParse({ text: 'new session' }).success, true);
+  assert.equal(tools.stop_thread.inputSchema.safeParse({}).success, false);
+  assert.equal(tools.stop_thread.inputSchema.safeParse({ sessionId: 's1', threadId: 't1' }).success, false);
+});
+
 test('declared output schemas accept structured failures as well as successful results', async () => {
   const backend = {
     kind: 'desktop' as const,
@@ -108,16 +150,33 @@ test('declared output schemas accept structured failures as well as successful r
   assert.equal(outputSchema.safeParse(response.structuredContent).success, true);
 });
 
+test('status reports attachment support from the selected backend instead of implying it', async () => {
+  const backend = {
+    kind: 'desktop' as const,
+    probe: async () => ({ backend: 'cli' as const, connection: 'cli_ready' as const, authorization: 'write_authorized' as const, liveProgress: 'unavailable' as const, canCreateSession: true, canSendMessage: true, canStop: true, canResume: false, canSetModel: true, canSetReasoning: true, canListAttachments: false, notes: [] }),
+    dispose: () => undefined,
+  } as unknown as CompositeBackend;
+  const sessions = new SessionManager(backend as unknown as FreebuffBackend);
+  const server = createV2ServerFromAdapter({ backend, sessions, turns: new TurnManager(sessions) });
+  const response = await toolOf(server, 'get_freebuff_status').handler({}, undefined);
+  assert.equal((response.structuredContent?.capabilities as Record<string, unknown>).canListAttachments, false);
+  const outputSchema = (server as any)._registeredTools.get_freebuff_status.outputSchema as { safeParse(value: unknown): { success: boolean } };
+  assert.equal(outputSchema.safeParse(response.structuredContent).success, true);
+});
+
 test('MCP v2 tools publish complete behavioral hints and described input fields', () => {
   const server = createV2ServerFromAdapter(makeAdapter());
-  const tools = (server as unknown as { _registeredTools: Record<string, { annotations?: Record<string, unknown>; inputSchema: { shape: Record<string, { description?: string }> }; description?: string }> })._registeredTools;
+  const tools = (server as unknown as { _registeredTools: Record<string, { annotations?: Record<string, unknown>; inputSchema: { shape?: Record<string, { description?: string }>; options?: Array<{ shape: Record<string, { description?: string }> }> }; description?: string }> })._registeredTools;
   for (const [name, tool] of Object.entries(tools)) {
     for (const hint of ['readOnlyHint', 'destructiveHint', 'idempotentHint', 'openWorldHint']) {
       assert.equal(typeof tool.annotations?.[hint], 'boolean', `${name} must declare ${hint}`);
     }
     assert.ok(tool.description && tool.description.length >= 30, `${name} needs an actionable description`);
-    for (const [field, schema] of Object.entries(tool.inputSchema.shape)) {
-      assert.ok(schema.description && schema.description.length >= 10, `${name}.${field} needs a useful description`);
+    const variants = tool.inputSchema.options ?? [tool.inputSchema];
+    for (const variant of variants) {
+      for (const [field, schema] of Object.entries(variant.shape ?? {})) {
+        assert.ok(schema.description && schema.description.length >= 10, `${name}.${field} needs a useful description`);
+      }
     }
   }
   assert.equal(tools.run_turn!.annotations?.destructiveHint, true, 'turns may cause Freebuff to modify project files or run commands');
