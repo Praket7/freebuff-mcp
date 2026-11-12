@@ -111,6 +111,20 @@ export function cliTerminalIsReady(screen: string): boolean {
 
 export function cliSessionIsOver(text: string): boolean { return CLI_SESSION_OVER.test(text); }
 
+/**
+ * Prepare text for a PTY-backed CLI prompt. ConPTY can surface each LF as an
+ * Enter key event instead of preserving a bracketed paste, so Windows prompts
+ * must be single-line to guarantee one submission. POSIX PTYs preserve the
+ * bracketed multiline paste and keep the original line breaks.
+ */
+export function normalizeCliPrompt(text: string, platform = process.platform): string {
+  const normalized = text.replace(/\r\n?/g, '\n');
+  const platformSafe = platform === 'win32' ? normalized.replace(/\n+/g, ' ') : normalized;
+  return platformSafe
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u001B]/g, '')
+    .replace(/\x1b\[201~/g, ' ');
+}
+
 function cliSessionNeedsRejoin(text: string): boolean {
   let sawSessionOver = false;
   let sawCrashResume = false;
@@ -509,6 +523,7 @@ export async function waitForCliTurnEnd(
 
 export class CliPtyManager {
   private sessions = new Map<string, { term: pty.IPty; cwd: string; startedAt: number; conversationId?: string; output: string; screen: CliTerminalScreen; exited: boolean; exitCode?: number; exitPromise: Promise<void>; resolveExit: () => void }>();
+  constructor(private readonly inputPlatform = process.platform) {}
   async start(id: string, cwd: string, continueId?: string): Promise<CliSessionSnapshot> {
     const safeId = assertSafeId(id);
     const existing = this.sessions.get(safeId);
@@ -581,19 +596,18 @@ export class CliPtyManager {
     if (!state || state.exited) throw new Error('FREEBUFF_CLI_SESSION_EXITED');
     await new Promise<void>((resolve) => setTimeout(resolve, 300));
     await this.assertSessionAvailable(state);
-    // Multiline prompts are pasted inside a bracketed-paste envelope, where a
-    // bare LF is literal text (only CR would submit early). Preserve newlines;
-    // strip only CR and unsafe terminal controls.
-    const clean = text.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u001B]/g, '').replace(/\x1b\[201~/g, ' ');
+    const clean = normalizeCliPrompt(text, this.inputPlatform);
     state.term.write('\x15');
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
-    state.term.write(`\x1b[200~${clean}\x1b[201~`);
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
     state.conversationId ??= (await findLatestCliConversationId(cwd, state.startedAt - 1000)) ?? undefined;
     const baseline = state.conversationId
       ? await readCliTurnMarkers(cwd, state.conversationId).catch(() => ({ capturedAtMs: Date.now(), runStateMtimeMs: 0, logBytes: 0, logMtimeMs: 0 }))
       : { capturedAtMs: Date.now(), runStateMtimeMs: 0, logBytes: 0, logMtimeMs: 0 };
     onBeforeSubmit?.(baseline);
+    // Capture completion markers before writing any prompt text. Some PTY
+    // implementations can turn embedded line breaks into submit key events.
+    state.term.write(`\x1b[200~${clean}\x1b[201~`);
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
     state.term.write('\r');
     return { id: session.id, conversationId: state.conversationId, pid: state.term.pid, output: state.output, screenText: state.screen.text(), exited: state.exited, exitCode: state.exitCode };
   }

@@ -14,6 +14,7 @@ The package requires Node.js 22 or newer. CI covers Node.js 22, 24, and 26 on ea
 | Desktop writes (launch-ID health check) | ✅ mock fixtures | ✅ mock fixtures | ✅ mock fixtures |
 | SSE live progress | ✅ | ✅ | ✅ |
 | CLI PTY fallback (ConPTY/POSIX) | ✅ | ✅ | ✅ |
+| CLI multiline prompts | Line breaks become spaces to avoid ConPTY treating each line as Enter | Preserved | Preserved |
 | CLI cancellation + stuck-child cleanup | ✅ | ✅ | ✅ |
 | HTTP transport (loopback + bearer) | ✅ | ✅ | ✅ |
 | Codex installer | ✅ | ✅ | ✅ |

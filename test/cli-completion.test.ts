@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { CliBackend } from '../src/backends/cli-backend.js';
-import { CliPtyManager, detectCliRateLimit, readCliConversationSnapshot, readCliTurnMarkers, waitForCliTurnEnd } from '../src/pty.js';
+import { CliPtyManager, detectCliRateLimit, normalizeCliPrompt, readCliConversationSnapshot, readCliTurnMarkers, waitForCliTurnEnd } from '../src/pty.js';
 
 /**
  * P0: the CLI must never invent completion.
@@ -279,7 +279,43 @@ test('cli startup ignores crash-recovery markers that predate this PTY process',
   });
 });
 
-test('cli submit baseline is captured after paste and before Enter', async () => {
+test('cli prompt normalization prevents Windows multiline text from becoming Enter key events', () => {
+  assert.equal(normalizeCliPrompt('first line\nsecond line\r\nthird line', 'win32'), 'first line second line third line');
+  assert.equal(normalizeCliPrompt('first line\nsecond line', 'darwin'), 'first line\nsecond line');
+  assert.equal(normalizeCliPrompt('first line\rsecond line', 'linux'), 'first line\nsecond line');
+});
+
+test('cli PTY sends a Windows multiline prompt as one bracketed paste and one submit key', async () => {
+  await withHome(async (home) => {
+    const cwd = path.join(home, 'proj');
+    const conv = 'conv-windows-multiline';
+    await makeConv(home, cwd, conv);
+    const writes: string[] = [];
+    const manager = new CliPtyManager('win32');
+    const session = {
+      term: { pid: process.pid, write: (data: string) => { writes.push(data); }, kill: () => undefined },
+      cwd,
+      startedAt: Date.now(),
+      conversationId: conv,
+      output: '',
+      screen: { text: () => 'Enter a coding task or / for commands' },
+      exited: false,
+    };
+    (manager as unknown as { sessions: Map<string, unknown> }).sessions.set('pty-windows-multiline', session);
+    try {
+      await manager.send('pty-windows-multiline', 'Inspect the project\nList problems\nReport findings', cwd);
+      const paste = writes.find((write) => write.startsWith('\x1b[200~'));
+      assert.ok(paste, 'one bracketed paste payload is sent');
+      assert.equal(paste, '\x1b[200~Inspect the project List problems Report findings\x1b[201~');
+      assert.equal(writes.filter((write) => write === '\r').length, 1, 'one Enter key submits the whole prompt');
+      assert.equal(writes.some((write) => write !== '\r' && /[\r\n]/.test(write)), false, 'prompt body cannot become extra Enter key events');
+    } finally {
+      manager.dispose();
+    }
+  });
+});
+
+test('cli submit baseline is captured before the paste can trigger input', async () => {
   await withHome(async (home) => {
     const cwd = path.join(home, 'proj');
     const conv = 'conv-submit-baseline';
@@ -293,7 +329,7 @@ test('cli submit baseline is captured after paste and before Enter', async () =>
       term: {
         pid: process.pid,
         write: (data: string) => {
-          if (data === '\r') {
+          if (data.startsWith('\x1b[200~')) {
             fsSync.appendFileSync(path.join(dir, 'log.jsonl'), `${JSON.stringify({ msg: '[chat-runtime] Freebuff session over; holding queued messages until rejoin' })}\n`);
           }
         },
@@ -310,7 +346,7 @@ test('cli submit baseline is captured after paste and before Enter', async () =>
     try {
       const result = await manager.send('pty-submit-baseline', 'run a small task', cwd, undefined, (markers) => { baseline = markers; });
       assert.equal(result.conversationId, conv);
-      assert.equal(baseline?.logBytes, initialBytes);
+      assert.equal(baseline?.logBytes, initialBytes, 'completion baseline includes any effects caused by pasted input');
       assert.ok((await fs.stat(path.join(dir, 'log.jsonl'))).size > initialBytes);
     } finally {
       manager.dispose();
